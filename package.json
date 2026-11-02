@@ -1,0 +1,13 @@
+{
+  "name": "mrow",
+  "private": true,
+  "packageManager": "pnpm@12.11.2",
+  "scripts": {
+    "dev": "pnpm --filter @mrow/web dev",
+    "build:web": "pnpm --filter @mrow/web build",
+    "typecheck": "pnpm -r typecheck",
+    "mac:build": "cd apps/mac && swift build",
+    "mac:test": "cd apps/mac && swift build && .build/debug/Mrow --selftest",
+    "mac:run": "cd apps/mac && CONFIGURATION=debug scripts/bundle.sh && open dist/Mrow.app"
+  }
+}

@@ -1,0 +1,28 @@
+name: Website
+
+on:
+  push:
+    branches: [main]
+    paths: ["apps/web/**", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".github/workflows/web.yml"]
+  pull_request:
+    paths: ["apps/web/**", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".github/workflows/web.yml"]
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @mrow/web typecheck
+      - run: pnpm --filter @mrow/web build

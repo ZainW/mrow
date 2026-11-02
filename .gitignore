@@ -1,0 +1,28 @@
+.DS_Store
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+
+# Claude Code session scratch
+.claude/.cc-writes/
+**/.claude/.cc-writes/
+.claude/settings.local.json
+
+# Mac app build output
+apps/mac/.build/
+apps/mac/dist/
+
+# Recorded from real work queues: confidential, never commit.
+# (Snapshots and benchmark fixtures contain other people's merge requests and code.)
+apps/mac/screenshots/
+apps/mac/bench/fixtures/
+apps/mac/ui-polish.diff
+
+# Web build output
+apps/web/.output/
+apps/web/.tanstack/
+apps/web/.nitro/
+apps/web/.vinxi/
+apps/web/dist/
