@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Catches what shouldn't land in a public repo, in what changed since <base>:
+# Catches what shouldn't land in a public repo, in what changed since <base>, or in every
+# tracked file without one:
 #   .github/scripts/hygiene.sh origin/main
 # - recordings and screenshots of real work queues (confidential)
-# - images or JSON outside the places that hold the app's and site's own assets
+# - images outside the places that hold the app's and site's own assets
 # - credentials and private keys
 # - files over 2 MB
 # and checks the update key is still a 32-byte hex key.
 set -euo pipefail
 
-BASE="${1:?usage: hygiene.sh <base ref>}"
+BASE="${1:-}"
 cd "$(git rev-parse --show-toplevel)"
 fail=0
 problem() {
@@ -16,10 +17,18 @@ problem() {
   fail=1
 }
 
-mapfile -t added < <(git diff --name-only --diff-filter=AR "$BASE"...HEAD)
-mapfile -t changed < <(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD)
+# Plain read loops rather than mapfile, so macOS's bash 3 runs it too.
+added=()
+changed=()
+if [[ -n "$BASE" ]] && git rev-parse -q --verify "$BASE^{commit}" >/dev/null; then
+  while IFS= read -r f; do added+=("$f"); done < <(git diff --name-only --diff-filter=AR "$BASE"...HEAD)
+  while IFS= read -r f; do changed+=("$f"); done < <(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD)
+else
+  while IFS= read -r f; do added+=("$f"); done < <(git ls-files)
+  changed=(${added[@]+"${added[@]}"})
+fi
 
-for f in "${added[@]}"; do
+for f in ${added[@]+"${added[@]}"}; do
   case "$f" in
     apps/desktop/screenshots/* | apps/desktop/bench/* | */results-*.json)
       problem "$f" "Screenshots and bench recordings come from real work queues; keep them out of the repo." ;;
@@ -33,7 +42,7 @@ for f in "${added[@]}"; do
 done
 
 secrets='(glpat-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
-for f in "${changed[@]}"; do
+for f in ${changed[@]+"${changed[@]}"}; do
   [[ -f "$f" ]] || continue
   if grep -IEnq "$secrets" "$f"; then
     problem "$f" "Looks like a credential or private key."

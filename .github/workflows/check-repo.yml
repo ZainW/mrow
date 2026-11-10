@@ -24,7 +24,8 @@ jobs:
       - name: Nothing confidential or secret added
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
-        run: .github/scripts/hygiene.sh "${BASE:-HEAD~1}"
+        # A run by hand has no pull request, so it scans every file.
+        run: .github/scripts/hygiene.sh "$BASE"
       - name: Shell scripts
         run: shellcheck --severity=warning apps/desktop/scripts/*.sh .github/scripts/*.sh
       - name: Workflows
