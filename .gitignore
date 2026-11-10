@@ -1,0 +1,28 @@
+.DS_Store
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+
+# Claude Code session scratch
+.claude/.cc-writes/
+**/.claude/.cc-writes/
+.claude/settings.local.json
+
+# App build output
+apps/desktop/target/
+apps/desktop/dist/
+
+# Recorded from real work queues: confidential, never commit.
+# (Snapshots and benchmark fixtures contain other people's merge requests and code.)
+apps/desktop/screenshots/
+apps/desktop/bench/
+
+# Web build output
+apps/web/.output/
+apps/web/.tanstack/
+apps/web/.nitro/
+apps/web/.vinxi/
+apps/web/dist/
+.claude/worktrees/

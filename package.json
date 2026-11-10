@@ -1,0 +1,13 @@
+{
+  "name": "mrow",
+  "private": true,
+  "packageManager": "pnpm@12.11.2",
+  "scripts": {
+    "dev": "pnpm --filter @mrow/web dev",
+    "build:web": "pnpm --filter @mrow/web build",
+    "typecheck": "pnpm -r typecheck",
+    "app:build": "cd apps/desktop && cargo build",
+    "app:test": "cd apps/desktop && cargo test",
+    "app:install": "cd apps/desktop && scripts/install.sh"
+  }
+}

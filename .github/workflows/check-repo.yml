@@ -1,0 +1,33 @@
+# Every pull request: quick checks that need no build. Workflows and shell scripts lint clean,
+# and nothing that shouldn't be public is added (see .github/scripts/hygiene.sh).
+name: Check repo
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Nothing confidential or secret added
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: .github/scripts/hygiene.sh "${BASE:-HEAD~1}"
+      - name: Shell scripts
+        run: shellcheck --severity=warning apps/desktop/scripts/*.sh .github/scripts/*.sh
+      - name: Workflows
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 "$RUNNER_TEMP"
+          "$RUNNER_TEMP/actionlint" -color

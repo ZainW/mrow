@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Mrow
+Comment=A review queue for GitLab and GitHub
+Exec=mrow
+Icon=com.zain.mrow
+Terminal=false
+Categories=Development;
+StartupWMClass=com.zain.mrow
