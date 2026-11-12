@@ -472,6 +472,11 @@ fn main() {
     if headless {
         // Snapshots draw from default settings and never write the person's.
         prefs::set_ephemeral(Some(prefs::Prefs::default()));
+    } else if !rune::single_instance(if cfg!(debug_assertions) { "com.zain.mrow.debug" } else { "com.zain.mrow" }) {
+        // Linux starts a process per launch: a second one hands over to the Mrow already running,
+        // window closed or not, which shows its window (`on_reopen`). macOS does this itself. A
+        // debug build runs beside an installed copy.
+        return;
     }
     // On Linux the window reports this as its Wayland app_id / X11 WM_CLASS, so the desktop
     // matches it to packaging/linux/com.zain.mrow.desktop and its icon. Same id as the macOS bundle.
