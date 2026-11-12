@@ -60,6 +60,17 @@ pub struct Prefs {
     pub appearance: Appearance,
     /// The agent CLI for Ask; blank finds `cursor-agent`/`agent` on its own.
     pub agent_path: String,
+    /// Ask: the command for each other agent ("claude", "opencode", "pi"), with its arguments,
+    /// when it isn't found on its own. Claude's is its ACP adapter.
+    pub agent_commands: BTreeMap<String, String>,
+    /// Ask: comments the agent drafted that the user posted, by `Proposal::key`, so a reopened
+    /// chat doesn't offer them again.
+    pub ask_posted: BTreeSet<String>,
+    /// Ask: the agent new chats use.
+    pub ask_agent: String,
+    /// Ask: each agent's models, picks and effort settings, by agent ("cursor", "claude"…).
+    /// Cursor's moved here from the `ask_model…` fields below, which are only read once.
+    pub ask_rosters: BTreeMap<String, Value>,
     /// When each merge request was last opened here (seconds since 1970), by global ID.
     pub last_seen: BTreeMap<String, f64>,
     /// Merge requests open in tabs, in order, by global ID.
@@ -71,7 +82,7 @@ pub struct Prefs {
     pub known_requests_initialized: bool,
     /// Ask: project path → local clone.
     pub checkouts: BTreeMap<String, String>,
-    /// Ask: merge request ID → agent session ID.
+    /// Ask: merge request ID → agent session ID, as "agent\tsession" (a bare ID is Cursor's).
     pub ask_sessions: BTreeMap<String, String>,
     pub ask_model: String,
     pub ask_recent_models: Vec<String>,
@@ -105,6 +116,10 @@ impl Default for Prefs {
             sidebar_visible: true,
             appearance: Appearance::System,
             agent_path: String::new(),
+            agent_commands: BTreeMap::new(),
+            ask_posted: BTreeSet::new(),
+            ask_agent: String::new(),
+            ask_rosters: BTreeMap::new(),
             last_seen: BTreeMap::new(),
             tabs: Vec::new(),
             viewed_files: BTreeMap::new(),

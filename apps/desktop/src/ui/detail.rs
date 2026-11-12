@@ -843,7 +843,7 @@ fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, note: &Note) -> El 
 }
 
 /// The key path of a draft's text field, for focusing it.
-fn draft_field_key(key: &DraftKey) -> String {
+pub fn draft_field_key(key: &DraftKey) -> String {
     format!("{}/input", composer_key(key))
 }
 

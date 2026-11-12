@@ -1,20 +1,23 @@
-//! "Ask Cursor": a chat about the merge request beside the card, with Cursor's agent in
-//! read-only ask mode. A greeting and the composer in the middle until the first question, then
-//! the transcript with the composer at the foot.
+//! "Ask": a chat about the merge request beside the card, with a coding agent (Cursor, Claude,
+//! opencode or pi) that can read and search the clone. A greeting and the composer in the middle
+//! until the first question, then the transcript with the composer at the foot. Comments the
+//! agent drafts show as cards, posted only when the user approves each one.
 
 use std::path::PathBuf;
 
 use rune::text::Span;
 use rune::{Cursor, Drag, El, FileDialogOptions, Phase as DragPhase, PopupItem, PopupMenu, ScrollSpec, Tx, col, el, icon, rich, row, text};
-use rune_kit::Kit;
+use rune_kit::{Kit, TextArea};
 
-use crate::app::App;
+use crate::app::{App, DetailTab, DraftKey, ProposalState, ProposalTarget};
+use crate::data::ask::agents::AgentKind;
 use crate::data::ask::citations;
 use crate::data::ask::model::{AgentModel, MAKERS, featured};
+use crate::data::ask::proposals::{self, Proposal, Segment};
 use crate::data::ask::{Chat, Entry, EntryKind, Phase, wall};
 use crate::data::models::MergeRequest;
 use crate::data::prefs;
-use crate::ui::components::{ChromeButton, copy_button};
+use crate::ui::components::{ChromeButton, action_button, copy_button};
 use crate::ui::icons as I;
 use crate::ui::markdown::{self, Doc};
 use crate::ui::theme::LineHeight as _;
@@ -45,7 +48,7 @@ pub fn panel(s: &App, p: &Pal, k: &Kit, item: &MergeRequest) -> El {
     let mut c = col()
         .key("ask")
         .role("complementary")
-        .label("Ask Cursor")
+        .label(format!("Ask {}", s.ask.agent_for(&item.id).name()))
         .w(s.ask_width)
         .h_full()
         .radius(CARD_RADIUS)
@@ -83,16 +86,7 @@ fn resize_handle() -> El {
 
 fn header(s: &App, p: &Pal, item: &MergeRequest, empty: bool) -> El {
     let has_entries = s.ask.chat(&item.id).is_some_and(|c| !c.entries.is_empty());
-    let mut r = row()
-        .key("ask-header")
-        .w_full()
-        .h(40.0)
-        .pl(14.0)
-        .pr(8.0)
-        .gap(6.0)
-        .center_y()
-        .child(icon(&I::BUBBLE_TEXT, 13.0).color(p.accent))
-        .child(text("Ask Cursor").font(ui(13.0, SEMIBOLD)).color(p.text).single_line());
+    let mut r = row().key("ask-header").w_full().h(40.0).pl(14.0).pr(8.0).gap(6.0).center_y().child(agent_chip(s, p, item));
     if !empty {
         r = r.child(text(item.reference()).font(mono(11.5, 400.0)).color(p.tertiary).single_line().help(item.title.clone()));
     }
@@ -118,6 +112,44 @@ fn header(s: &App, p: &Pal, item: &MergeRequest, empty: bool) -> El {
         )
 }
 
+/// "Ask Cursor ▾": picks the agent. Picking another for a chat that has started starts afresh.
+fn agent_chip(s: &App, p: &Pal, item: &MergeRequest) -> El {
+    let agent = s.ask.agent_for(&item.id);
+    let started = s.ask.chat(&item.id).is_some_and(|c| !c.is_empty());
+    let id = item.id.clone();
+    row()
+        .key("ask-agent")
+        .role("button")
+        .label(format!("Ask {}", agent.name()))
+        .help(if started { "Choose the agent. Another agent starts a new chat." } else { "Choose the agent" })
+        .h(28.0)
+        .ml(-6.0)
+        .px(6.0)
+        .gap(6.0)
+        .center_y()
+        .radius(7.0)
+        .hover(p.hover)
+        .press_scale(0.97)
+        .child(icon(&I::BUBBLE_TEXT, 13.0).color(p.accent))
+        .child(text(format!("Ask {}", agent.name())).font(ui(13.0, SEMIBOLD)).color(p.text).single_line())
+        .child(icon(&I::CHEVRON_DOWN, 8.0).color(p.tertiary))
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| open_agent_menu(s, tx, &id))
+}
+
+pub fn open_agent_menu(s: &mut App, tx: &mut Tx, chat: &str) {
+    let current = s.ask.agent_for(chat);
+    let mut menu = PopupMenu::new();
+    for kind in AgentKind::ALL {
+        menu = menu.item(PopupItem::new(kind.raw(), format!("{} — {}", kind.name(), kind.blurb())).checked(kind == current));
+    }
+    let chat = chat.to_string();
+    tx.popup_menu(menu, "ask-agent", move |s: &mut App, picked, tx: &mut Tx| {
+        let Some(kind) = picked.as_deref().and_then(AgentKind::from_raw) else { return };
+        s.ask.choose_agent(kind, Some(&chat));
+        focus_composer(tx);
+    });
+}
+
 pub fn focus_composer(tx: &mut Tx) {
     tx.focus(format!("{COMPOSER}/input"), false);
 }
@@ -138,11 +170,14 @@ fn greeting(s: &App, p: &Pal, item: &MergeRequest) -> El {
                 .child(text(format!("Ask about {}", item.reference())).font(serif(23.0, SEMIBOLD)).color(p.text).single_line()),
         )
         .child(
-            text("Cursor reads the description, the diff, the threads and your clone. It's read-only: nothing is edited or posted.")
-                .font(ui(12.5, 400.0).lines(1.45))
-                .color(p.secondary)
-                .wrap()
-                .align(rune::Align::Center),
+            text(format!(
+                "{} reads the description, the diff, the threads and your clone. It can't edit files or run commands, and the comments it drafts post only when you approve them.",
+                s.ask.agent_for(&item.id).name()
+            ))
+            .font(ui(12.5, 400.0).lines(1.45))
+            .color(p.secondary)
+            .wrap()
+            .align(rune::Align::Center),
         )
 }
 
@@ -259,7 +294,7 @@ fn transcript(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, chat: &Chat) -> El
         let label = if chat.reopening {
             "Opening the earlier chat".to_string()
         } else if chat.phase == Phase::Starting {
-            "Starting Cursor".to_string()
+            format!("Starting {}", chat.agent.name())
         } else {
             verb(chat.turn_started).to_string()
         };
@@ -319,23 +354,178 @@ fn question(p: &Pal, item: &MergeRequest, e: &Entry, context: Option<&Entry>) ->
 
 #[allow(clippy::too_many_arguments)]
 fn answer(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, chat: &Chat, e: &Entry, live: bool, copy: Option<String>, latest: bool) -> El {
-    let source = expanded(&e.text, chat.checkout.as_deref());
-    let key = format!("ask-{}-{}", item.id, e.id);
-    let doc = Doc { key: &key, source: &source, base: item.project_url(), size: 14.0, serif: true };
-    let mut c = col().key(format!("a-{}", e.id)).w_full().gap(6.0).hover_group().child(markdown::markdown(s, p, k, doc));
+    let mut c = col().key(format!("a-{}", e.id)).w_full().gap(6.0).hover_group();
+    let segments = if proposals::has_comments(&e.text) { proposals::split(&e.text) } else { vec![Segment::Text(e.text.clone())] };
+    for (index, segment) in segments.into_iter().enumerate() {
+        c = c.child(match segment {
+            Segment::Text(text) => {
+                let source = expanded(&text, chat.checkout.as_deref());
+                let key = format!("ask-{}-{}-{index}", item.id, e.id);
+                markdown::markdown(s, p, k, Doc { key: &key, source: &source, base: item.project_url(), size: 14.0, serif: true })
+            }
+            Segment::Comment(proposal) => proposal_card(s, p, k, item, &proposal.key(&item.id), proposal),
+        });
+    }
     if live {
         c = c.child(spark(p, s, true, 14.0).mt(2.0));
     } else if let Some(copy) = copy {
-        // Copy keeps the markdown, ready to paste into a comment.
-        let button = row()
+        // Both keep the markdown: Copy for anywhere, Comment for this merge request's comment box.
+        let id = item.id.clone();
+        let body = copy.clone();
+        let comment = row()
+            .key(format!("comment-{}", e.id))
+            .role("button")
+            .label("Comment")
+            .help(format!("Put this answer in the {}'s comment box, to edit and post", item.kind().noun()))
+            .h(22.0)
+            .px(5.0)
+            .gap(4.0)
+            .center_y()
+            .radius(6.0)
+            .hover(p.hover)
+            .child(icon(&I::BUBBLE_TEXT, 11.0).color(p.tertiary))
+            .child(text("Comment").font(ui(11.5, 400.0)).color(p.tertiary))
+            .on_press_tx(move |s: &mut App, tx: &mut Tx| draft_comment(s, tx, &id, &body));
+        let buttons = row()
             .gap(4.0)
             .center_y()
             .ml(-5.0)
             .child(copy_button(s, p, &format!("answer-{}", e.id), copy, "Copy Answer"))
             .child(text("Copy").font(ui(11.5, 400.0)).color(p.tertiary));
-        c = c.child(if latest { button } else { button.group_opacity(0.0, 1.0) });
+        // An answer with drafted comments posts through their cards instead.
+        let buttons = if proposals::has_comments(&e.text) { buttons } else { buttons.child(comment.ml(6.0)) };
+        c = c.child(if latest { buttons } else { buttons.group_opacity(0.0, 1.0) });
     }
     c
+}
+
+/// A comment the agent drafted, shown whole before anything posts: where it goes, its text
+/// (editable here), and Post. Posting is the user's click, never the agent's.
+fn proposal_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, key: &str, proposal: Proposal) -> El {
+    let state = s.proposal_states.get(key).copied();
+    let editing = s.proposal_editing.contains(key) && state != Some(ProposalState::Posted);
+    let short = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    let target = s.proposal_target(&item.id, &proposal);
+    let waiting = matches!(target, ProposalTarget::Waiting);
+    let (place, warning) = match target {
+        ProposalTarget::Waiting => (format!("On {} line {}", short(proposal.path.as_deref().unwrap_or("")), proposal.line.unwrap_or(0)), None),
+        ProposalTarget::Line(file, line) => {
+            let number = line.new_number.or(line.old_number).unwrap_or(0);
+            (format!("On {} line {number}", short(&file.new_path)), None)
+        }
+        ProposalTarget::Whole { missed: None } => (format!("On {}", item.reference()), None),
+        ProposalTarget::Whole { missed: Some((path, Some(line))) } => (
+            format!("On {}", item.reference()),
+            Some(format!("Line {line} of {} isn't in the diff, so this posts on the {} with its place written in.", short(&path), item.kind().noun())),
+        ),
+        ProposalTarget::Whole { missed: Some((path, None)) } => (
+            format!("On {}", item.reference()),
+            Some(format!("It names {} but no line, so it posts on the {} with the file written in.", short(&path), item.kind().noun())),
+        ),
+    };
+    let status = match state {
+        _ if proposal.open => "Drafting…".to_string(),
+        None if waiting => "Loading the diff…".into(),
+        Some(ProposalState::Posting) => "Posting…".into(),
+        Some(ProposalState::Posted) => format!("Posted to {}", item.kind().name()),
+        Some(ProposalState::Failed) => "Couldn't post".into(),
+        None => "Not posted".into(),
+    };
+    let tint = match state {
+        Some(ProposalState::Posted) => p.green,
+        Some(ProposalState::Failed) => p.red,
+        _ => p.tertiary,
+    };
+    let mut head = row()
+        .w_full()
+        .h(30.0)
+        .px(12.0)
+        .gap(6.0)
+        .center_y()
+        .child(icon(&I::BUBBLE_TEXT, 11.0).color(p.accent))
+        .child(text(format!("Draft comment · {place}")).font(ui(11.5, MEDIUM)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
+        .child(el().grow(1.0));
+    if state == Some(ProposalState::Posted) {
+        head = head.child(icon(&I::CHECK, 11.0).color(tint));
+    }
+    head = head.child(text(status).font(ui(11.5, 400.0)).color(tint).single_line());
+    let body_text = s.proposal_text(key, &item.id, &proposal);
+    let body = if editing {
+        let edit_key = key.to_string();
+        let empty = rune::TextEdit::new("");
+        let edit = s.proposal_edits.get(key).unwrap_or(&empty);
+        el().w_full().padding(8.0).child(
+            TextArea::new(edit)
+                .width(None)
+                .placeholder("The comment, as it will be posted")
+                .auto_grow(4, 16)
+                .on_edit(move |s: &mut App| s.proposal_edits.entry(edit_key.clone()).or_insert_with(|| rune::TextEdit::new("")))
+                .build(k)
+                .border(1.0, p.line)
+                .radius(8.0)
+                .padding(10.0),
+        )
+    } else {
+        let doc_key = format!("proposal-{key}");
+        el().w_full().px(12.0).py(10.0).child(markdown::markdown(
+            s,
+            p,
+            k,
+            Doc { key: &doc_key, source: &body_text, base: item.project_url(), size: 13.5, serif: false },
+        ))
+    };
+    let mut card = col()
+        .key(format!("proposal-{key}"))
+        .w_full()
+        .radius(10.0)
+        .fill(p.well.alpha(0.55))
+        .border(1.0, if state == Some(ProposalState::Posted) { p.green.alpha(0.35) } else { p.strong_line })
+        .clip_rounded(10.0)
+        .child(head)
+        .child(el().w_full().h(1.0).fill(p.line))
+        .child(body);
+    if let Some(warning) = warning.filter(|_| state != Some(ProposalState::Posted)) {
+        card = card.child(
+            row()
+                .w_full()
+                .px(12.0)
+                .pb(8.0)
+                .gap(6.0)
+                .items_start()
+                .child(icon(&I::WARNING, 11.0).color(p.amber).mt(2.0))
+                .child(text(warning).font(ui(11.5, 400.0).lines(1.4)).color(p.secondary).wrap().grow(1.0).shrink().min_w(0.0)),
+        );
+    }
+    if proposal.open || matches!(state, Some(ProposalState::Posting | ProposalState::Posted)) {
+        return card;
+    }
+    let can_post = !body_text.trim().is_empty() && s.store.busy.is_none() && !waiting;
+    let (edit_key, edit_text) = (key.to_string(), body_text.clone());
+    let edit_button =
+        action_button(p, format!("edit-{key}"), Some(&I::PENCIL_SQUARE), if editing { "Done" } else { "Edit" }, false, true).on_press(move |s: &mut App| {
+            if !s.proposal_editing.remove(&edit_key) {
+                s.proposal_edits.entry(edit_key.clone()).or_insert_with(|| rune::TextEdit::new(edit_text.clone()));
+                s.proposal_editing.insert(edit_key.clone());
+            }
+        });
+    let (post_key, id, posted) = (key.to_string(), item.id.clone(), proposal.clone());
+    let post_label = if state == Some(ProposalState::Failed) { "Try Again" } else { "Post" };
+    let post_button = action_button(p, format!("post-{key}"), Some(&I::BUBBLE_TEXT), post_label, true, can_post)
+        .help(format!("Post this comment to {} as you", item.kind().name()))
+        .on_press(move |s: &mut App| s.post_proposal(&post_key, &id, &posted));
+    card.child(row().w_full().px(12.0).pb(10.0).gap(8.0).center_y().child(el().grow(1.0)).child(edit_button).child(post_button))
+}
+
+/// Adds an answer to the merge request's comment draft and opens the Discussion tab on it, with
+/// the caret in the box. Nothing posts until the comment is sent from there.
+fn draft_comment(s: &mut App, tx: &mut Tx, id: &str, body: &str) {
+    let key = DraftKey::Comment(id.to_string());
+    let draft = s.draft_mut(&key);
+    let text = if draft.text.trim().is_empty() { body.to_string() } else { format!("{}\n\n{body}", draft.text.trim_end()) };
+    *draft = rune::TextEdit::new(text);
+    s.detail_tabs.insert(id.to_string(), DetailTab::Discussion);
+    tx.scroll_to_bottom(format!("page-{id}"));
+    tx.focus(crate::ui::detail::draft_field_key(&key), false);
 }
 
 thread_local! {
@@ -618,7 +808,7 @@ fn step_row(s: &App, p: &Pal, chat: &Chat, step: &Entry, live: bool, last: bool)
             col().w_full().child(r)
         }
         EntryKind::Declined => {
-            col().child(el().min_h(18.0).center_y().child(text(format!("{}: Mrow is read-only", step.text)).font(ui(12.0, 400.0)).color(p.secondary).wrap()))
+            col().child(el().min_h(18.0).center_y().child(text(format!("{}: not allowed in Mrow", step.text)).font(ui(12.0, 400.0)).color(p.secondary).wrap()))
         }
         _ => col(),
     };
@@ -734,7 +924,7 @@ fn composer(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, chat: Option<&Chat>)
                 .pb(8.0)
                 .gap(2.0)
                 .center_y()
-                .child(clone_chip(p, item, chat))
+                .child(clone_chip(p, item, chat, s.ask.agent_for(&item.id)))
                 .child(el().grow(1.0).min_w(6.0))
                 .child(model_chip(s, p, item))
                 .child(send_button),
@@ -755,7 +945,7 @@ fn composer_chip(p: &Pal, key: &str, glyph: Option<&'static rune::Icon>, title: 
 }
 
 /// Which clone the agent reads: click it to pick another.
-fn clone_chip(p: &Pal, item: &MergeRequest, chat: Option<&Chat>) -> El {
+fn clone_chip(p: &Pal, item: &MergeRequest, chat: Option<&Chat>, agent: AgentKind) -> El {
     let checkout = chat.and_then(|c| c.checkout.clone());
     let looked = chat.is_some_and(|c| c.checkout_looked);
     let started = chat.is_some_and(|c| !c.entries.is_empty());
@@ -764,14 +954,15 @@ fn clone_chip(p: &Pal, item: &MergeRequest, chat: Option<&Chat>) -> El {
         (None, true) => "No clone".into(),
         (None, false) => "Looking…".into(),
     };
-    let read = format!("Read-only: Cursor can read files, but can't edit them, run commands or post to {}.", item.kind().name());
+    let read = format!("{} It doesn't post to {}.", agent.reach(), item.kind().name());
     let help = match &checkout {
-        None => format!("No clone of {} found, so Cursor sees only the {}. Click to choose one.\n{read}", item.project_path, item.kind().noun()),
+        None => format!("No clone of {} found, so {} sees only the {}. Click to choose one.\n{read}", item.project_path, agent.name(), item.kind().noun()),
         Some(c) => {
             let home = std::env::var("HOME").unwrap_or_default();
             let shown = c.to_string_lossy().replacen(&home, "~", 1);
             format!(
-                "Cursor reads {shown} as it is, whatever branch it's on; the {}'s own changes come from the diff.\nClick to choose another clone{}\n{read}",
+                "{} reads {shown} as it is, whatever branch it's on; the {}'s own changes come from the diff.\nClick to choose another clone{}\n{read}",
+                agent.name(),
                 item.kind().noun(),
                 if started { " (starts a new chat)." } else { "." }
             )
@@ -800,9 +991,13 @@ fn clone_chip(p: &Pal, item: &MergeRequest, chat: Option<&Chat>) -> El {
 }
 
 fn model_chip(s: &App, p: &Pal, item: &MergeRequest) -> El {
-    let ask = &s.ask;
-    let title = ask.chosen_model().map(AgentModel::short_title).unwrap_or_else(|| AgentModel::new(&ask.model, "").short_title());
-    let effort = ask.effort(&ask.model).map(|e| e.name.clone());
+    let roster = s.ask.roster(s.ask.agent_for(&item.id));
+    let title = match roster.chosen_model() {
+        Some(m) => m.short_title(),
+        None if roster.model.is_empty() => "Default model".into(),
+        None => AgentModel::new(&roster.model, "").short_title(),
+    };
+    let effort = roster.effort(&roster.model).map(|e| e.name.clone());
     let id = item.id.clone();
     composer_chip(p, "ask-model", None, title, effort, p.secondary)
         .help(crate::ui::components::keys("Choose the model and effort  ⌥⌘L"))
@@ -810,49 +1005,58 @@ fn model_chip(s: &App, p: &Pal, item: &MergeRequest) -> El {
         .on_press_tx(move |s: &mut App, tx: &mut Tx| open_model_menu(s, tx, &id))
 }
 
-/// Cursor's models as a menu: the newest of a few families with a line on when each suits,
-/// "More Models" by maker for the rest, then the chosen model's effort levels.
+/// The agent's models as a menu: all of them when there are a few; else the newest of a few
+/// families with a line on when each suits and "More Models" by maker for the rest. Then the
+/// chosen model's effort levels.
 pub fn open_model_menu(s: &mut App, tx: &mut Tx, chat: &str) {
-    s.ask.load_models(false);
-    s.ask.describe();
-    let ask = &s.ask;
+    let agent = s.ask.agent_for(chat);
+    s.ask.load_models(agent, false);
+    s.ask.describe(agent);
+    let ask = s.ask.roster(agent);
     let mut menu = PopupMenu::new();
     if ask.models.is_empty() {
-        let line = match (&ask.models_error, ask.loading_models) {
+        let line = match (&ask.error, ask.loading) {
             (Some(e), false) => e.clone(),
-            _ => "Asking Cursor for its models…".into(),
+            _ => format!("Asking {} for its models…", agent.name()),
         };
         menu = menu.item(PopupItem::new("none", line).enabled(false)).separator().item(PopupItem::new("refresh", "Try Again"));
     } else {
-        let mut list = featured(&ask.models);
-        for id in std::iter::once(&ask.model).chain(&ask.recent_models) {
+        let few = ask.models.len() <= 10;
+        let mut list = if few { ask.models.clone() } else { featured(&ask.models) };
+        for id in std::iter::once(&ask.model).chain(&ask.recent) {
             if let Some(m) = ask.models.iter().find(|m| &m.id == id) {
                 if !list.contains(m) {
                     list.push(m.clone());
                 }
             }
         }
-        list.truncate(8);
+        if !few {
+            list.truncate(8);
+        }
         for m in &list {
             let detail = m
                 .blurb()
+                .filter(|_| agent == AgentKind::Cursor)
                 .map(str::to_string)
-                .unwrap_or_else(|| if ask.recent_models.contains(&m.id) { format!("{} · used recently", m.maker()) } else { m.maker().to_string() });
+                .unwrap_or_else(|| if ask.recent.contains(&m.id) { format!("{} · used recently", m.maker()) } else { m.maker().to_string() });
             menu = menu.item(PopupItem::new(format!("m:{}", m.id), format!("{} — {detail}", m.title())).checked(m.id == ask.model));
         }
-        let mut more = PopupMenu::new();
-        for maker in MAKERS {
-            let models: Vec<&AgentModel> = ask.models.iter().filter(|m| m.maker() == maker).collect();
-            if models.is_empty() {
-                continue;
+        if !few {
+            let mut more = PopupMenu::new();
+            for maker in MAKERS {
+                let models: Vec<&AgentModel> = ask.models.iter().filter(|m| m.maker() == maker).collect();
+                if models.is_empty() {
+                    continue;
+                }
+                let mut sub = PopupMenu::new();
+                for m in models {
+                    sub = sub.item(PopupItem::new(format!("m:{}", m.id), m.title()).checked(m.id == ask.model));
+                }
+                more = more.submenu(maker, sub);
             }
-            let mut sub = PopupMenu::new();
-            for m in models {
-                sub = sub.item(PopupItem::new(format!("m:{}", m.id), m.title()).checked(m.id == ask.model));
-            }
-            more = more.submenu(maker, sub);
+            menu = menu.submenu(format!("More Models ({})", ask.models.len()), more);
         }
-        menu = menu.submenu(format!("More Models ({})", ask.models.len()), more).separator();
+        menu = menu.separator();
         let name = ask.chosen_model().map(AgentModel::title).unwrap_or_else(|| "This model".into());
         match ask.efforts.get(&ask.model) {
             Some(options) if !options.values.is_empty() => {
@@ -863,7 +1067,8 @@ pub fn open_model_menu(s: &mut App, tx: &mut Tx, chat: &str) {
                 }
             }
             Some(_) => menu = menu.item(PopupItem::new("effort", format!("{name} sets its own effort.")).enabled(false)),
-            None => menu = menu.item(PopupItem::new("effort", "Asking Cursor for its effort levels…").enabled(false)),
+            None if ask.model.is_empty() => {}
+            None => menu = menu.item(PopupItem::new("effort", format!("Asking {} for its effort levels…", agent.name())).enabled(false)),
         }
         menu = menu.separator().item(PopupItem::new("refresh", "Refresh the List"));
     }
@@ -875,7 +1080,8 @@ pub fn open_model_menu(s: &mut App, tx: &mut Tx, chat: &str) {
         } else if let Some(value) = picked.strip_prefix("e:") {
             s.ask.choose_effort(value, Some(&chat));
         } else if picked == "refresh" {
-            s.ask.load_models(true);
+            let agent = s.ask.agent_for(&chat);
+            s.ask.load_models(agent, true);
         }
     });
 }

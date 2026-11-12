@@ -1,31 +1,35 @@
-//! "Ask Cursor": chats with Cursor's agent about a merge request, in its read-only ask mode,
-//! reading the user's own clone. One chat per merge request, kept while switching between them.
+//! "Ask": chats with a coding agent (Cursor, Claude, opencode or pi) about a merge request, with
+//! only the tools that read and search (`agents::TOOL_KINDS`), reading the user's own clone. One chat per merge request, kept
+//! while switching between them. Each chat stays with the agent it started on.
 //!
 //! The chats live on the UI thread. Each request to the agent runs on a worker thread that
 //! blocks on the reply and sends back a `Msg`; streamed text arrives as `acp::Update`s. Both
 //! land in `poll`, so a frame's worth of tokens is shown at once.
 
 pub mod acp;
+pub mod agents;
 pub mod checkouts;
 pub mod citations;
 pub mod context;
 pub mod model;
+pub mod pi;
+pub mod proposals;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use rune::{TextEdit, Waker};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::data::models::MergeRequest;
 use crate::data::prefs;
 use crate::data::store::{Loadable, Store as ReviewStore};
-use model::{AgentModel, EffortOption, EffortOptions};
-
-pub const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
+use agents::AgentKind;
+use model::{AgentModel, EffortOption, EffortOptions, is_model_option};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EntryKind {
@@ -74,6 +78,8 @@ struct Pending {
 
 pub struct Chat {
     pub id: String,
+    /// The agent this chat runs on. A chat stays with its agent; picking another starts afresh.
+    pub agent: AgentKind,
     pub entries: Vec<Entry>,
     pub phase: Phase,
     pub draft: TextEdit,
@@ -99,6 +105,7 @@ impl Chat {
     fn new(id: &str) -> Self {
         Chat {
             id: id.to_string(),
+            agent: AgentKind::default(),
             entries: Vec::new(),
             phase: Phase::Idle,
             draft: TextEdit::default(),
@@ -203,39 +210,99 @@ enum Msg {
     Answered { chat: String, generation: u64, stop: Option<String> },
     Failed { chat: String, generation: u64, error: String, starting: bool },
     Resumed { chat: String, generation: u64, ok: bool },
-    Models(Vec<AgentModel>),
-    ModelsLoaded(Result<(), String>),
-    Absorb(Vec<Value>),
-    Catalog(Option<String>),
+    Models(AgentKind, Vec<AgentModel>),
+    ModelsLoaded(AgentKind, Result<(), String>),
+    Absorb(AgentKind, Vec<Value>),
+    Catalog(AgentKind, Option<String>),
 }
 
 /// The model, its effort and what the worker needs to put a session on them.
 #[derive(Clone)]
 struct ModelChoice {
+    agent: AgentKind,
     model: String,
     known: bool,
     effort: Option<EffortOptions>,
     chosen_effort: Option<String>,
 }
 
+/// One agent's models and the picks among them, kept between launches.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Roster {
+    /// The agent's models, so the picker has them before any chat starts.
+    pub models: Vec<AgentModel>,
+    pub fetched: f64,
+    /// The chosen model by base id: the last one picked, else the agent's default (blank for
+    /// whatever the agent picks itself).
+    pub model: String,
+    /// The last few picked, newest first.
+    pub recent: Vec<String>,
+    /// Each model's effort setting as the agent offers it.
+    pub efforts: BTreeMap<String, EffortOptions>,
+    /// The effort picked for each model.
+    pub chosen_efforts: BTreeMap<String, String>,
+    #[serde(skip)]
+    pub loading: bool,
+    #[serde(skip)]
+    pub error: Option<String>,
+    /// A chat in the empty folder, kept to learn models' effort settings.
+    #[serde(skip)]
+    catalog: Option<String>,
+    #[serde(skip)]
+    describing: bool,
+}
+
+impl Roster {
+    fn load(kind: AgentKind, p: &prefs::Prefs) -> Roster {
+        let saved = p.ask_rosters.get(kind.raw()).and_then(|v| serde_json::from_value::<Roster>(v.clone()).ok());
+        let mut r = match saved {
+            Some(r) => r,
+            // Cursor's picks from before there were other agents.
+            None if kind == AgentKind::Cursor => Roster {
+                models: p.ask_models.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect(),
+                fetched: p.ask_models_fetched,
+                model: AgentModel::base(&p.ask_model).to_string(),
+                recent: p.ask_recent_models.clone(),
+                efforts: p.ask_effort_options.iter().filter_map(|(k, v)| Some((k.clone(), serde_json::from_value(v.clone()).ok()?))).collect(),
+                chosen_efforts: p.ask_efforts.clone(),
+                ..Roster::default()
+            },
+            None => Roster::default(),
+        };
+        if r.models.iter().any(|m| m.id.contains('[')) {
+            r.models.clear();
+        }
+        if r.models.is_empty() {
+            r.fetched = 0.0;
+        }
+        if r.model.is_empty() {
+            r.model = kind.default_model().to_string();
+        }
+        if kind == AgentKind::Cursor && r.chosen_efforts.is_empty() {
+            r.chosen_efforts.insert(kind.default_model().into(), "medium".into());
+        }
+        r
+    }
+
+    /// The chosen model as the agent lists it now, or None before the list has loaded.
+    pub fn chosen_model(&self) -> Option<&AgentModel> {
+        self.models.iter().find(|m| m.id == self.model)
+    }
+
+    /// The effort a model will run at: the one picked for it, else the one the agent last used.
+    pub fn effort(&self, model: &str) -> Option<&EffortOption> {
+        let options = self.efforts.get(model)?;
+        options.option(self.chosen_efforts.get(model).map(String::as_str)).or_else(|| options.option(Some(&options.current)))
+    }
+}
+
 pub struct AskStore {
     chats: HashMap<String, Chat>,
     by_session: HashMap<String, String>,
-    /// Cursor's models, kept between launches so the picker has them before any chat starts.
-    pub models: Vec<AgentModel>,
-    pub loading_models: bool,
-    pub models_error: Option<String>,
-    /// The chosen model by base id: the last one picked, else Sonnet 5.5.
-    pub model: String,
-    /// The last few picked, newest first.
-    pub recent_models: Vec<String>,
-    /// Each model's effort setting as Cursor offers it.
-    pub efforts: HashMap<String, EffortOptions>,
-    /// The effort picked for each model.
-    pub chosen_efforts: HashMap<String, String>,
-    models_fetched: f64,
-    catalog: Option<String>,
-    describing: bool,
+    /// The agent new chats start on: the last one picked.
+    pub agent: AgentKind,
+    rosters: HashMap<AgentKind, Roster>,
     /// Off for headless runs, so a test chat isn't reopened in the app.
     pub remembers_sessions: bool,
     /// Headless: never start the agent.
@@ -250,29 +317,13 @@ pub struct AskStore {
 impl Default for AskStore {
     fn default() -> Self {
         let p = prefs::get();
-        let saved = AgentModel::base(&p.ask_model).to_string();
-        let models: Vec<AgentModel> = p.ask_models.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect();
-        let models: Vec<AgentModel> = if models.iter().any(|m| m.id.contains('[')) { Vec::new() } else { models };
-        let efforts = p.ask_effort_options.iter().filter_map(|(k, v)| Some((k.clone(), serde_json::from_value(v.clone()).ok()?))).collect();
-        let mut chosen_efforts: HashMap<String, String> = p.ask_efforts.clone().into_iter().collect();
-        if chosen_efforts.is_empty() {
-            chosen_efforts.insert(DEFAULT_MODEL.into(), "medium".into());
-        }
         let (tx, rx) = channel();
         let (updates_tx, updates) = channel();
         AskStore {
             chats: HashMap::new(),
             by_session: HashMap::new(),
-            models_fetched: if models.is_empty() { 0.0 } else { p.ask_models_fetched },
-            models,
-            loading_models: false,
-            models_error: None,
-            model: if saved.is_empty() { DEFAULT_MODEL.into() } else { saved },
-            recent_models: p.ask_recent_models.clone(),
-            efforts,
-            chosen_efforts,
-            catalog: None,
-            describing: false,
+            agent: AgentKind::from_raw(&p.ask_agent).unwrap_or_default(),
+            rosters: AgentKind::ALL.into_iter().map(|k| (k, Roster::load(k, &p))).collect(),
             remembers_sessions: true,
             offline: false,
             tx,
@@ -291,7 +342,7 @@ pub fn wall() -> f64 {
 impl AskStore {
     pub fn set_waker(&mut self, waker: Waker) {
         self.waker = Some(waker.clone());
-        acp::CLIENT.set_sink(self.updates_tx.clone(), Some(waker));
+        acp::set_sink(self.updates_tx.clone(), Some(waker));
     }
 
     fn spawn(&self, job: impl FnOnce(&Sender<Msg>) + Send + 'static) {
@@ -310,7 +361,48 @@ impl AskStore {
     }
 
     pub fn chat_mut(&mut self, id: &str) -> &mut Chat {
-        self.chats.entry(id.to_string()).or_insert_with(|| Chat::new(id))
+        let agent = self.agent;
+        self.chats.entry(id.to_string()).or_insert_with(|| {
+            let mut chat = Chat::new(id);
+            chat.agent = agent;
+            chat
+        })
+    }
+
+    /// The agent a merge request's chat runs on: its own once started, else the one picked.
+    pub fn agent_for(&self, id: &str) -> AgentKind {
+        match self.chats.get(id) {
+            Some(c) if !c.is_empty() || c.session.is_some() => c.agent,
+            _ => self.agent,
+        }
+    }
+
+    pub fn roster(&self, kind: AgentKind) -> &Roster {
+        &self.rosters[&kind]
+    }
+
+    fn roster_mut(&mut self, kind: AgentKind) -> &mut Roster {
+        self.rosters.get_mut(&kind).expect("every agent has a roster")
+    }
+
+    fn save_roster(&self, kind: AgentKind) {
+        if let Ok(v) = serde_json::to_value(self.roster(kind)) {
+            prefs::update(|p| {
+                p.ask_rosters.insert(kind.raw().to_string(), v);
+            });
+        }
+    }
+
+    /// Picks the agent for new chats, and for this one: a chat that has started starts afresh.
+    pub fn choose_agent(&mut self, kind: AgentKind, chat: Option<&str>) {
+        self.agent = kind;
+        prefs::update(|p| p.ask_agent = kind.raw().to_string());
+        if let Some(id) = chat {
+            if self.chats.get(id).is_some_and(|c| c.agent != kind) {
+                self.restart(id, kind);
+            }
+        }
+        self.load_models(kind, false);
     }
 
     /// Test and snapshot fixtures: a chat with these entries.
@@ -330,20 +422,24 @@ impl AskStore {
         }
     }
 
-    fn saved_session(&self, id: &str) -> Option<String> {
+    fn saved_session(&self, id: &str) -> Option<(AgentKind, String)> {
         if !self.remembers_sessions {
             return None;
         }
-        prefs::read(|p| p.ask_sessions.get(id).cloned())
+        let saved = prefs::read(|p| p.ask_sessions.get(id).cloned())?;
+        match saved.split_once('\t') {
+            Some((agent, session)) => Some((AgentKind::from_raw(agent)?, session.to_string())),
+            None => Some((AgentKind::Cursor, saved)),
+        }
     }
 
-    fn save_session(&self, id: &str, session: Option<&str>) {
+    fn save_session(&self, id: &str, session: Option<(AgentKind, &str)>) {
         if !self.remembers_sessions {
             return;
         }
         prefs::update(|p| match session {
-            Some(s) => {
-                p.ask_sessions.insert(id.to_string(), s.to_string());
+            Some((agent, s)) => {
+                p.ask_sessions.insert(id.to_string(), format!("{}\t{s}", agent.raw()));
             }
             None => {
                 p.ask_sessions.remove(id);
@@ -375,12 +471,20 @@ impl AskStore {
         self.new_chat(&item.id);
     }
 
+    /// A fresh chat on the agent this one was on (the one picked, if it hadn't started).
     pub fn new_chat(&mut self, id: &str) {
+        let agent = self.agent_for(id);
+        self.restart(id, agent);
+    }
+
+    fn restart(&mut self, id: &str, agent: AgentKind) {
         let chat = self.chat_mut(id);
         let session = chat.session.take();
+        let was = chat.agent;
         chat.reset();
+        chat.agent = agent;
         if let Some(session) = session {
-            acp::CLIENT.notify("session/cancel", json!({"sessionId": session}));
+            end_session(was, &session);
             self.by_session.remove(&session);
         }
         self.save_session(id, None);
@@ -390,7 +494,7 @@ impl AskStore {
         let Some(chat) = self.chats.get(id) else { return };
         if chat.phase == Phase::Working {
             if let Some(session) = &chat.session {
-                acp::CLIENT.notify("session/cancel", json!({"sessionId": session}));
+                acp::agent(chat.agent).notify("session/cancel", json!({"sessionId": session}));
             }
         }
     }
@@ -399,9 +503,13 @@ impl AskStore {
     /// (in `poll`) for the diff and threads.
     pub fn ask(&mut self, id: &str, question: &str) {
         let question = question.trim().to_string();
+        let agent = self.agent;
         let chat = self.chat_mut(id);
         if question.is_empty() || chat.phase != Phase::Idle {
             return;
+        }
+        if chat.is_empty() && chat.session.is_none() {
+            chat.agent = agent;
         }
         chat.draft = TextEdit::default();
         chat.append(EntryKind::Question, question.clone(), None);
@@ -421,12 +529,14 @@ impl AskStore {
         }
     }
 
-    fn choice(&self) -> ModelChoice {
+    fn choice(&self, agent: AgentKind) -> ModelChoice {
+        let r = self.roster(agent);
         ModelChoice {
-            model: self.model.clone(),
-            known: self.models.iter().any(|m| m.id == self.model),
-            effort: self.efforts.get(&self.model).cloned(),
-            chosen_effort: self.chosen_efforts.get(&self.model).cloned(),
+            agent,
+            model: r.model.clone(),
+            known: r.models.iter().any(|m| m.id == r.model),
+            effort: r.efforts.get(&r.model).cloned(),
+            chosen_effort: r.chosen_efforts.get(&r.model).cloned(),
         }
     }
 
@@ -487,16 +597,17 @@ impl AskStore {
             prompt.push(json!({"type": "text", "text": pending.question}));
             let session = chat.session.clone();
             let generation = chat.generation;
-            let cwd = chat.checkout.clone().unwrap_or_else(empty_folder);
-            let choice = self.choice();
+            let clone = chat.checkout.clone();
+            let agent = chat.agent;
+            let choice = self.choice(agent);
             let id = id.clone();
             if self.offline {
                 // Headless runs never start the agent.
-                let error = "Cursor's agent doesn't run in headless runs.".to_string();
+                let error = format!("{} doesn't run in headless runs.", agent.process());
                 let _ = self.tx.send(Msg::Failed { chat: id, generation, error, starting: true });
                 continue;
             }
-            self.spawn(move |tx| ask_worker(tx, id, generation, session, cwd, prompt, choice));
+            self.spawn(move |tx| ask_worker(tx, id, generation, session, clone, prompt, choice));
         }
         wake
     }
@@ -527,19 +638,21 @@ impl AskStore {
                     chat.checkout = path;
                 }
                 let fresh = chat.session.is_none() && chat.entries.is_empty() && chat.phase == Phase::Idle;
-                if let (true, Some(saved)) = (fresh, self.saved_session(&id)) {
+                if let (true, Some((agent, saved))) = (fresh, self.saved_session(&id)) {
+                    self.chat_mut(&id).agent = agent;
                     self.resume(&id, saved);
                 }
             }
             Msg::Session { chat: id, generation, session } => {
                 let chat = self.chat_mut(&id);
                 if chat.generation != generation {
-                    acp::CLIENT.notify("session/cancel", json!({"sessionId": session}));
+                    end_session(chat.agent, &session);
                     return;
                 }
                 chat.session = Some(session.clone());
+                let agent = chat.agent;
                 self.by_session.insert(session.clone(), id.clone());
-                self.save_session(&id, Some(&session));
+                self.save_session(&id, Some((agent, &session)));
             }
             Msg::Working { chat: id, generation } => {
                 let chat = self.chat_mut(&id);
@@ -580,7 +693,7 @@ impl AskStore {
                 }
                 chat.append(EntryKind::Failure, error.clone(), None);
                 // A chat that never started, or whose agent stopped, starts afresh next time.
-                if starting || error.starts_with("Cursor's agent stopped") {
+                if starting || error.starts_with(&format!("{} stopped", chat.agent.process())) {
                     if let Some(s) = chat.session.take() {
                         self.by_session.remove(&s);
                     }
@@ -608,15 +721,20 @@ impl AskStore {
                     }
                 }
             }
-            Msg::Models(fresh) => self.keep_models(fresh),
-            Msg::ModelsLoaded(result) => {
-                self.loading_models = false;
-                self.models_error = result.err();
+            Msg::Models(agent, fresh) => self.keep_models(agent, fresh),
+            Msg::ModelsLoaded(agent, result) => {
+                let r = self.roster_mut(agent);
+                r.loading = false;
+                r.error = result.err();
             }
-            Msg::Absorb(options) => self.absorb(&options),
-            Msg::Catalog(session) => {
-                self.catalog = session;
-                self.describing = false;
+            Msg::Absorb(agent, options) => self.absorb(agent, &options),
+            Msg::Catalog(agent, session) => {
+                let r = self.roster_mut(agent);
+                if let Some(old) = r.catalog.take().filter(|old| session.as_ref() != Some(old)) {
+                    end_session(agent, &old);
+                }
+                r.catalog = session;
+                r.describing = false;
             }
         }
     }
@@ -627,15 +745,19 @@ impl AskStore {
         chat.reopening = true;
         chat.session = Some(session.clone());
         let generation = chat.generation;
-        let cwd = chat.checkout.clone().unwrap_or_else(empty_folder);
+        let clone = chat.checkout.clone();
+        let agent = chat.agent;
         self.by_session.insert(session.clone(), id.to_string());
-        let choice = self.choice();
+        let choice = self.choice(agent);
         let id = id.to_string();
         self.spawn(move |tx| {
-            let client = acp::CLIENT.clone();
-            let ok = client
-                .request("session/load", json!({"sessionId": session, "cwd": cwd.to_string_lossy(), "mcpServers": []}))
-                .and_then(|reply| configure(tx, &session, options(&reply), &choice))
+            let ok = acp::agent(agent)
+                .request("session/load", {
+                    let mut params = session_params(agent, clone.as_deref());
+                    params["sessionId"] = json!(session);
+                    params
+                })
+                .and_then(|reply| configure(tx, &session, &reply, &choice))
                 .is_ok();
             let _ = tx.send(Msg::Resumed { chat: id, generation, ok });
         });
@@ -649,7 +771,8 @@ impl AskStore {
         let text = update.get("content").and_then(|c| c.get("text")).and_then(Value::as_str).unwrap_or("").to_string();
         let kind = s("sessionUpdate").unwrap_or_default();
         if kind == "config_option_update" {
-            self.absorb(&options(update));
+            let agent = self.chat_mut(&id).agent;
+            self.absorb(agent, &options(update));
             return;
         }
         let chat = self.chat_mut(&id);
@@ -679,79 +802,70 @@ impl AskStore {
 
     // MARK: Models
 
-    /// The chosen model as Cursor lists it now, or None before the list has loaded.
-    pub fn chosen_model(&self) -> Option<&AgentModel> {
-        self.models.iter().find(|m| m.id == self.model)
-    }
-
-    /// The effort a model will run at: the one picked for it, else the one Cursor last used.
-    pub fn effort(&self, model: &str) -> Option<&EffortOption> {
-        let options = self.efforts.get(model)?;
-        options.option(self.chosen_efforts.get(model).map(String::as_str)).or_else(|| options.option(Some(&options.current)))
-    }
-
-    /// Picks the model for this chat (from its next answer) and for new ones.
+    /// Picks the model for this chat (from its next answer) and for the agent's new ones.
     pub fn choose_model(&mut self, model: &str, chat: Option<&str>) {
-        self.model = model.to_string();
-        self.recent_models.retain(|m| m != model);
-        self.recent_models.insert(0, model.to_string());
-        self.recent_models.truncate(4);
-        let (m, recent) = (self.model.clone(), self.recent_models.clone());
-        prefs::update(|p| {
-            p.ask_model = m;
-            p.ask_recent_models = recent;
-        });
-        let session = chat.and_then(|c| self.chats.get(c)).and_then(|c| c.session.clone());
+        let agent = chat.map_or(self.agent, |c| self.agent_for(c));
+        let r = self.roster_mut(agent);
+        r.model = model.to_string();
+        r.recent.retain(|m| m != model);
+        r.recent.insert(0, model.to_string());
+        r.recent.truncate(4);
+        self.save_roster(agent);
+        let session = chat.and_then(|c| self.chats.get(c)).filter(|c| c.agent == agent).and_then(|c| c.session.clone());
         match session {
             Some(session) => {
-                let choice = self.choice();
+                let choice = self.choice(agent);
                 self.spawn(move |tx| apply_model(tx, &session, Vec::new(), &choice));
             }
-            None => self.describe(),
+            None => self.describe(agent),
         }
     }
 
     /// Picks the chosen model's effort, for this chat and the model's next ones.
     pub fn choose_effort(&mut self, value: &str, chat: Option<&str>) {
-        self.chosen_efforts.insert(self.model.clone(), value.to_string());
-        let chosen: std::collections::BTreeMap<String, String> = self.chosen_efforts.clone().into_iter().collect();
-        prefs::update(|p| p.ask_efforts = chosen);
-        let session = chat.and_then(|c| self.chats.get(c)).and_then(|c| c.session.clone());
-        if let (Some(session), Some(effort)) = (session, self.efforts.get(&self.model).cloned()) {
+        let agent = chat.map_or(self.agent, |c| self.agent_for(c));
+        let r = self.roster_mut(agent);
+        r.chosen_efforts.insert(r.model.clone(), value.to_string());
+        let effort = r.efforts.get(&r.model).cloned();
+        self.save_roster(agent);
+        let session = chat.and_then(|c| self.chats.get(c)).filter(|c| c.agent == agent).and_then(|c| c.session.clone());
+        if let (Some(session), Some(effort)) = (session, effort) {
             let value = value.to_string();
             self.spawn(move |tx| {
-                if let Ok(reply) = set_option(&session, &effort.config_id, &value) {
-                    let _ = tx.send(Msg::Absorb(reply));
+                if let Ok(reply) = set_option(agent, &session, &effort.config_id, &value) {
+                    let _ = tx.send(Msg::Absorb(agent, reply));
                 }
             });
         }
     }
 
-    /// Learns the chosen model's effort options (Cursor only says for the model a session is on)
+    /// Learns the chosen model's effort options (agents only say for the model a session is on)
     /// by moving the catalog session to it.
-    pub fn describe(&mut self) {
-        let model = self.model.clone();
-        if self.offline || self.describing || self.efforts.contains_key(&model) || !self.models.iter().any(|m| m.id == model) {
+    pub fn describe(&mut self, agent: AgentKind) {
+        let offline = self.offline;
+        let r = self.roster_mut(agent);
+        let model = r.model.clone();
+        if offline || r.describing || r.efforts.contains_key(&model) || !r.models.iter().any(|m| m.id == model) {
             return;
         }
-        self.describing = true;
-        let catalog = self.catalog.clone();
+        r.describing = true;
+        let catalog = r.catalog.clone();
         self.spawn(move |tx| {
             let mut catalog = catalog;
             for _ in 0..2 {
                 let attempt = (|| -> Result<(), String> {
-                    let session = match &catalog {
-                        Some(s) => s.clone(),
+                    let (session, known) = match &catalog {
+                        Some(s) => (s.clone(), Vec::new()),
                         None => {
-                            let reply = new_session(&empty_folder())?;
-                            let _ = tx.send(Msg::Models(models_in(&reply)));
-                            let _ = tx.send(Msg::Absorb(options(&reply)));
+                            let reply = new_session(agent, None)?;
+                            let _ = tx.send(Msg::Models(agent, models_in(&reply)));
+                            let _ = tx.send(Msg::Absorb(agent, options(&reply)));
                             let s = reply.get("sessionId").and_then(Value::as_str).ok_or("no session")?.to_string();
                             catalog = Some(s.clone());
-                            s
+                            (s, options(&reply))
                         }
                     };
-                    let _ = tx.send(Msg::Absorb(set_option(&session, "model", &model)?));
+                    let _ = tx.send(Msg::Absorb(agent, set_model(agent, &session, &known, &model)?));
                     Ok(())
                 })();
                 match attempt {
@@ -760,139 +874,230 @@ impl AskStore {
                     Err(_) => catalog = None,
                 }
             }
-            let _ = tx.send(Msg::Catalog(catalog));
+            let _ = tx.send(Msg::Catalog(agent, catalog));
         });
     }
 
-    /// Fetches the list when there's none or it's a day old. Cursor only lists models for a chat,
-    /// so this opens one in the empty folder.
-    pub fn load_models(&mut self, force: bool) {
-        let stale = wall() - self.models_fetched > 86_400.0;
-        if self.offline || self.loading_models || !(force || self.models.is_empty() || stale) {
+    /// Fetches the list when there's none or it's a day old. Agents only list models for a
+    /// chat, so this opens one in the empty folder.
+    pub fn load_models(&mut self, agent: AgentKind, force: bool) {
+        let offline = self.offline;
+        let r = self.roster_mut(agent);
+        let stale = wall() - r.fetched > 86_400.0;
+        if offline || r.loading || !(force || r.models.is_empty() || stale) {
             return;
         }
-        self.loading_models = true;
+        r.loading = true;
         self.spawn(move |tx| {
-            let result = new_session(&empty_folder()).map(|reply| {
-                let _ = tx.send(Msg::Models(models_in(&reply)));
-                let _ = tx.send(Msg::Absorb(options(&reply)));
-                let _ = tx.send(Msg::Catalog(reply.get("sessionId").and_then(Value::as_str).map(str::to_string)));
+            let result = new_session(agent, None).and_then(|reply| {
+                let models = models_in(&reply);
+                let none = models.is_empty();
+                let _ = tx.send(Msg::Models(agent, models));
+                let _ = tx.send(Msg::Absorb(agent, options(&reply)));
+                let _ = tx.send(Msg::Catalog(agent, reply.get("sessionId").and_then(Value::as_str).map(str::to_string)));
+                // pi lists none until it's signed in to a provider.
+                if none {
+                    Err(if agent == AgentKind::Pi { agent.sign_in().to_string() } else { format!("{} listed no models.", agent.name()) })
+                } else {
+                    Ok(())
+                }
             });
-            let _ = tx.send(Msg::ModelsLoaded(result));
+            let _ = tx.send(Msg::ModelsLoaded(agent, result));
         });
     }
 
-    fn keep_models(&mut self, fresh: Vec<AgentModel>) {
+    fn keep_models(&mut self, agent: AgentKind, fresh: Vec<AgentModel>) {
         if fresh.is_empty() {
             return;
         }
-        if fresh != self.models {
-            self.models = fresh;
-        }
-        self.models_fetched = wall();
-        let (values, fetched): (Vec<Value>, f64) = (self.models.iter().filter_map(|m| serde_json::to_value(m).ok()).collect(), self.models_fetched);
-        prefs::update(|p| {
-            p.ask_models = values;
-            p.ask_models_fetched = fetched;
-        });
+        let r = self.roster_mut(agent);
+        r.models = fresh;
+        r.fetched = wall();
+        self.save_roster(agent);
     }
 
-    /// Notes a model's effort options from a session's settings.
-    fn absorb(&mut self, options: &[Value]) {
+    /// Notes a model's effort options from a session's settings. An agent with no model picked
+    /// yet adopts the one it started on.
+    fn absorb(&mut self, agent: AgentKind, options: &[Value]) {
         let Some((model, effort)) = EffortOptions::from(options) else { return };
-        if self.efforts.get(&model) == Some(&effort) {
+        let r = self.roster_mut(agent);
+        let adopt = r.model.is_empty() && r.models.iter().any(|m| m.id == model);
+        if adopt {
+            r.model = model.clone();
+        }
+        if r.efforts.get(&model) == Some(&effort) && !adopt {
             return;
         }
-        if let Ok(v) = serde_json::to_value(&effort) {
-            prefs::update(|p| {
-                p.ask_effort_options.insert(model.clone(), v);
-            });
-        }
-        self.efforts.insert(model, effort);
+        r.efforts.insert(model, effort);
+        self.save_roster(agent);
     }
 
-    /// Stops the agent when quitting.
+    /// Stops the agents when quitting.
     pub fn shutdown(&self) {
-        acp::CLIENT.stop();
+        acp::stop_all();
     }
 }
 
 // MARK: Workers
 
+/// Stops a session that's no longer wanted. pi runs a process per session, which this ends too.
+fn end_session(agent: AgentKind, session: &str) {
+    let a = acp::agent(agent);
+    a.notify("session/cancel", json!({"sessionId": session}));
+    if agent == AgentKind::Pi {
+        a.notify("session/close", json!({"sessionId": session}));
+    }
+}
+
+/// A reply's settings. An agent that lists its models outside its settings (Claude's adapter)
+/// gets a stand-in model setting, so the rest reads one shape.
 fn options(reply: &Value) -> Vec<Value> {
-    reply.get("configOptions").and_then(Value::as_array).cloned().unwrap_or_default()
+    let mut options = reply.get("configOptions").and_then(Value::as_array).cloned().unwrap_or_default();
+    if !options.iter().any(is_model_option) {
+        if let Some(current) = reply.get("models").and_then(|m| m.get("currentModelId")).and_then(Value::as_str) {
+            options.push(json!({"id": "model", "category": "model", "currentValue": current, "_mrowStandIn": true}));
+        }
+    }
+    options
+}
+
+/// A select setting's choices as (value, name), with grouped choices flattened.
+fn choices(options: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for o in options.as_array().map(Vec::as_slice).unwrap_or_default() {
+        if o.get("options").is_some() {
+            out.extend(choices(&o["options"]));
+        } else if let Some(value) = o.get("value").and_then(Value::as_str) {
+            out.push((value.to_string(), o.get("name").and_then(Value::as_str).unwrap_or(value).to_string()));
+        }
+    }
+    out
 }
 
 fn models_in(reply: &Value) -> Vec<AgentModel> {
-    reply
-        .get("models")
-        .and_then(|m| m.get("availableModels"))
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|m| {
-                    let id = m.get("modelId")?.as_str()?;
-                    Some(AgentModel::new(id, m.get("name").and_then(Value::as_str).unwrap_or(id)))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    if let Some(listed) = reply.get("models").and_then(|m| m.get("availableModels")).and_then(Value::as_array) {
+        return listed
+            .iter()
+            .filter_map(|m| {
+                let id = m.get("modelId")?.as_str()?;
+                Some(AgentModel::new(id, m.get("name").and_then(Value::as_str).unwrap_or(id)))
+            })
+            .collect();
+    }
+    let setting = reply.get("configOptions").and_then(Value::as_array).and_then(|a| a.iter().find(|o| is_model_option(o)));
+    setting.map(|o| choices(&o["options"]).into_iter().map(|(id, name)| AgentModel::new(&id, &name)).collect()).unwrap_or_default()
 }
 
-fn new_session(cwd: &std::path::Path) -> Result<Value, String> {
-    acp::CLIENT.clone().request("session/new", json!({"cwd": cwd.to_string_lossy(), "mcpServers": []}))
+fn new_session(agent: AgentKind, clone: Option<&std::path::Path>) -> Result<Value, String> {
+    acp::agent(agent).request("session/new", session_params(agent, clone))
 }
 
-fn set_option(session: &str, id: &str, value: &str) -> Result<Vec<Value>, String> {
-    acp::CLIENT.clone().request("session/set_config_option", json!({"sessionId": session, "configId": id, "value": value})).map(|r| options(&r))
+/// Where a session runs and what it starts with. Most run in the clone (or an empty folder).
+/// opencode takes its tool limits only from an `opencode.json` where it runs, so it runs in a
+/// folder of Mrow's with one, and reads the clone as an extra directory. Claude's adapter takes
+/// its tools through `_meta`, and starts without the user's settings and MCP servers, whose
+/// allow rules and tools (one that posts a comment, say) would get around the list.
+fn session_params(agent: AgentKind, clone: Option<&std::path::Path>) -> Value {
+    let folder = || clone.map(std::path::Path::to_path_buf).unwrap_or_else(empty_folder);
+    match agent {
+        AgentKind::Opencode => {
+            let mut params = json!({"cwd": opencode_folder().to_string_lossy(), "mcpServers": []});
+            if let Some(clone) = clone {
+                params["additionalDirectories"] = json!([clone.to_string_lossy()]);
+            }
+            params
+        }
+        AgentKind::Claude => json!({
+            "cwd": folder().to_string_lossy(),
+            "mcpServers": [],
+            "_meta": {"claudeCode": {"options": {
+                "disallowedTools": agents::claude_disallowed(),
+                "settingSources": [],
+                "strictMcpConfig": true,
+            }}},
+        }),
+        _ => json!({"cwd": folder().to_string_lossy(), "mcpServers": []}),
+    }
 }
 
-/// Read-only "ask" mode, and the chosen model and effort.
-fn configure(tx: &Sender<Msg>, session: &str, options: Vec<Value>, choice: &ModelChoice) -> Result<(), String> {
-    acp::CLIENT.clone().request("session/set_mode", json!({"sessionId": session, "modeId": "ask"}))?;
-    apply_model(tx, session, options, choice);
+/// opencode's folder, with the `opencode.json` that allows only the listed tools.
+fn opencode_folder() -> PathBuf {
+    let folder = crate::data::paths::cache_dir().join("ask-opencode");
+    let _ = std::fs::create_dir_all(&folder);
+    let config = json!({"$schema": "https://opencode.ai/config.json", "permission": agents::opencode_permissions()});
+    let _ = std::fs::write(folder.join("opencode.json"), serde_json::to_string_pretty(&config).unwrap_or_default());
+    folder
+}
+
+fn set_option(agent: AgentKind, session: &str, id: &str, value: &str) -> Result<Vec<Value>, String> {
+    acp::agent(agent).request("session/set_config_option", json!({"sessionId": session, "configId": id, "value": value})).map(|r| options(&r))
+}
+
+/// Puts a session on a model: through its model setting when it has one (Cursor, opencode, pi),
+/// else `session/set_model` (Claude's adapter). `known` is the session's settings, if at hand.
+fn set_model(agent: AgentKind, session: &str, known: &[Value], model: &str) -> Result<Vec<Value>, String> {
+    let setting = known.iter().find(|o| is_model_option(o) && o.get("_mrowStandIn").is_none()).and_then(|o| o.get("id")).and_then(Value::as_str);
+    if let Some(id) = setting {
+        return set_option(agent, session, id, model);
+    }
+    if known.is_empty() {
+        if let Ok(options) = set_option(agent, session, "model", model) {
+            return Ok(options);
+        }
+    }
+    acp::agent(agent).request("session/set_model", json!({"sessionId": session, "modelId": model}))?;
+    let mut options: Vec<Value> = known.iter().filter(|o| !is_model_option(o)).cloned().collect();
+    options.push(json!({"id": "model", "category": "model", "currentValue": model, "_mrowStandIn": true}));
+    Ok(options)
+}
+
+/// The chosen model and effort. Cursor also goes into its ask mode: it's the one way known to
+/// keep it from running commands, which it may run without asking when its own settings allow
+/// them. The other agents have their tools limited when they start (`session_params`).
+fn configure(tx: &Sender<Msg>, session: &str, reply: &Value, choice: &ModelChoice) -> Result<(), String> {
+    if choice.agent == AgentKind::Cursor {
+        acp::agent(choice.agent).request("session/set_mode", json!({"sessionId": session, "modeId": "ask"}))?;
+    }
+    apply_model(tx, session, options(reply), choice);
     Ok(())
 }
 
 /// Puts a session on the chosen model, then that model's chosen effort. A failure leaves the
-/// session on Cursor's choice rather than failing the question.
+/// session on the agent's choice rather than failing the question.
 fn apply_model(tx: &Sender<Msg>, session: &str, options: Vec<Value>, choice: &ModelChoice) {
+    let agent = choice.agent;
     let mut options = options;
-    let current = options
-        .iter()
-        .find(|o| o.get("id").and_then(Value::as_str) == Some("model"))
-        .and_then(|o| o.get("currentValue"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let current = options.iter().find(|o| is_model_option(o)).and_then(|o| o.get("currentValue")).and_then(Value::as_str).map(str::to_string);
     if current.as_deref() != Some(&choice.model) && choice.known {
-        match set_option(session, "model", &choice.model) {
+        match set_model(agent, session, &options, &choice.model) {
             Ok(reply) => options = reply,
             Err(_) => return,
         }
     }
     let learned = EffortOptions::from(&options).filter(|(m, _)| *m == choice.model).map(|(_, e)| e);
-    let _ = tx.send(Msg::Absorb(options));
+    let _ = tx.send(Msg::Absorb(agent, options));
     let Some(effort) = learned.or_else(|| choice.effort.clone()) else { return };
     let Some(chosen) = &choice.chosen_effort else { return };
     if effort.current != *chosen && effort.option(Some(chosen)).is_some() {
-        if let Ok(reply) = set_option(session, &effort.config_id, chosen) {
-            let _ = tx.send(Msg::Absorb(reply));
+        if let Ok(reply) = set_option(agent, session, &effort.config_id, chosen) {
+            let _ = tx.send(Msg::Absorb(agent, reply));
         }
     }
 }
 
-fn ask_worker(tx: &Sender<Msg>, chat: String, generation: u64, session: Option<String>, cwd: PathBuf, prompt: Vec<Value>, choice: ModelChoice) {
+fn ask_worker(tx: &Sender<Msg>, chat: String, generation: u64, session: Option<String>, clone: Option<PathBuf>, prompt: Vec<Value>, choice: ModelChoice) {
+    let agent = choice.agent;
     let fail = |error: String, starting: bool| {
         let _ = tx.send(Msg::Failed { chat: chat.clone(), generation, error, starting });
     };
     let session = match session {
         Some(s) => s,
         None => {
-            let started = new_session(&cwd).and_then(|reply| {
+            let started = new_session(agent, clone.as_deref()).and_then(|reply| {
                 let session = reply.get("sessionId").and_then(Value::as_str).ok_or("The agent didn't start a chat.")?.to_string();
                 let _ = tx.send(Msg::Session { chat: chat.clone(), generation, session: session.clone() });
-                let _ = tx.send(Msg::Models(models_in(&reply)));
-                configure(tx, &session, options(&reply), &choice)?;
+                let _ = tx.send(Msg::Models(agent, models_in(&reply)));
+                configure(tx, &session, &reply, &choice)?;
                 Ok(session)
             });
             match started {
@@ -902,7 +1107,7 @@ fn ask_worker(tx: &Sender<Msg>, chat: String, generation: u64, session: Option<S
         }
     };
     let _ = tx.send(Msg::Working { chat: chat.clone(), generation });
-    match acp::CLIENT.clone().request("session/prompt", json!({"sessionId": session, "prompt": prompt})) {
+    match acp::agent(agent).request("session/prompt", json!({"sessionId": session, "prompt": prompt})) {
         Ok(reply) => {
             let stop = reply.get("stopReason").and_then(Value::as_str).map(str::to_string);
             let _ = tx.send(Msg::Answered { chat, generation, stop });
