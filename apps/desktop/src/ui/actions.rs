@@ -242,7 +242,7 @@ const COMMANDS: &[Command] = &[
     cmd(V, "tab-2", "Discussion", Some("cmd+alt+3"), |s, tx| detail_tab(s, tx, DetailTab::Discussion)),
     sep("View"),
     cmd(V, "sidebar", "Toggle Sidebar", Some("cmd+ctrl+s"), toggle_sidebar),
-    cmd(V, "ask", "Ask Cursor", Some("cmd+l"), toggle_ask),
+    cmd(V, "ask", "Ask an Agent", Some("cmd+l"), toggle_ask),
     cmd(V, "new-chat", "New Chat", Some("cmd+shift+l"), new_chat),
     cmd(V, "choose-model", "Choose Model…", Some("cmd+alt+l"), choose_model),
     cmd(V, "drafts", "Show Drafts", None, toggle_drafts),

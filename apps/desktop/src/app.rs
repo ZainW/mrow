@@ -5,7 +5,9 @@ use std::collections::{HashMap, HashSet};
 
 use rune::TextEdit;
 
-use crate::data::models::{Discussion, MergeRequest};
+use crate::data::ask::proposals::Proposal;
+use crate::data::diff::DiffLine;
+use crate::data::models::{Discussion, FileDiff, MergeRequest};
 use crate::data::prefs;
 use crate::data::store::Store;
 
@@ -80,14 +82,38 @@ pub struct App {
     pub folded_viewed: HashSet<String>,
     /// Whether the first poll ran (and started the first refresh).
     pub started: bool,
-    /// "Ask Cursor": its chats, and the panel beside the card.
+    /// "Ask": its chats, and the panel beside the card.
     pub ask: crate::data::ask::AskStore,
     pub ask_visible: bool,
     pub ask_width: f32,
     pub ask_drag_from: f32,
     /// Activity lines opened to their steps, and long thoughts shown whole: "chat|entry id".
     pub ask_open: HashSet<String>,
+    /// Comments the agent drafted, by `Proposal::key`: the text as edited in the chat, whether
+    /// its editor is open, and where its posting stands (posted ones are kept in settings).
+    pub proposal_edits: HashMap<String, TextEdit>,
+    pub proposal_editing: HashSet<String>,
+    pub proposal_states: HashMap<String, ProposalState>,
+    /// Drafted comments being posted, by the store's ticket.
+    proposal_tickets: HashMap<u64, String>,
     pub updater: crate::data::update::Updater,
+}
+
+/// Where a comment the agent drafted stands. Nothing posts until the user clicks Post.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalState {
+    Posting,
+    Posted,
+    Failed,
+}
+
+/// Where a drafted comment will go once it's approved.
+pub enum ProposalTarget {
+    Line(FileDiff, DiffLine),
+    /// The merge request itself; `missed` is set when its line isn't in the diff.
+    Whole {
+        missed: Option<(String, i64)>,
+    },
 }
 
 /// The settings sheet's text fields, applied as they change.
@@ -143,6 +169,10 @@ impl Default for App {
             ask_width: p.ask_width as f32,
             ask_drag_from: 0.0,
             ask_open: HashSet::new(),
+            proposal_edits: HashMap::new(),
+            proposal_editing: HashSet::new(),
+            proposal_states: p.ask_posted.iter().map(|k| (k.clone(), ProposalState::Posted)).collect(),
+            proposal_tickets: HashMap::new(),
             updater: Default::default(),
         }
     }
@@ -229,8 +259,71 @@ impl App {
         self.posting.insert(ticket, key);
     }
 
+    /// Where a drafted comment goes: its line when the diff has it, else the merge request.
+    pub fn proposal_target(&self, id: &str, proposal: &Proposal) -> ProposalTarget {
+        let (Some(path), Some(number)) = (&proposal.path, proposal.line) else { return ProposalTarget::Whole { missed: None } };
+        let missed = ProposalTarget::Whole { missed: Some((path.clone(), number)) };
+        let Some(files) = self.store.diffs.get(id).and_then(|l| l.value()) else { return missed };
+        let same = |p: &str| p == path || p.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{p}"));
+        let Some(file) = files.iter().find(|f| same(&f.new_path)).or_else(|| files.iter().find(|f| same(&f.old_path))) else { return missed };
+        let found = file
+            .lines
+            .iter()
+            .position(|l| l.new_number == Some(number))
+            .or_else(|| file.lines.iter().position(|l| l.old_number == Some(number) && l.new_number.is_none()));
+        match found {
+            Some(index) => ProposalTarget::Line(file.clone(), file.lines[index].clone()),
+            None => missed,
+        }
+    }
+
+    /// The text a drafted comment posts: as edited, else as drafted, with the place it was
+    /// meant for when that line isn't in the diff.
+    pub fn proposal_text(&self, key: &str, id: &str, proposal: &Proposal) -> String {
+        if let Some(edit) = self.proposal_edits.get(key) {
+            return edit.text.clone();
+        }
+        match self.proposal_target(id, proposal) {
+            ProposalTarget::Whole { missed: Some((path, line)) } => format!("`{path}` line {line}:\n\n{}", proposal.body),
+            _ => proposal.body.clone(),
+        }
+    }
+
+    /// Posts a drafted comment, on the user's click: the one way an agent's comment reaches the forge.
+    pub fn post_proposal(&mut self, key: &str, id: &str, proposal: &Proposal) {
+        let body = self.proposal_text(key, id, proposal).trim().to_string();
+        let busy = matches!(self.proposal_states.get(key), Some(ProposalState::Posting | ProposalState::Posted));
+        if body.is_empty() || busy || proposal.open || self.store.busy.is_some() {
+            return;
+        }
+        let Some(item) = self.store.item(id).cloned() else { return };
+        let ticket = match self.proposal_target(id, proposal) {
+            ProposalTarget::Line(file, line) => {
+                let refs = self.store.diff_refs.get(id).cloned();
+                self.store.comment_on_line(&item, &file, &line, refs, body)
+            }
+            ProposalTarget::Whole { .. } => self.store.comment(&item, body),
+        };
+        self.proposal_editing.remove(key);
+        self.proposal_tickets.insert(ticket, key.to_string());
+        self.proposal_states.insert(key.to_string(), ProposalState::Posting);
+    }
+
     /// Clears the drafts whose comments landed, and closes their boxes.
     pub fn settle_posts(&mut self) -> bool {
+        let landed: Vec<u64> = self.proposal_tickets.keys().copied().filter(|t| self.store.finished.contains_key(t)).collect();
+        for ticket in &landed {
+            let ok = self.store.finished.remove(ticket).unwrap_or(false);
+            if let Some(key) = self.proposal_tickets.remove(ticket) {
+                if ok {
+                    let saved = key.clone();
+                    prefs::update(|p| {
+                        p.ask_posted.insert(saved);
+                    });
+                }
+                self.proposal_states.insert(key, if ok { ProposalState::Posted } else { ProposalState::Failed });
+            }
+        }
         let done: Vec<u64> = self.posting.keys().copied().filter(|t| self.store.finished.contains_key(t)).collect();
         for ticket in &done {
             let ok = self.store.finished.remove(ticket).unwrap_or(false);
@@ -251,6 +344,6 @@ impl App {
                 DraftKey::Comment(_) => {}
             }
         }
-        !done.is_empty()
+        !done.is_empty() || !landed.is_empty()
     }
 }

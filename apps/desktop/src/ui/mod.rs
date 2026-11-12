@@ -142,7 +142,7 @@ fn header(s: &App, p: &Pal) -> El {
                 .on_press_tx(actions::open_in_browser),
         )
         .child(
-            ChromeButton::new("ask-toggle", "Ask Cursor")
+            ChromeButton::new("ask-toggle", format!("Ask {}", selected.map_or(s.ask.agent, |item| s.ask.agent_for(&item.id)).name()))
                 .icon(&I::BUBBLE_TEXT, 14.0)
                 .hint(crate::ui::components::keys("⌘L"))
                 .on(s.ask_visible)

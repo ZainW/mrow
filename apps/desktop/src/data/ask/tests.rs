@@ -86,3 +86,54 @@ fn saved_chats_show_only_the_question() {
     assert_eq!(chat.entries[0].kind, super::EntryKind::Context);
     assert_eq!(chat.entries[1].text, "Why?");
 }
+
+#[test]
+fn models_come_from_settings_or_the_model_list() {
+    // opencode: the models are a setting's choices, some in groups.
+    let opencode = serde_json::json!({"configOptions": [
+        {"id": "model", "category": "model", "currentValue": "openai/gpt-5.5", "options": [
+            {"value": "claude-agent/sonnet", "name": "claude-agent/Sonnet 5.5"},
+            {"group": "openai", "name": "OpenAI", "options": [{"value": "openai/gpt-5.5", "name": "openai/GPT-5.5"}]}
+        ]},
+        {"id": "mode", "category": "mode", "currentValue": "build", "options": [{"value": "build", "name": "Build"}, {"value": "plan", "name": "Plan"}]}
+    ]});
+    let ids: Vec<String> = super::models_in(&opencode).into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, ["claude-agent/sonnet", "openai/gpt-5.5"]);
+
+    // Claude's adapter: a model list beside the settings, and session modes.
+    let claude = serde_json::json!({
+        "models": {"currentModelId": "default", "availableModels": [{"modelId": "default", "name": "Default"}, {"modelId": "opus", "name": "Opus"}]},
+        "modes": {"currentModeId": "default", "availableModes": [{"id": "default"}, {"id": "acceptEdits"}, {"id": "plan"}]}
+    });
+    assert_eq!(super::models_in(&claude).len(), 2);
+    let (model, effort) = EffortOptions::from(&super::options(&claude)).unwrap();
+    assert_eq!(model, "default");
+    assert!(effort.values.is_empty());
+}
+
+#[test]
+fn tools_follow_one_list() {
+    assert_eq!(super::agents::pi_tools(), "read,grep,find,ls");
+    let claude = super::agents::claude_disallowed();
+    assert!(claude.contains(&"Bash") && claude.contains(&"Edit") && !claude.contains(&"Read"));
+    let oc = super::agents::opencode_permissions();
+    assert_eq!((oc["*"].as_str(), oc["bash"].as_str(), oc["grep"].as_str()), (Some("deny"), None, Some("allow")));
+    assert_eq!(oc["read"]["*.env"], "deny");
+}
+
+#[test]
+fn provider_prefixed_models_group_by_maker() {
+    let pi = AgentModel::new("anthropic/claude-opus-4-8", "Claude Opus 4.8");
+    assert_eq!((pi.maker(), pi.family().as_str(), pi.version()), ("Anthropic", "claude-opus", vec![4, 8]));
+    assert_eq!(AgentModel::new("claude-agent/sonnet", "claude-agent/Sonnet 5.5").short_title(), "Sonnet 5.5");
+    assert_eq!(AgentModel::new("openai/gpt-6-sol", "").maker(), "OpenAI");
+    assert_eq!(AgentModel::new("opencode/big-pickle", "").maker(), "Other");
+}
+
+#[test]
+fn pi_tool_calls_read_like_the_others() {
+    let line = |name: &str, args: serde_json::Value| super::pi::tool_line(name, &args);
+    assert_eq!(line("read", serde_json::json!({"path": "src/x.rs"})), ("Read src/x.rs".to_string(), "read"));
+    assert_eq!(line("grep", serde_json::json!({"pattern": "fn main", "path": "src"})), ("Grep \"fn main\" in src".to_string(), "search"));
+    assert_eq!(line("ls", serde_json::json!({})), ("List".to_string(), "search"));
+}

@@ -1,5 +1,6 @@
-//! Cursor's models and their effort settings. Mrow asks for Cursor's "parameterized" model list,
-//! so ids are plain ("claude-sonnet-5-5") and effort is a separate setting.
+//! An agent's models and their effort settings. Mrow asks for Cursor's "parameterized" model
+//! list, so its ids are plain ("claude-sonnet-5-5") and effort is a separate setting. opencode and
+//! pi put the provider first ("anthropic/claude-sonnet-4-5").
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,19 +42,27 @@ impl AgentModel {
         if self.name.is_empty() || self.name == self.id { pretty(&self.id) } else { self.name.clone() }
     }
 
-    /// The title without the maker, for the narrow composer button: "Sonnet 5.5".
+    /// The title without the maker or provider, for the narrow composer button: "Sonnet 5.5".
     pub fn short_title(&self) -> String {
         let title = self.title();
+        let title = title.rsplit_once('/').map(|(_, t)| t.to_string()).unwrap_or(title);
         title.strip_prefix("Claude ").map(str::to_string).unwrap_or(title)
     }
 
+    /// The id without a provider: "anthropic/claude-opus-4-8" → "claude-opus-4-8".
+    fn bare(&self) -> &str {
+        self.id.rsplit_once('/').map_or(self.id.as_str(), |(_, id)| id)
+    }
+
     pub fn maker(&self) -> &'static str {
-        match self.id.split('-').next().unwrap_or("") {
-            "claude" => "Anthropic",
-            "gpt" => "OpenAI",
-            "gemini" => "Google",
-            "grok" => "xAI",
+        let id = self.id.to_lowercase();
+        let has = |words: &[&str]| words.iter().any(|w| id.contains(w));
+        match self.bare().split('-').next().unwrap_or("") {
             "composer" | "auto" => "Cursor",
+            _ if has(&["claude", "anthropic", "opus", "sonnet", "haiku", "fable"]) => "Anthropic",
+            _ if has(&["gpt", "openai", "codex"]) => "OpenAI",
+            _ if has(&["gemini", "google"]) => "Google",
+            _ if has(&["grok", "xai"]) => "xAI",
             _ => "Other",
         }
     }
@@ -63,12 +72,12 @@ impl AgentModel {
         if self.id.starts_with("auto") {
             return "auto".into();
         }
-        self.id.split('-').filter(|p| !is_version(p)).collect::<Vec<_>>().join("-")
+        self.bare().split('-').filter(|p| !is_version(p)).collect::<Vec<_>>().join("-")
     }
 
     /// "claude-opus-4-8" → [4, 8], "gpt-5.4-mini" → [5, 4]: compared to find a family's newest.
     pub fn version(&self) -> Vec<i64> {
-        self.id.split('-').filter(|p| is_version(p)).flat_map(|p| p.split('.')).filter_map(|n| n.parse().ok()).collect()
+        self.bare().split('-').filter(|p| is_version(p)).flat_map(|p| p.split('.')).filter_map(|n| n.parse().ok()).collect()
     }
 
     pub fn newer(&self, other: &AgentModel) -> bool {
@@ -137,7 +146,13 @@ pub struct EffortOption {
     pub name: String,
 }
 
-/// A model's effort setting as Cursor offers it. Its id differs by model ("reasoning_effort",
+/// Whether a config option is the model picker: Cursor calls it "model", opencode gives it the
+/// "model" category.
+pub fn is_model_option(o: &Value) -> bool {
+    o.get("id").and_then(Value::as_str) == Some("model") || o.get("category").and_then(Value::as_str) == Some("model")
+}
+
+/// A model's effort setting as the agent offers it. Its id differs by model ("reasoning_effort",
 /// "effort", "reasoning"); `values` is empty for a model without one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffortOptions {
@@ -155,7 +170,7 @@ impl EffortOptions {
     /// The model a session is on and its effort setting, from a `configOptions` snapshot.
     pub fn from(options: &[Value]) -> Option<(String, EffortOptions)> {
         let s = |o: &Value, k: &str| o.get(k).and_then(Value::as_str).map(str::to_string);
-        let model = options.iter().find(|o| s(o, "id").as_deref() == Some("model")).and_then(|o| s(o, "currentValue"))?;
+        let model = options.iter().find(|o| is_model_option(o)).and_then(|o| s(o, "currentValue"))?;
         let Some(thought) = options.iter().find(|o| s(o, "category").as_deref() == Some("thought_level")) else {
             return Some((model, EffortOptions { config_id: String::new(), values: vec![], current: String::new() }));
         };

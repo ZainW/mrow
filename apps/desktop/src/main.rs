@@ -71,7 +71,8 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if s.ask_visible {
         if let Some(item) = s.store.selected().cloned() {
             s.ask.prepare(&item);
-            s.ask.load_models(false);
+            let agent = s.ask.agent_for(&item.id);
+            s.ask.load_models(agent, false);
         }
     }
     let (asked, ask_wake) = s.ask.poll(&mut s.store);
@@ -219,6 +220,29 @@ fn scene_ask_chat(s: &mut App) {
     );
 }
 
+/// An answer that drafts two comments, one on a diff line, waiting for the user to post them.
+fn scene_ask_comment(s: &mut App) {
+    use ask::EntryKind as K;
+    fixture(s);
+    s.ask_visible = true;
+    let id = s.store.selected_id.clone().unwrap_or_default();
+    s.ask.insert_fixture(
+        &id,
+        Some("/Users/robin/code/ledger".into()),
+        vec![
+            (K::Question, "Draft comments for the replica lag problem.", 40.0),
+            (K::Context, "Description, 3 changed files, 2 threads", 40.0),
+            (K::Tool { kind: "read".into(), done: Some(true) }, "Read src/export/job.rs (1 - 80)", 30.0),
+            (
+                K::Answer,
+                "One on the cursor, and one for the whole change:\n\n```comment src/export/job.rs:15\nThe cursor comes from the replica, so rows written in the last second or two before a batch can be skipped. Could the job take its first cursor from the primary?\n```\n\n```comment\nThe export can come out short without an error when the replica lags. A check that compares the exported row count with the primary's when the job ends would catch it.\n```",
+                10.0,
+            ),
+        ],
+        ask::Phase::Idle,
+    );
+}
+
 fn scene_reviewed(s: &mut App) {
     fixture(s);
     s.store.set_mode(QueueMode::Reviewed);
@@ -276,6 +300,7 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("big-diff", scene_big_diff),
     ("ask", scene_ask),
     ("ask-chat", scene_ask_chat),
+    ("ask-comment", scene_ask_comment),
     ("bench", bench::scene),
 ];
 
@@ -337,44 +362,60 @@ fn dump_queue(name: &str) -> i32 {
     0
 }
 
-/// `--ask-models`: a live check of the Cursor agent client that shares nothing: it opens a chat
-/// in an empty folder, lists the models and learns the chosen model's effort levels.
+/// `--ask-models [question] [--agent cursor|claude|opencode|pi]`: a live check of an agent client
+/// that shares nothing: it opens a chat in an empty folder, lists the models and learns the
+/// chosen model's effort levels, then asks the question if there is one.
 fn dump_models() -> i32 {
     prefs::set_ephemeral(Some(prefs::get()));
+    let args: Vec<String> = std::env::args().collect();
+    let named = args.iter().position(|a| a == "--agent").and_then(|i| args.get(i + 1));
+    let agent = match named.map(|n| ask::agents::AgentKind::from_raw(n)) {
+        Some(Some(a)) => a,
+        Some(None) => {
+            eprintln!("--agent takes cursor, claude, opencode or pi");
+            return 2;
+        }
+        None => ask::agents::AgentKind::Cursor,
+    };
     let mut store = data::store::Store::default();
     let mut ask = ask::AskStore::default();
     ask.remembers_sessions = false;
+    ask.agent = agent;
     let waker: Waker = std::sync::Arc::new(|| {});
     ask.set_waker(waker);
-    ask.load_models(true);
+    ask.load_models(agent, true);
     let started = std::time::Instant::now();
     while started.elapsed().as_secs() < 90 {
         ask.poll(&mut store);
-        if !ask.loading_models {
-            if ask.models.is_empty() {
+        let r = ask.roster(agent);
+        if !r.loading {
+            if r.models.is_empty() || r.model.is_empty() {
                 break;
             }
-            ask.describe();
-            if ask.efforts.contains_key(&ask.model) {
+            let model = r.model.clone();
+            ask.describe(agent);
+            if ask.roster(agent).efforts.contains_key(&model) {
                 break;
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    if let Some(e) = &ask.models_error {
+    let r = ask.roster(agent);
+    if let Some(e) = &r.error {
         println!("error: {e}");
         return 1;
     }
-    let featured: Vec<String> = ask::model::featured(&ask.models).iter().map(|m| m.title()).collect();
-    println!("models: {} ({:.1}s)", ask.models.len(), started.elapsed().as_secs_f64());
+    let featured: Vec<String> = ask::model::featured(&r.models).iter().map(|m| m.title()).collect();
+    println!("{}: {} models ({:.1}s)", agent.name(), r.models.len(), started.elapsed().as_secs_f64());
     println!("featured: {}", featured.join(", "));
-    match ask.efforts.get(&ask.model) {
+    match r.efforts.get(&r.model) {
         Some(e) => {
-            println!("{}: effort {} = {} (of {})", ask.model, e.config_id, e.current, e.values.iter().map(|v| v.name.as_str()).collect::<Vec<_>>().join(", "))
+            println!("{}: effort {} = {} (of {})", r.model, e.config_id, e.current, e.values.iter().map(|v| v.name.as_str()).collect::<Vec<_>>().join(", "))
         }
-        None => println!("{}: no effort levels learned", ask.model),
+        None => println!("{}: no effort levels learned", r.model),
     }
-    if let Some(question) = std::env::args().skip_while(|a| a != "--ask-models").nth(1) {
+    let question = args.iter().skip_while(|a| *a != "--ask-models").nth(1).filter(|q| !q.starts_with("--")).cloned();
+    if let Some(question) = question {
         // A chat about nothing in particular (no merge request goes with it).
         ask.ask("selftest", &question);
         let started = std::time::Instant::now();
@@ -388,7 +429,7 @@ fn dump_models() -> i32 {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        println!("answered in {:.1}s; permission requests declined: {}", started.elapsed().as_secs_f64(), ask::acp::CLIENT.declined());
+        println!("answered in {:.1}s; permission requests declined: {}", started.elapsed().as_secs_f64(), ask::acp::agent(agent).declined());
         for e in ask.chat("selftest").map(|c| c.entries.clone()).unwrap_or_default() {
             let text: String = e.text.chars().take(160).collect();
             println!("[{:?}] {}", e.kind, text.replace('\n', " "));

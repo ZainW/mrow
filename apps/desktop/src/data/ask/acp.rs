@@ -1,15 +1,15 @@
-//! Cursor's agent, run as `agent acp` and spoken to over the Agent Client Protocol: JSON-RPC, one
-//! message per line on its stdin and stdout. One process serves every chat.
+//! An agent spoken to over the Agent Client Protocol (Cursor's `agent acp`, Claude's adapter,
+//! `opencode acp`): JSON-RPC, one message per line on its stdin and stdout. One process per agent
+//! serves every chat.
 //!
-//! Mrow offers it no file or terminal access of its own, and declines anything it asks
-//! permission for, on top of the chats running in Cursor's read-only ask mode.
+//! Mrow offers it no file or terminal access of its own. It allows the agent's permission
+//! requests for the tool kinds in `agents::TOOL_KINDS` and declines the rest.
 //!
 //! Requests block their (worker) thread until the reply; session updates go to the UI thread
 //! through the sink, with a wake.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -17,7 +17,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use rune::Waker;
 use serde_json::{Value, json};
 
-use crate::data::prefs;
+use super::agents::AgentKind;
 
 /// A session update (streamed text, a tool call) for the UI thread.
 pub struct Update {
@@ -37,42 +37,99 @@ struct State {
     generation: u64,
 }
 
+/// What a chat needs of an agent, whichever protocol it speaks underneath. Requests block their
+/// (worker) thread until the reply.
+pub trait Agent: Send + Sync {
+    /// Sends a request and waits for its reply. Starts the agent if it isn't running.
+    fn request(self: Arc<Self>, method: &str, params: Value) -> Result<Value, String>;
+    fn notify(&self, method: &str, params: Value);
+    /// Stops the agent (when quitting); the next request starts a new one.
+    fn stop(&self);
+    /// How many permission requests have been declined since the agent started.
+    fn declined(&self) -> usize {
+        0
+    }
+}
+
+static SINK: Mutex<Option<(Sender<Update>, Option<Waker>)>> = Mutex::new(None);
+
+/// Where every agent's session updates go.
+pub fn set_sink(tx: Sender<Update>, waker: Option<Waker>) {
+    *SINK.lock().unwrap() = Some((tx, waker));
+}
+
+pub fn deliver(update: Update) {
+    if let Some((tx, waker)) = SINK.lock().unwrap().as_ref() {
+        let _ = tx.send(update);
+        if let Some(w) = waker {
+            w();
+        }
+    }
+}
+
+static CLIENTS: LazyLock<Vec<(AgentKind, Arc<dyn Agent>)>> = LazyLock::new(|| {
+    AgentKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let agent: Arc<dyn Agent> = match kind {
+                AgentKind::Pi => Arc::new(super::pi::Pi::default()),
+                _ => Arc::new(Client { kind, state: Mutex::new(State::default()), starting: Mutex::new(false) }),
+            };
+            (kind, agent)
+        })
+        .collect()
+});
+
+/// The one client for this agent.
+pub fn agent(kind: AgentKind) -> Arc<dyn Agent> {
+    CLIENTS.iter().find(|(k, _)| *k == kind).map(|(_, a)| a.clone()).expect("every agent has a client")
+}
+
+/// Stops every agent that's running.
+pub fn stop_all() {
+    for (_, agent) in CLIENTS.iter() {
+        agent.stop();
+    }
+}
+
 pub struct Client {
+    kind: AgentKind,
     state: Mutex<State>,
     /// Held while starting, so concurrent first requests wait for one launch.
     starting: Mutex<bool>,
-    sink: Mutex<Option<(Sender<Update>, Option<Waker>)>>,
 }
 
-pub static CLIENT: LazyLock<Arc<Client>> =
-    LazyLock::new(|| Arc::new(Client { state: Mutex::new(State::default()), starting: Mutex::new(false), sink: Mutex::new(None) }));
-
-impl Client {
-    pub fn set_sink(&self, tx: Sender<Update>, waker: Option<Waker>) {
-        *self.sink.lock().unwrap() = Some((tx, waker));
-    }
-
-    /// How many permission requests have been declined since the agent started.
-    pub fn declined(&self) -> usize {
-        self.state.lock().unwrap().declined
-    }
-
-    /// Sends a request and waits for its reply. Starts the agent if it isn't running.
-    pub fn request(self: &Arc<Self>, method: &str, params: Value) -> Result<Value, String> {
+impl Agent for Client {
+    fn request(self: Arc<Self>, method: &str, params: Value) -> Result<Value, String> {
         self.start()?;
         self.send(method, params)
     }
 
-    pub fn notify(&self, method: &str, params: Value) {
+    fn notify(&self, method: &str, params: Value) {
         self.write(&json!({"jsonrpc": "2.0", "method": method, "params": params}));
     }
 
+    fn stop(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.stdin = None;
+        if let Some(mut child) = s.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn declined(&self) -> usize {
+        self.state.lock().unwrap().declined
+    }
+}
+
+impl Client {
     fn send(&self, method: &str, params: Value) -> Result<Value, String> {
         let (tx, rx) = channel();
         let id = {
             let mut s = self.state.lock().unwrap();
             if s.stdin.is_none() {
-                return Err("Cursor's agent isn't running.".into());
+                return Err(format!("{} isn't running.", self.kind.process()));
             }
             s.next_id += 1;
             let id = s.next_id;
@@ -80,7 +137,7 @@ impl Client {
             id
         };
         self.write(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
-        rx.recv().unwrap_or_else(|_| Err("Cursor's agent stopped.".into()))
+        rx.recv().unwrap_or_else(|_| Err(format!("{} stopped.", self.kind.process())))
     }
 
     fn write(&self, message: &Value) {
@@ -92,16 +149,6 @@ impl Client {
             if stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).is_err() {
                 s.stdin = None;
             }
-        }
-    }
-
-    /// Stops the agent (when quitting); the next request starts a new one.
-    pub fn stop(&self) {
-        let mut s = self.state.lock().unwrap();
-        s.stdin = None;
-        if let Some(mut child) = s.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
         }
     }
 
@@ -119,7 +166,7 @@ impl Client {
                 "clientCapabilities": {
                     "fs": {"readTextFile": false, "writeTextFile": false},
                     "terminal": false,
-                    // Plain model ids, with effort as a separate setting.
+                    // Cursor: plain model ids, with effort as a separate setting.
                     "_meta": {"parameterizedModelPicker": true},
                 },
                 "clientInfo": {"name": "Mrow", "version": "1.0"},
@@ -134,11 +181,12 @@ impl Client {
     }
 
     fn launch(self: &Arc<Self>) -> Result<(), String> {
-        let path = executable()?;
+        let command = self.kind.command()?;
+        let name = self.kind.process();
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
         let path_env = crate::data::paths::child_path();
-        let mut child = Command::new(&path)
-            .arg("acp")
+        let mut child = Command::new(&command[0])
+            .args(&command[1..])
             .current_dir(&home)
             .env("PATH", path_env)
             .env("NO_COLOR", "1")
@@ -146,9 +194,9 @@ impl Client {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Couldn't start Cursor's agent at {path}: {e}"))?;
-        let stdout = child.stdout.take().ok_or("No output from Cursor's agent.")?;
-        let mut stderr = child.stderr.take().ok_or("No error output from Cursor's agent.")?;
+            .map_err(|e| format!("Couldn't start {name} at {}: {e}", command[0]))?;
+        let stdout = child.stdout.take().ok_or_else(|| format!("No output from {name}."))?;
+        let mut stderr = child.stderr.take().ok_or_else(|| format!("No error output from {name}."))?;
         let generation = {
             let mut s = self.state.lock().unwrap();
             s.generation += 1;
@@ -209,7 +257,8 @@ impl Client {
         };
         let detail = errors.trim();
         let tail: String = detail.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect();
-        let failure = if detail.is_empty() { "Cursor's agent stopped.".to_string() } else { format!("Cursor's agent stopped. {tail}") };
+        let name = self.kind.process();
+        let failure = if detail.is_empty() { format!("{name} stopped.") } else { format!("{name} stopped. {tail}") };
         for (_, tx) in waiting {
             let _ = tx.send(Err(failure.clone()));
         }
@@ -223,7 +272,7 @@ impl Client {
                 let Some(id) = id.as_i64() else { return };
                 let tx = self.state.lock().unwrap().waiting.remove(&id);
                 let result = match message.get("error") {
-                    Some(error) => Err(explain(error.get("message").and_then(Value::as_str).unwrap_or("The agent returned an error."))),
+                    Some(error) => Err(explain(self.kind, error.get("message").and_then(Value::as_str).unwrap_or("The agent returned an error."))),
                     None => Ok(message.get("result").cloned().unwrap_or(json!({}))),
                 };
                 if let Some(tx) = tx {
@@ -236,84 +285,56 @@ impl Client {
                 let session = params.and_then(|p| p.get("sessionId")).and_then(Value::as_str);
                 let update = params.and_then(|p| p.get("update"));
                 if let (Some(session), Some(update)) = (session, update) {
-                    self.deliver(Update { session: session.to_string(), update: update.clone() });
+                    deliver(Update { session: session.to_string(), update: update.clone() });
                 }
             }
             _ => {}
         }
     }
 
-    fn deliver(&self, update: Update) {
-        if let Some((tx, waker)) = self.sink.lock().unwrap().as_ref() {
-            let _ = tx.send(update);
-            if let Some(w) = waker {
-                w();
-            }
-        }
-    }
-
-    /// The agent's own requests. Permission is always declined, so nothing it asks to do (edit a
-    /// file, run a command) happens; there's nothing else it may ask Mrow for.
+    /// The agent's own requests. A permission request is allowed when its tool's kind is on the
+    /// list (`agents::TOOL_KINDS`) and declined otherwise; there's nothing else it may ask Mrow for.
     fn answer(&self, id: Value, method: &str, params: Option<&Value>) {
         if method != "session/request_permission" {
             self.write(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("Mrow doesn't offer {method}.")}}));
             return;
         }
-        self.state.lock().unwrap().declined += 1;
-        let reject = params
-            .and_then(|p| p.get("options"))
-            .and_then(Value::as_array)
-            .and_then(|options| options.iter().find(|o| o.get("kind").and_then(Value::as_str).is_some_and(|k| k.starts_with("reject"))))
-            .and_then(|o| o.get("optionId").cloned());
-        let outcome = match reject {
+        let call = params.and_then(|p| p.get("toolCall")).cloned().unwrap_or(json!({}));
+        let allowed = call.get("kind").and_then(Value::as_str).is_some_and(super::agents::allows);
+        let options = params.and_then(|p| p.get("options")).and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        let pick = |prefix: &str| {
+            options.iter().find(|o| o.get("kind").and_then(Value::as_str).is_some_and(|k| k.starts_with(prefix))).and_then(|o| o.get("optionId").cloned())
+        };
+        let choice = if allowed { pick("allow_once").or_else(|| pick("allow")) } else { pick("reject") };
+        let outcome = match choice {
             Some(option) => json!({"outcome": "selected", "optionId": option}),
             None => json!({"outcome": "cancelled"}),
         };
         self.write(&json!({"jsonrpc": "2.0", "id": id, "result": {"outcome": outcome}}));
+        if allowed {
+            return;
+        }
+        self.state.lock().unwrap().declined += 1;
         // Shown in the chat, so it's clear what the agent wanted and didn't get.
         if let Some(session) = params.and_then(|p| p.get("sessionId")).and_then(Value::as_str) {
-            let call = params.and_then(|p| p.get("toolCall")).cloned().unwrap_or(json!({}));
-            self.deliver(Update { session: session.to_string(), update: json!({"sessionUpdate": "mrow_declined", "toolCall": call}) });
+            deliver(Update { session: session.to_string(), update: json!({"sessionUpdate": "mrow_declined", "toolCall": call}) });
         }
     }
 }
 
-fn explain(message: &str) -> String {
+pub fn explain(kind: AgentKind, message: &str) -> String {
     let lower = message.to_lowercase();
     if lower.contains("auth") || lower.contains("log in") || lower.contains("login") || lower.contains("unauthori") {
-        return "Cursor isn't signed in. Run `agent login` in a terminal, then ask again.".into();
+        return kind.sign_in().into();
     }
     message.to_string()
 }
 
 /// `MROW_ACP_LOG=<file>` appends every message, both ways, for debugging.
-fn log(direction: &str, line: &str) {
+pub fn log(direction: &str, line: &str) {
     static FILE: LazyLock<Option<Mutex<std::fs::File>>> =
         LazyLock::new(|| std::env::var_os("MROW_ACP_LOG").and_then(|p| std::fs::File::create(p).ok()).map(Mutex::new));
     if let Some(file) = FILE.as_ref() {
         let _ = file.lock().unwrap().write_all(format!("{direction}{line}").as_bytes());
     }
-}
-
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-/// The agent's path: the one set in Settings, else the usual install places.
-pub fn executable() -> Result<String, String> {
-    let custom = prefs::read(|p| p.agent_path.trim().to_string());
-    if !custom.is_empty() {
-        if !is_executable(Path::new(&custom)) {
-            return Err(format!("Cursor's agent isn't at {custom}. Fix the path in Settings."));
-        }
-        return Ok(custom);
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut candidates = vec![format!("{home}/.local/bin/agent")];
-    candidates.extend(crate::data::paths::tool_dirs().iter().map(|d| d.join("cursor-agent").to_string_lossy().into_owned()));
-    candidates
-        .into_iter()
-        .find(|c| is_executable(Path::new(c)))
-        .ok_or_else(|| "Couldn't find Cursor's agent. Install it (curl https://cursor.com/install -fsS | bash) or set its path in Settings.".to_string())
 }
