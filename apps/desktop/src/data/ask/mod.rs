@@ -399,7 +399,7 @@ impl AskStore {
         prefs::update(|p| p.ask_agent = kind.raw().to_string());
         if let Some(id) = chat {
             if self.chats.get(id).is_some_and(|c| c.agent != kind) {
-                self.new_chat(id);
+                self.restart(id, kind);
             }
         }
         self.load_models(kind, false);
@@ -471,15 +471,20 @@ impl AskStore {
         self.new_chat(&item.id);
     }
 
+    /// A fresh chat on the agent this one was on (the one picked, if it hadn't started).
     pub fn new_chat(&mut self, id: &str) {
-        let agent = self.agent;
+        let agent = self.agent_for(id);
+        self.restart(id, agent);
+    }
+
+    fn restart(&mut self, id: &str, agent: AgentKind) {
         let chat = self.chat_mut(id);
         let session = chat.session.take();
         let was = chat.agent;
         chat.reset();
         chat.agent = agent;
         if let Some(session) = session {
-            acp::agent(was).notify("session/cancel", json!({"sessionId": session}));
+            end_session(was, &session);
             self.by_session.remove(&session);
         }
         self.save_session(id, None);
@@ -641,7 +646,7 @@ impl AskStore {
             Msg::Session { chat: id, generation, session } => {
                 let chat = self.chat_mut(&id);
                 if chat.generation != generation {
-                    acp::agent(chat.agent).notify("session/cancel", json!({"sessionId": session}));
+                    end_session(chat.agent, &session);
                     return;
                 }
                 chat.session = Some(session.clone());
@@ -725,6 +730,9 @@ impl AskStore {
             Msg::Absorb(agent, options) => self.absorb(agent, &options),
             Msg::Catalog(agent, session) => {
                 let r = self.roster_mut(agent);
+                if let Some(old) = r.catalog.take().filter(|old| session.as_ref() != Some(old)) {
+                    end_session(agent, &old);
+                }
                 r.catalog = session;
                 r.describing = false;
             }
@@ -932,6 +940,15 @@ impl AskStore {
 
 // MARK: Workers
 
+/// Stops a session that's no longer wanted. pi runs a process per session, which this ends too.
+fn end_session(agent: AgentKind, session: &str) {
+    let a = acp::agent(agent);
+    a.notify("session/cancel", json!({"sessionId": session}));
+    if agent == AgentKind::Pi {
+        a.notify("session/close", json!({"sessionId": session}));
+    }
+}
+
 /// A reply's settings. An agent that lists its models outside its settings (Claude's adapter)
 /// gets a stand-in model setting, so the rest reads one shape.
 fn options(reply: &Value) -> Vec<Value> {
@@ -978,7 +995,8 @@ fn new_session(agent: AgentKind, clone: Option<&std::path::Path>) -> Result<Valu
 /// Where a session runs and what it starts with. Most run in the clone (or an empty folder).
 /// opencode takes its tool limits only from an `opencode.json` where it runs, so it runs in a
 /// folder of Mrow's with one, and reads the clone as an extra directory. Claude's adapter takes
-/// its tools through `_meta`.
+/// its tools through `_meta`, and starts without the user's settings and MCP servers, whose
+/// allow rules and tools (one that posts a comment, say) would get around the list.
 fn session_params(agent: AgentKind, clone: Option<&std::path::Path>) -> Value {
     let folder = || clone.map(std::path::Path::to_path_buf).unwrap_or_else(empty_folder);
     match agent {
@@ -992,7 +1010,11 @@ fn session_params(agent: AgentKind, clone: Option<&std::path::Path>) -> Value {
         AgentKind::Claude => json!({
             "cwd": folder().to_string_lossy(),
             "mcpServers": [],
-            "_meta": {"claudeCode": {"options": {"disallowedTools": agents::claude_disallowed()}}},
+            "_meta": {"claudeCode": {"options": {
+                "disallowedTools": agents::claude_disallowed(),
+                "settingSources": [],
+                "strictMcpConfig": true,
+            }}},
         }),
         _ => json!({"cwd": folder().to_string_lossy(), "mcpServers": []}),
     }

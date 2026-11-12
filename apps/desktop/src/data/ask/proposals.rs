@@ -50,18 +50,18 @@ fn opening(line: &str) -> Option<(String, &str)> {
     Some((mark.to_string().repeat(count), rest.trim()))
 }
 
-/// "src/x.rs:42" → (path, line). A bare path, or a bad line, is a comment on the whole thing.
+/// "src/x.rs:42" → (path, line). A range ("src/x.rs:40-42") is its first line. A bare path,
+/// or one with a line that isn't a number, keeps its path, so the comment names its file.
 fn target(info: &str) -> (Option<String>, Option<i64>) {
     let info = info.trim().trim_matches('`');
     if info.is_empty() {
         return (None, None);
     }
-    match info.rsplit_once(':') {
-        Some((path, line)) => match line.trim().parse::<i64>() {
-            Ok(n) if n > 0 && !path.is_empty() => (Some(path.to_string()), Some(n)),
-            _ => (None, None),
-        },
-        None => (None, None),
+    let Some((path, line)) = info.rsplit_once(':').filter(|(path, _)| !path.is_empty()) else { return (Some(info.to_string()), None) };
+    let first = line.split(['-', '–']).next().unwrap_or("").trim();
+    match first.parse::<i64>() {
+        Ok(n) if n > 0 => (Some(path.to_string()), Some(n)),
+        _ => (Some(path.to_string()), None),
     }
 }
 
@@ -151,6 +151,9 @@ mod tests {
         assert_eq!(parts, [Segment::Comment(Proposal { path: Some("x.rs".into()), line: Some(3), body: "half a tho".into(), open: true })]);
         assert!(!has_comments("```commentary\nno\n```"));
         assert!(!has_comments("```rust\nlet comment = 1;\n```"));
-        assert_eq!(target("x.rs:abc"), (None, None));
+        assert_eq!(target("x.rs:abc"), (Some("x.rs".into()), None));
+        assert_eq!(target("src/x.rs:40-42"), (Some("src/x.rs".into()), Some(40)));
+        assert_eq!(target("src/x.rs"), (Some("src/x.rs".into()), None));
+        assert_eq!(target(""), (None, None));
     }
 }

@@ -20,12 +20,14 @@ use crate::data::prefs;
 pub const TOOL_KINDS: &[&str] = &["read", "search", "think"];
 
 /// Each agent's own tools by kind: (kind, pi, opencode permission, Claude Code).
-const NATIVE: [(&str, &[&str], &[&str], &[&str]); 5] = [
+const NATIVE: [(&str, &[&str], &[&str], &[&str]); 6] = [
     ("read", &["read"], &["read"], &["Read", "NotebookRead"]),
     ("search", &["grep", "find", "ls"], &["grep", "glob", "list", "codesearch"], &["Grep", "Glob", "LS"]),
     ("fetch", &[], &["webfetch", "websearch"], &["WebFetch", "WebSearch"]),
     ("edit", &["edit", "write"], &["edit"], &["Edit", "Write", "MultiEdit", "NotebookEdit"]),
     ("execute", &["bash"], &["bash"], &["Bash", "BashOutput", "KillShell"]),
+    // Subagents, which would run with tools of their own.
+    ("delegate", &[], &["task"], &["Task"]),
 ];
 
 /// Whether a tool call of this ACP kind may run.
@@ -141,12 +143,19 @@ impl AgentKind {
             _ => p.agent_commands.get(self.raw()).map(|c| c.trim().to_string()).unwrap_or_default(),
         });
         if !custom.is_empty() {
-            let mut words: Vec<String> = custom.split_whitespace().map(str::to_string).collect();
-            if self == AgentKind::Cursor && words.len() == 1 {
+            // Cursor's setting is a path, which may hold spaces; the others are commands.
+            let mut words: Vec<String> = if self == AgentKind::Cursor || is_executable(Path::new(&custom)) {
+                vec![custom.clone()]
+            } else {
+                custom.split_whitespace().map(str::to_string).collect()
+            };
+            if self == AgentKind::Cursor {
                 words.push("acp".into());
             }
-            if !is_executable(Path::new(&words[0])) && find(&words[0]).is_none() {
-                return Err(format!("{} isn't at {}. Fix its command in settings.json.", self.process(), words[0]));
+            // Run what was found, not the bare name: the child's PATH may not have it.
+            match find(&words[0]) {
+                Some(path) => words[0] = path,
+                None => return Err(format!("{} isn't at {}. Fix its command in settings.json.", self.process(), words[0])),
             }
             return Ok(words);
         }
@@ -177,6 +186,29 @@ impl AgentKind {
             }
         }
     }
+}
+
+/// `PATH` for an agent: the program's own folder (where npm puts `node` beside it under nvm),
+/// Mrow's usual one, then the login shell's, so a script's `#!/usr/bin/env node` finds the
+/// node a version manager installed.
+pub fn child_path(program: &str) -> String {
+    static LOGIN: LazyLock<String> = LazyLock::new(|| {
+        Command::new(crate::data::paths::login_shell())
+            .args(["-lc", "printf %s \"$PATH\""])
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    });
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(folder) = Path::new(program).parent().filter(|f| !f.as_os_str().is_empty()) {
+        parts.push(folder.to_string_lossy().into_owned());
+    }
+    parts.push(crate::data::paths::child_path());
+    if !LOGIN.is_empty() {
+        parts.push(LOGIN.clone());
+    }
+    parts.join(":")
 }
 
 pub fn is_executable(path: &Path) -> bool {

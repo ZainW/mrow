@@ -184,7 +184,7 @@ impl Client {
         let command = self.kind.command()?;
         let name = self.kind.process();
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-        let path_env = crate::data::paths::child_path();
+        let path_env = super::agents::child_path(&command[0]);
         let mut child = Command::new(&command[0])
             .args(&command[1..])
             .current_dir(&home)

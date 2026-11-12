@@ -71,6 +71,10 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if s.ask_visible {
         if let Some(item) = s.store.selected().cloned() {
             s.ask.prepare(&item);
+            // A reopened chat's drafted comments need the diff to find their lines.
+            if s.ask.chat(&item.id).is_some_and(|c| !c.entries.is_empty()) {
+                s.store.load_details_if_needed(&item);
+            }
             let agent = s.ask.agent_for(&item.id);
             s.ask.load_models(agent, false);
         }

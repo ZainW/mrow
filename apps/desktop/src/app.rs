@@ -9,7 +9,7 @@ use crate::data::ask::proposals::Proposal;
 use crate::data::diff::DiffLine;
 use crate::data::models::{Discussion, FileDiff, MergeRequest};
 use crate::data::prefs;
-use crate::data::store::Store;
+use crate::data::store::{Loadable, Store};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum DetailTab {
@@ -110,9 +110,12 @@ pub enum ProposalState {
 /// Where a drafted comment will go once it's approved.
 pub enum ProposalTarget {
     Line(FileDiff, DiffLine),
-    /// The merge request itself; `missed` is set when its line isn't in the diff.
+    /// Its line, once the diff has loaded.
+    Waiting,
+    /// The merge request itself; `missed` is the file and line it named when the diff doesn't
+    /// have them (or it named a file and no line).
     Whole {
-        missed: Option<(String, i64)>,
+        missed: Option<(String, Option<i64>)>,
     },
 }
 
@@ -261,9 +264,18 @@ impl App {
 
     /// Where a drafted comment goes: its line when the diff has it, else the merge request.
     pub fn proposal_target(&self, id: &str, proposal: &Proposal) -> ProposalTarget {
-        let (Some(path), Some(number)) = (&proposal.path, proposal.line) else { return ProposalTarget::Whole { missed: None } };
-        let missed = ProposalTarget::Whole { missed: Some((path.clone(), number)) };
-        let Some(files) = self.store.diffs.get(id).and_then(|l| l.value()) else { return missed };
+        let Some(path) = &proposal.path else { return ProposalTarget::Whole { missed: None } };
+        let missed = ProposalTarget::Whole { missed: Some((path.clone(), proposal.line)) };
+        let Some(number) = proposal.line else { return missed };
+        // A diff that hasn't loaded yet isn't one without the line: wait rather than post wide.
+        let files = match self.store.diffs.get(id) {
+            Some(Loadable::Failed(_)) => return missed,
+            Some(l) => match l.value() {
+                Some(files) => files,
+                None => return ProposalTarget::Waiting,
+            },
+            None => return ProposalTarget::Waiting,
+        };
         let same = |p: &str| p == path || p.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{p}"));
         let Some(file) = files.iter().find(|f| same(&f.new_path)).or_else(|| files.iter().find(|f| same(&f.old_path))) else { return missed };
         let found = file
@@ -284,7 +296,8 @@ impl App {
             return edit.text.clone();
         }
         match self.proposal_target(id, proposal) {
-            ProposalTarget::Whole { missed: Some((path, line)) } => format!("`{path}` line {line}:\n\n{}", proposal.body),
+            ProposalTarget::Whole { missed: Some((path, Some(line))) } => format!("`{path}` line {line}:\n\n{}", proposal.body),
+            ProposalTarget::Whole { missed: Some((path, None)) } => format!("`{path}`:\n\n{}", proposal.body),
             _ => proposal.body.clone(),
         }
     }
@@ -303,6 +316,7 @@ impl App {
                 self.store.comment_on_line(&item, &file, &line, refs, body)
             }
             ProposalTarget::Whole { .. } => self.store.comment(&item, body),
+            ProposalTarget::Waiting => return,
         };
         self.proposal_editing.remove(key);
         self.proposal_tickets.insert(ticket, key.to_string());

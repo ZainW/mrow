@@ -405,19 +405,27 @@ fn proposal_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, key: &str, prop
     let state = s.proposal_states.get(key).copied();
     let editing = s.proposal_editing.contains(key) && state != Some(ProposalState::Posted);
     let short = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
-    let (place, warning) = match s.proposal_target(&item.id, &proposal) {
+    let target = s.proposal_target(&item.id, &proposal);
+    let waiting = matches!(target, ProposalTarget::Waiting);
+    let (place, warning) = match target {
+        ProposalTarget::Waiting => (format!("On {} line {}", short(proposal.path.as_deref().unwrap_or("")), proposal.line.unwrap_or(0)), None),
         ProposalTarget::Line(file, line) => {
             let number = line.new_number.or(line.old_number).unwrap_or(0);
             (format!("On {} line {number}", short(&file.new_path)), None)
         }
         ProposalTarget::Whole { missed: None } => (format!("On {}", item.reference()), None),
-        ProposalTarget::Whole { missed: Some((path, line)) } => (
+        ProposalTarget::Whole { missed: Some((path, Some(line))) } => (
             format!("On {}", item.reference()),
             Some(format!("Line {line} of {} isn't in the diff, so this posts on the {} with its place written in.", short(&path), item.kind().noun())),
+        ),
+        ProposalTarget::Whole { missed: Some((path, None)) } => (
+            format!("On {}", item.reference()),
+            Some(format!("It names {} but no line, so it posts on the {} with the file written in.", short(&path), item.kind().noun())),
         ),
     };
     let status = match state {
         _ if proposal.open => "Drafting…".to_string(),
+        None if waiting => "Loading the diff…".into(),
         Some(ProposalState::Posting) => "Posting…".into(),
         Some(ProposalState::Posted) => format!("Posted to {}", item.kind().name()),
         Some(ProposalState::Failed) => "Couldn't post".into(),
@@ -491,7 +499,7 @@ fn proposal_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, key: &str, prop
     if proposal.open || matches!(state, Some(ProposalState::Posting | ProposalState::Posted)) {
         return card;
     }
-    let can_post = !body_text.trim().is_empty() && s.store.busy.is_none();
+    let can_post = !body_text.trim().is_empty() && s.store.busy.is_none() && !waiting;
     let (edit_key, edit_text) = (key.to_string(), body_text.clone());
     let edit_button =
         action_button(p, format!("edit-{key}"), Some(&I::PENCIL_SQUARE), if editing { "Done" } else { "Edit" }, false, true).on_press(move |s: &mut App| {

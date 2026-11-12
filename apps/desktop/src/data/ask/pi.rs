@@ -102,13 +102,21 @@ impl Agent for Pi {
         }
     }
 
+    /// `session/cancel` stops the answer; `session/close` ends the chat's process.
     fn notify(&self, method: &str, params: Value) {
-        if method != "session/cancel" {
-            return;
-        }
         let session = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
-        if let Some(proc) = self.procs.lock().unwrap().get(session) {
-            proc.write(&json!({"type": "abort"}));
+        match method {
+            "session/cancel" => {
+                if let Some(proc) = self.procs.lock().unwrap().get(session) {
+                    proc.write(&json!({"type": "abort"}));
+                }
+            }
+            "session/close" => {
+                if let Some(proc) = self.procs.lock().unwrap().remove(session) {
+                    proc.kill();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -142,7 +150,7 @@ fn launch(cwd: &Path, session: Option<&str>) -> Result<Arc<Proc>, String> {
     let mut child = Command::new(&command[0])
         .args(&args)
         .current_dir(cwd)
-        .env("PATH", crate::data::paths::child_path())
+        .env("PATH", super::agents::child_path(&command[0]))
         .env("NO_COLOR", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -205,13 +213,26 @@ impl Proc {
         }
     }
 
-    /// Sends a command and waits for its response's data.
+    /// Sends a command and waits for its response's data. The waiter is added under the stdin
+    /// lock, which `exited` takes before it fails the waiters, so a reply can't be waited on from
+    /// a process that already exited.
     fn command(&self, mut command: Value) -> Result<Value, String> {
         let id = format!("m{}", self.next_id.fetch_add(1, Ordering::Relaxed));
-        let (tx, rx) = channel();
-        self.waiting.lock().unwrap().insert(id.clone(), tx);
         command["id"] = json!(id);
-        self.write(&command);
+        let mut line = command.to_string();
+        line.push('\n');
+        log("pi>> ", &line);
+        let (tx, rx) = channel();
+        {
+            let mut stdin = self.stdin.lock().unwrap();
+            let Some(pipe) = stdin.as_mut() else { return Err("pi stopped.".into()) };
+            self.waiting.lock().unwrap().insert(id.clone(), tx);
+            if pipe.write_all(line.as_bytes()).and_then(|_| pipe.flush()).is_err() {
+                *stdin = None;
+                self.waiting.lock().unwrap().remove(&id);
+                return Err("pi stopped.".into());
+            }
+        }
         rx.recv().unwrap_or_else(|_| Err("pi stopped.".into()))
     }
 
