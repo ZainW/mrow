@@ -113,8 +113,8 @@ impl Pal {
         k.c.warning.fg = self.amber;
         k.c.info.fg = self.blue;
         k.c.border_focus = self.accent.alpha(0.55);
-        k.ty.ui = ui(12.5, 400.0);
-        k.ty.ui_medium = ui(12.5, 500.0);
+        k.ty.ui = ui(13.0, 400.0);
+        k.ty.ui_medium = ui(13.0, 500.0);
         k.ty.body = ui(13.0, 400.0);
         k.ty.mono = mono(12.0, 400.0);
         k
@@ -127,6 +127,11 @@ impl Pal {
 }
 
 /// Inter, the interface face.
+///
+/// Sizes are whole points on a short scale, so glyphs sit on the pixel grid of a 1x screen:
+/// 12 for captions, counts and labels, 13 for the interface, 14 for comments; 12 for code and
+/// paths; 16 for reading, with titles at 22 and 27. Only diff line numbers and the smallest
+/// badges go down to 11.
 pub const fn ui(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight)
 }
@@ -136,18 +141,27 @@ pub const fn mono(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).mono()
 }
 
-/// Charter, the reading face, for titles and descriptions. macOS ships it; elsewhere it falls
-/// back to a serif, then the interface face.
+/// Charis SIL, the reading face, for titles and descriptions. It comes in regular and bold, so
+/// a semibold title draws bold. Bundled: Linux has no Charter, and a family list that ends in
+/// the generic `serif` lands on the interface face there.
 pub const fn serif(size: f32, weight: f32) -> TextStyle {
-    TextStyle::new(size, weight).family(Family::Named("Charter, Georgia, serif"))
+    TextStyle::new(size, weight).family(Family::Named("Charis SIL"))
 }
 
 pub const MEDIUM: f32 = 500.0;
 pub const SEMIBOLD: f32 = 600.0;
 pub const BOLD: f32 = 700.0;
 
-/// Fonts bundled into the binary: Inter for the interface, Geist Mono for code (both OFL).
-pub const FONTS: &[&[u8]] = &[include_bytes!("../../assets/fonts/InterVariable.ttf"), include_bytes!("../../assets/fonts/GeistMono-Variable.ttf")];
+/// Fonts bundled into the binary: Inter for the interface, Geist Mono for code, Charis SIL for
+/// reading (all OFL; each licence sits beside its font).
+pub const FONTS: &[&[u8]] = &[
+    include_bytes!("../../assets/fonts/InterVariable.ttf"),
+    include_bytes!("../../assets/fonts/GeistMono-Variable.ttf"),
+    include_bytes!("../../assets/fonts/CharisSIL-Regular.ttf"),
+    include_bytes!("../../assets/fonts/CharisSIL-Bold.ttf"),
+    include_bytes!("../../assets/fonts/CharisSIL-Italic.ttf"),
+    include_bytes!("../../assets/fonts/CharisSIL-BoldItalic.ttf"),
+];
 
 pub const FAMILIES: (&str, &str) = ("Inter", "Geist Mono");
 

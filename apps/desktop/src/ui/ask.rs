@@ -88,7 +88,7 @@ fn header(s: &App, p: &Pal, item: &MergeRequest, empty: bool) -> El {
     let has_entries = s.ask.chat(&item.id).is_some_and(|c| !c.entries.is_empty());
     let mut r = row().key("ask-header").w_full().h(40.0).pl(14.0).pr(8.0).gap(6.0).center_y().child(agent_chip(s, p, item));
     if !empty {
-        r = r.child(text(item.reference()).font(mono(11.5, 400.0)).color(p.tertiary).single_line().help(item.title.clone()));
+        r = r.child(text(item.reference()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().help(item.title.clone()));
     }
     let id = item.id.clone();
     r.child(el().grow(1.0))
@@ -167,14 +167,14 @@ fn greeting(s: &App, p: &Pal, item: &MergeRequest) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(spark(p, s, false, 22.0))
-                .child(text(format!("Ask about {}", item.reference())).font(serif(23.0, SEMIBOLD)).color(p.text).single_line()),
+                .child(text(format!("Ask about {}", item.reference())).font(serif(22.0, SEMIBOLD)).color(p.text).single_line()),
         )
         .child(
             text(format!(
                 "{} reads the description, the diff, the threads and your clone. It can't edit files or run commands, and the comments it drafts post only when you approve them.",
                 s.ask.agent_for(&item.id).name()
             ))
-            .font(ui(12.5, 400.0).lines(1.45))
+            .font(ui(13.0, 400.0).lines(1.45))
             .color(p.secondary)
             .wrap()
             .align(rune::Align::Center),
@@ -344,12 +344,12 @@ fn question(p: &Pal, item: &MergeRequest, e: &Entry, context: Option<&Entry>) ->
                     .center_y()
                     .help(format!("Shared with the first question: {}", context.text))
                     .child(icon(&I::PULL, 10.0).color(p.accent))
-                    .child(text(item.reference()).font(mono(11.0, MEDIUM)).color(p.secondary).single_line())
-                    .child(text(context.text.clone()).font(ui(11.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0)),
+                    .child(text(item.reference()).font(mono(12.0, MEDIUM)).color(p.secondary).single_line())
+                    .child(text(context.text.clone()).font(ui(12.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0)),
             )
             .child(rule(p));
     }
-    c.child(text(e.text.clone()).font(ui(13.5, 400.0).lines(1.4)).color(p.text).wrap().selectable(true).px(12.0).py(10.0).w_full())
+    c.child(text(e.text.clone()).font(ui(14.0, 400.0).lines(1.4)).color(p.text).wrap().selectable(true).px(12.0).py(10.0).w_full())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -384,14 +384,14 @@ fn answer(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, chat: &Chat, e: &Entry
             .radius(6.0)
             .hover(p.hover)
             .child(icon(&I::BUBBLE_TEXT, 11.0).color(p.tertiary))
-            .child(text("Comment").font(ui(11.5, 400.0)).color(p.tertiary))
+            .child(text("Comment").font(ui(12.0, 400.0)).color(p.tertiary))
             .on_press_tx(move |s: &mut App, tx: &mut Tx| draft_comment(s, tx, &id, &body));
         let buttons = row()
             .gap(4.0)
             .center_y()
             .ml(-5.0)
             .child(copy_button(s, p, &format!("answer-{}", e.id), copy, "Copy Answer"))
-            .child(text("Copy").font(ui(11.5, 400.0)).color(p.tertiary));
+            .child(text("Copy").font(ui(12.0, 400.0)).color(p.tertiary));
         // An answer with drafted comments posts through their cards instead.
         let buttons = if proposals::has_comments(&e.text) { buttons } else { buttons.child(comment.ml(6.0)) };
         c = c.child(if latest { buttons } else { buttons.group_opacity(0.0, 1.0) });
@@ -443,12 +443,12 @@ fn proposal_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, key: &str, prop
         .gap(6.0)
         .center_y()
         .child(icon(&I::BUBBLE_TEXT, 11.0).color(p.accent))
-        .child(text(format!("Draft comment · {place}")).font(ui(11.5, MEDIUM)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
+        .child(text(format!("Draft comment · {place}")).font(ui(12.0, MEDIUM)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
         .child(el().grow(1.0));
     if state == Some(ProposalState::Posted) {
         head = head.child(icon(&I::CHECK, 11.0).color(tint));
     }
-    head = head.child(text(status).font(ui(11.5, 400.0)).color(tint).single_line());
+    head = head.child(text(status).font(ui(12.0, 400.0)).color(tint).single_line());
     let body_text = s.proposal_text(key, &item.id, &proposal);
     let body = if editing {
         let edit_key = key.to_string();
@@ -471,7 +471,7 @@ fn proposal_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, key: &str, prop
             s,
             p,
             k,
-            Doc { key: &doc_key, source: &body_text, base: item.project_url(), size: 13.5, serif: false },
+            Doc { key: &doc_key, source: &body_text, base: item.project_url(), size: 14.0, serif: false },
         ))
     };
     let mut card = col()
@@ -493,7 +493,7 @@ fn proposal_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, key: &str, prop
                 .gap(6.0)
                 .items_start()
                 .child(icon(&I::WARNING, 11.0).color(p.amber).mt(2.0))
-                .child(text(warning).font(ui(11.5, 400.0).lines(1.4)).color(p.secondary).wrap().grow(1.0).shrink().min_w(0.0)),
+                .child(text(warning).font(ui(12.0, 400.0).lines(1.4)).color(p.secondary).wrap().grow(1.0).shrink().min_w(0.0)),
         );
     }
     if proposal.open || matches!(state, Some(ProposalState::Posting | ProposalState::Posted)) {
@@ -585,7 +585,7 @@ fn failure(p: &Pal, item: &MergeRequest, e: &Entry, retry: bool) -> El {
             .gap(8.0)
             .items_start()
             .child(icon(&I::WARNING, 12.0).color(p.red).mt(2.0))
-            .child(text(e.text.clone()).font(ui(12.5, 400.0).lines(1.4)).color(p.text).wrap().selectable(true).grow(1.0).shrink().min_w(0.0)),
+            .child(text(e.text.clone()).font(ui(13.0, 400.0).lines(1.4)).color(p.text).wrap().selectable(true).grow(1.0).shrink().min_w(0.0)),
     );
     if retry {
         let id = item.id.clone();
@@ -718,7 +718,7 @@ fn activity(s: &App, p: &Pal, chat: &Chat, steps: &[&Entry], live: bool) -> El {
     if live {
         head = head.child(spark(p, s, true, 12.0));
     }
-    head = head.child(text(label).font(ui(12.5, 400.0)).color(p.secondary).single_line().truncate().shrink().min_w(0.0));
+    head = head.child(text(label).font(ui(13.0, 400.0)).color(p.secondary).single_line().truncate().shrink().min_w(0.0));
     if live {
         if let Some(since) = chat.turn_started {
             head = head.child(elapsed(p, since, true));
@@ -783,7 +783,7 @@ fn step_row(s: &App, p: &Pal, chat: &Chat, step: &Entry, live: bool, last: bool)
                 if whole { t } else { t.max_lines(4) }
             });
             if long && !whole {
-                c = c.child(text("Show all").key(format!("show-{}", step.id)).role("button").font(ui(11.5, MEDIUM)).color(p.accent).on_press(
+                c = c.child(text("Show all").key(format!("show-{}", step.id)).role("button").font(ui(12.0, MEDIUM)).color(p.accent).on_press(
                     move |s: &mut App| {
                         s.ask_open.insert(key.clone());
                     },
@@ -794,7 +794,7 @@ fn step_row(s: &App, p: &Pal, chat: &Chat, step: &Entry, live: bool, last: bool)
         EntryKind::Tool { done, .. } => {
             let (verb, rest) = split_title(&step.text);
             let line = if rest.is_empty() { verb.clone() } else { format!("{verb}  {rest}") };
-            let spans = vec![Span::new(0, verb.len()).weight(MEDIUM).color(p.secondary), Span::new(verb.len(), line.len()).mono().size(11.0).color(p.tertiary)];
+            let spans = vec![Span::new(0, verb.len()).weight(MEDIUM).color(p.secondary), Span::new(verb.len(), line.len()).mono().size(12.0).color(p.tertiary)];
             let mut r = row()
                 .w_full()
                 .min_h(18.0)
@@ -830,7 +830,7 @@ fn working_line(s: &App, p: &Pal, label: &str, since: Option<f64>, stoppable: bo
         .gap(7.0)
         .center_y()
         .child(spark(p, s, true, 13.0))
-        .child(text(format!("{label}…")).font(ui(12.5, MEDIUM)).color(p.secondary).single_line());
+        .child(text(format!("{label}…")).font(ui(13.0, MEDIUM)).color(p.secondary).single_line());
     if let Some(since) = since {
         r = r.child(elapsed(p, since, stoppable));
     }
@@ -841,7 +841,7 @@ fn working_line(s: &App, p: &Pal, label: &str, since: Option<f64>, stoppable: bo
 fn elapsed(p: &Pal, since: f64, stoppable: bool) -> El {
     let seconds = (wall() - since).max(0.0).floor();
     let label = if seconds < 1.0 { String::new() } else { format!("{}{}", duration(seconds), if stoppable { " · esc to stop" } else { "" }) };
-    text(label).font(ui(11.5, 400.0).features("'tnum' 1")).color(p.tertiary).single_line()
+    text(label).font(ui(12.0, 400.0).features("'tnum' 1")).color(p.tertiary).single_line()
 }
 
 // MARK: Composer
@@ -855,7 +855,7 @@ fn composer(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, chat: Option<&Chat>)
     let placeholder = if chat.is_some_and(Chat::has_question) { "Reply…".to_string() } else { format!("How can I help with {}?", item.reference()) };
     let (edit_id, key_id) = (item.id.clone(), item.id.clone());
     // A bare editor: the composer is the field's frame.
-    let field = rune::text_input(edit, ui(13.5, 400.0).lines(1.4))
+    let field = rune::text_input(edit, ui(14.0, 400.0).lines(1.4))
         .key("input")
         .w_full()
         .color(p.text)

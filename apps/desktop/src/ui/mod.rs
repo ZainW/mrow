@@ -179,7 +179,7 @@ fn tab_chip(p: &Pal, item: &MergeRequest, active: bool, preview: bool, unread: b
     let reference = format!("{}{}", item.kind().reference_mark(), item.iid);
     let label = format!("{reference}  {}", item.title);
     let spans = vec![
-        Span::new(0, reference.len()).mono().size(11.5).weight(MEDIUM).color(if active { p.text } else { p.secondary }),
+        Span::new(0, reference.len()).mono().size(12.0).weight(MEDIUM).color(if active { p.text } else { p.secondary }),
         Span::new(reference.len(), label.len()).color(if active { p.secondary } else { p.tertiary }),
     ];
     let close_id = item.id.clone();
@@ -213,7 +213,7 @@ fn tab_chip(p: &Pal, item: &MergeRequest, active: bool, preview: bool, unread: b
         .radius(8.0)
         .hover_group()
         .child(glyph)
-        .child(rich(label, spans).font(ui(12.5, 400.0)).single_line().truncate().max_w(200.0));
+        .child(rich(label, spans).font(ui(13.0, 400.0)).single_line().truncate().max_w(200.0));
     if unread && !active {
         chip = chip.child(el().size(5.0, 5.0).radius(2.5).fill(p.accent));
     }
@@ -307,6 +307,6 @@ fn toast(p: &Pal, message: &str) -> El {
             .fill(p.elevated)
             .border(1.0, p.line)
             .shadow(4.0, 14.0, crate::ui::theme::shade(if p.dark { 0.4 } else { 0.1 }))
-            .child(text(message.to_string()).font(ui(12.5, MEDIUM)).color(p.text).single_line()),
+            .child(text(message.to_string()).font(ui(13.0, MEDIUM)).color(p.text).single_line()),
     )
 }

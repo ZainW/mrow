@@ -60,7 +60,7 @@ fn close(s: &mut App, _: &mut Tx) {
 }
 
 fn section(p: &Pal, title: &str, rows: Vec<El>) -> El {
-    let mut c = col().w_full().gap(10.0).child(text(title.to_uppercase()).font(ui(10.5, SEMIBOLD).tracking(0.6)).color(p.tertiary));
+    let mut c = col().w_full().gap(10.0).child(text(title.to_uppercase()).font(ui(11.0, SEMIBOLD).tracking(0.6)).color(p.tertiary));
     for r in rows {
         c = c.child(r);
     }
@@ -72,7 +72,7 @@ fn line(p: &Pal, label: &str, content: El) -> El {
         .w_full()
         .gap(12.0)
         .center_y()
-        .child(el().w(120.0).child(text(label.to_string()).font(ui(12.5, 400.0)).color(p.secondary).single_line().self_end()).items_end())
+        .child(el().w(120.0).child(text(label.to_string()).font(ui(13.0, 400.0)).color(p.secondary).single_line().self_end()).items_end())
         .child(content.shrink().min_w(0.0))
 }
 
@@ -114,7 +114,7 @@ fn account(s: &App, p: &Pal, k: &Kit, prefs: &Prefs, forge: Forge) -> El {
             Some(a) if a.error.is_some() => (a.error.clone().unwrap(), true),
             _ => (format!("Not yet. Run “{}” in a terminal.", forge.cli().login_command), false),
         };
-        rows.push(line(p, "Signed in as", text(signed).font(ui(12.5, 400.0)).color(if failed { p.red } else { p.secondary }).wrap().max_lines(2)));
+        rows.push(line(p, "Signed in as", text(signed).font(ui(13.0, 400.0)).color(if failed { p.red } else { p.secondary }).wrap().max_lines(2)));
         let (host, path) = match forge {
             Forge::Gitlab => (&s.settings.hostname, &s.settings.glab_path),
             Forge::Github => (&s.settings.github_host, &s.settings.gh_path),
@@ -175,7 +175,7 @@ fn picker(p: &Pal, key: &'static str, options: &'static [(&'static str, &'static
         .fill(p.paper)
         .border(1.0, p.strong_line)
         .hover(p.hover)
-        .child(text(title).font(ui(12.5, 400.0)).color(p.text).single_line())
+        .child(text(title).font(ui(13.0, 400.0)).color(p.text).single_line())
         .child(icon(&I::CHEVRON_UP_DOWN, 10.0).color(p.secondary))
         .on_press_tx(move |_: &mut App, tx: &mut Tx| {
             let menu = PopupMenu::picker(options.iter().copied(), &selected);
@@ -195,7 +195,7 @@ fn queue(p: &Pal, k: &Kit, prefs: &Prefs) -> El {
     let stepper = row()
         .gap(8.0)
         .center_y()
-        .child(text(format!("{days} days")).font(ui(12.5, 400.0).features("'tnum' 1")).color(p.text))
+        .child(text(format!("{days} days")).font(ui(13.0, 400.0).features("'tnum' 1")).color(p.text))
         .child(step(p, "done-less", "−", days > 1, -1))
         .child(step(p, "done-more", "+", days < 90, 1));
     section(
@@ -287,10 +287,10 @@ fn updates(s: &App, p: &Pal, k: &Kit, prefs: &Prefs) -> El {
         .min_w(0.0)
         .gap(6.0)
         .center_y()
-        .child(text(update::VERSION).font(ui(12.5, 400.0).features("'tnum' 1")).color(p.text).single_line());
+        .child(text(update::VERSION).font(ui(13.0, 400.0).features("'tnum' 1")).color(p.text).single_line());
     if !status.is_empty() {
         let tint = if failed { p.red } else { p.tertiary };
-        version = version.child(text(status.clone()).font(ui(12.5, 400.0)).color(tint).truncate().shrink().min_w(0.0).help(status));
+        version = version.child(text(status.clone()).font(ui(13.0, 400.0)).color(tint).truncate().shrink().min_w(0.0).help(status));
     }
     let button = if u.ready().is_some() {
         action_button(p, "restart-update", None, "Restart to Update", true, true).on_press_tx(actions::restart_to_update)

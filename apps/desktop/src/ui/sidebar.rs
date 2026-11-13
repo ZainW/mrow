@@ -63,7 +63,7 @@ fn account_switcher(store: &Store, p: &Pal) -> El {
     let mut names = col().child(text(forge.name()).font(ui(13.0, SEMIBOLD)).color(p.text).single_line());
     if let Some(sub) = subtitle {
         let color = if store.error().is_some() { p.red } else { p.tertiary };
-        names = names.child(text(sub).font(ui(11.0, 400.0)).color(color).single_line().truncate());
+        names = names.child(text(sub).font(ui(12.0, 400.0)).color(color).single_line().truncate());
     }
     let others: usize = store.forges().into_iter().filter(|f| *f != forge).map(|f| store.waiting_count(f)).sum();
     let mut r = row()
@@ -93,7 +93,7 @@ fn account_switcher(store: &Store, p: &Pal) -> El {
                 .fill(p.accent_soft)
                 .center()
                 .help(format!("{others} waiting in your other account"))
-                .child(text(others.to_string()).font(ui(10.5, SEMIBOLD)).color(p.accent).single_line()),
+                .child(text(others.to_string()).font(ui(11.0, SEMIBOLD)).color(p.accent).single_line()),
         );
     }
     r.on_press_tx(|s: &mut App, tx: &mut Tx| menus::accounts(s, tx))
@@ -125,7 +125,7 @@ fn filter_box(s: &App, p: &Pal, k: &Kit) -> El {
         .plain()
         .width(None)
         .height(28.0)
-        .text_style(ui(12.5, 400.0))
+        .text_style(ui(13.0, 400.0))
         .placeholder(format!("Filter {noun}"))
         .on_edit(|s: &mut App| &mut s.filter)
         .on_change(|s: &mut App, _: &mut Tx| {
@@ -320,7 +320,7 @@ fn queue(rows: El) -> El {
 }
 
 pub fn section_header(p: &Pal, title: &str) -> El {
-    el().w_full().px(18.0).pt(14.0).pb(4.0).child(text(title.to_string()).font(ui(11.5, MEDIUM)).color(p.tertiary).single_line())
+    el().w_full().px(18.0).pt(14.0).pb(4.0).child(text(title.to_string()).font(ui(12.0, MEDIUM)).color(p.tertiary).single_line())
 }
 
 fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El {
@@ -356,7 +356,7 @@ fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El
         )
         .child(
             text(short_time(when))
-                .font(ui(11.0, MEDIUM).features("'tnum' 1"))
+                .font(ui(12.0, MEDIUM).features("'tnum' 1"))
                 .color(if stale { p.accent } else { p.tertiary })
                 .single_line()
                 .pt(1.5)
@@ -365,9 +365,9 @@ fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El
     let meta = row()
         .gap(6.0)
         .center_y()
-        .child(text(item.short_reference()).font(mono(11.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0))
-        .child(text("·").font(ui(11.5, 400.0)).color(p.tertiary))
-        .child(text(item.author.name.clone()).font(ui(11.5, 400.0)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
+        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0))
+        .child(text("·").font(ui(12.0, 400.0)).color(p.tertiary))
+        .child(text(item.author.name.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
         .child(el().grow(1.0).min_w(4.0))
         .child(badges(p, item));
     let mut body = col().gap(4.0).grow(1.0).shrink().min_w(0.0).child(title_row);
@@ -409,7 +409,7 @@ fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El
 fn badges(p: &Pal, item: &MergeRequest) -> El {
     let mut r = row().gap(5.0).center_y();
     if item.draft {
-        r = r.child(el().h(16.0).px(5.0).radius(4.0).fill(p.hover).center().child(text("Draft").font(ui(10.5, MEDIUM)).color(p.secondary).single_line()));
+        r = r.child(el().h(16.0).px(5.0).radius(4.0).fill(p.hover).center().child(text("Draft").font(ui(11.0, MEDIUM)).color(p.secondary).single_line()));
     }
     if item.was_re_requested() && item.my_state.needs_review() {
         r = r.child(icon(&I::REFRESH, 11.0).color(p.tertiary).help("Review re-requested"));
@@ -436,7 +436,7 @@ fn empty_state(s: &App, p: &Pal) -> El {
             .gap(10.0)
             .items_center()
             .child(Spinner::new().size(16.0).build(&p.kit()))
-            .child(text(format!("Asking {}…", forge.name())).font(ui(12.5, 400.0)).color(p.secondary));
+            .child(text(format!("Asking {}…", forge.name())).font(ui(13.0, 400.0)).color(p.secondary));
     }
     if let (Some(error), None) = (store.error(), store.last_refreshed()) {
         return message(p, Some(&I::WARNING), &[&error]).child(
@@ -485,7 +485,7 @@ fn footer(s: &App, p: &Pal, dark: bool) -> El {
         let offline = store.error();
         let label = if offline.is_some() { "Offline".to_string() } else { format!("Updated {}", short_time(last)) };
         let tip = offline.unwrap_or_else(|| last.with_timezone(&chrono::Local).format("%H:%M").to_string());
-        r = r.child(text(label).font(ui(11.0, 400.0)).color(if store.error().is_some() { p.red } else { p.tertiary }).single_line().help(tip));
+        r = r.child(text(label).font(ui(12.0, 400.0)).color(if store.error().is_some() { p.red } else { p.tertiary }).single_line().help(tip));
     }
     r.child(ChromeButton::new("appearance", "Switch Appearance").icon(&I::APPEARANCE, 14.0).build(p).on_press(move |_: &mut App| {
         prefs::update(|p| p.appearance = if dark { Appearance::Light } else { Appearance::Dark });
@@ -506,7 +506,7 @@ fn update_button(p: &Pal, version: &str) -> El {
         .fill(p.accent_soft)
         .hover(p.accent.alpha(0.22))
         .press(p.accent.alpha(0.28))
-        .child(text("Restart to Update").font(ui(11.0, SEMIBOLD)).color(p.accent).single_line())
+        .child(text("Restart to Update").font(ui(12.0, SEMIBOLD)).color(p.accent).single_line())
         .help(format!("Mrow {version} is downloaded. Restarting puts it in place."))
         .on_press_tx(actions::restart_to_update)
 }
