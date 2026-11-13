@@ -104,6 +104,9 @@ pub struct Prefs {
     pub ask_effort_options: BTreeMap<String, Value>,
 }
 
+/// The queue's width until someone drags it: about a quarter of the default window.
+const SIDEBAR_WIDTH: f64 = 300.0;
+
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
@@ -123,7 +126,7 @@ impl Default for Prefs {
             inbox: Vec::new(),
             inbox_snapshot: None,
             auto_update: true,
-            sidebar_width: 340.0,
+            sidebar_width: SIDEBAR_WIDTH,
             ask_width: 400.0,
             ask_visible: false,
             sidebar_visible: true,
@@ -217,7 +220,11 @@ fn file() -> PathBuf {
 
 fn load() -> Prefs {
     if let Ok(bytes) = std::fs::read(file()) {
-        if let Ok(prefs) = serde_json::from_slice(&bytes) {
+        if let Ok(mut prefs) = serde_json::from_slice::<Prefs>(&bytes) {
+            // 340 was the width before; a file still holding exactly that was never dragged.
+            if prefs.sidebar_width == 340.0 {
+                prefs.sidebar_width = SIDEBAR_WIDTH;
+            }
             return prefs;
         }
     }
