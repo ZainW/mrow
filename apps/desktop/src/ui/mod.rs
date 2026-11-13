@@ -68,7 +68,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     if s.sidebar_visible {
         body = body.child(sidebar::sidebar(s, p, k, dark));
     }
-    let card = card(s, p, k);
+    let card = card(s, p, k, cx);
     let mut card_wrap = row().key("card-wrap").grow(1.0).shrink().min_w(0.0).h_full().pr(GUTTER).pb(GUTTER).child(card);
     if !s.sidebar_visible {
         card_wrap = card_wrap.pl(GUTTER);
@@ -244,14 +244,15 @@ fn tab_chip(p: &Pal, item: &MergeRequest, active: bool, preview: bool, unread: b
         .on_secondary_press(move |s: &mut App, at: PointerPress, tx: &mut Tx| menus::tab(s, &id3, preview, at, tx))
 }
 
-fn card(s: &App, p: &Pal, k: &Kit) -> El {
+fn card(s: &App, p: &Pal, k: &Kit, cx: &Cx<App>) -> El {
     let inner = match s.store.selected() {
-        Some(item) => detail::detail(s, p, k, item),
+        // The card's width decides whether the contents rail fits; it changes on a resize, not a scroll.
+        Some(item) => detail::detail(s, p, k, item, cx.layout_with("card-wrap/card", detail::rail_inset).flatten()),
         None => placeholder(s, p),
     };
     col()
         .key("card")
-        // Switching reviews and tabs happens all day: the page changes at once, with no
+        // Switching reviews and parts happens all day: the page changes at once, with no
         // cross-fade or rows growing in (the Ask panel beside it keeps its streaming motion).
         .instant_changes()
         .grow(1.0)
