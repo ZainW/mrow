@@ -1,7 +1,7 @@
 {
   "name": "mrow",
   "private": true,
-  "packageManager": "pnpm@12.11.2",
+  "packageManager": "pnpm@12.18.0",
   "scripts": {
     "dev": "pnpm --filter @mrow/web dev",
     "build:web": "pnpm --filter @mrow/web build",

@@ -472,6 +472,12 @@ fn main() {
     if headless {
         // Snapshots draw from default settings and never write the person's.
         prefs::set_ephemeral(Some(prefs::Prefs::default()));
+    } else if data::update::ENABLED && !rune::is_headless() && !rune::single_instance("com.zain.mrow") {
+        // Linux starts a process per launch: a second launch of the installed Mrow hands over to
+        // the one already running, window closed or not, which shows its window (`on_reopen`).
+        // macOS does this itself. Only release-workflow builds claim the name, so a local debug,
+        // release or perf build runs beside the installed copy.
+        return;
     }
     // On Linux the window reports this as its Wayland app_id / X11 WM_CLASS, so the desktop
     // matches it to packaging/linux/com.zain.mrow.desktop and its icon. Same id as the macOS bundle.
@@ -494,7 +500,11 @@ fn main() {
         // Closing the window keeps the app (and its badge) around, like Mail.
         .keep_running()
         .on_reopen(|_: &mut App, _visible: bool, _: &mut Tx| true)
-        .on_quit(|s: &mut App, _: &mut Tx| s.ask.shutdown());
+        .on_quit(|s: &mut App, _: &mut Tx| {
+            s.ask.shutdown();
+            // A launch that came while quitting starts the next Mrow, which can claim the name now.
+            rune::release_instance();
+        });
     for item in ui::actions::menu_items() {
         app = app.menu_item(item);
     }

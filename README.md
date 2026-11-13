@@ -35,7 +35,7 @@ scripts/install.sh                     # macOS: release build into ~/Application
 scripts/package-linux.sh --install     # Linux: tarball in dist/, installed into ~/.local
 scripts/docker-linux.sh                # Linux tarball from a Mac, through Docker
 
-# Website: needs Node 24 and pnpm
+# Website: needs Node 26 and pnpm
 pnpm install
 pnpm dev                               # apps/web dev server
 ```

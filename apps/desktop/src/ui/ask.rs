@@ -17,7 +17,7 @@ use crate::data::ask::proposals::{self, Proposal, Segment};
 use crate::data::ask::{Chat, Entry, EntryKind, Phase, wall};
 use crate::data::models::MergeRequest;
 use crate::data::prefs;
-use crate::ui::components::{ChromeButton, action_button, copy_button};
+use crate::ui::components::{ChromeButton, action_button, copy_button, rule};
 use crate::ui::icons as I;
 use crate::ui::markdown::{self, Doc};
 use crate::ui::theme::LineHeight as _;
@@ -56,7 +56,7 @@ pub fn panel(s: &App, p: &Pal, k: &Kit, item: &MergeRequest) -> El {
         .border(1.0, p.line)
         .clip_rounded(CARD_RADIUS)
         .child(header(s, p, item, empty))
-        .child(el().w_full().h(1.0).fill(p.line));
+        .child(rule(p));
     if empty {
         c = c
             .child(el().grow(1.0).min_h(12.0))
@@ -347,7 +347,7 @@ fn question(p: &Pal, item: &MergeRequest, e: &Entry, context: Option<&Entry>) ->
                     .child(text(item.reference()).font(mono(11.0, MEDIUM)).color(p.secondary).single_line())
                     .child(text(context.text.clone()).font(ui(11.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0)),
             )
-            .child(el().w_full().h(1.0).fill(p.line));
+            .child(rule(p));
     }
     c.child(text(e.text.clone()).font(ui(13.5, 400.0).lines(1.4)).color(p.text).wrap().selectable(true).px(12.0).py(10.0).w_full())
 }
@@ -482,7 +482,7 @@ fn proposal_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, key: &str, prop
         .border(1.0, if state == Some(ProposalState::Posted) { p.green.alpha(0.35) } else { p.strong_line })
         .clip_rounded(10.0)
         .child(head)
-        .child(el().w_full().h(1.0).fill(p.line))
+        .child(rule(p))
         .child(body);
     if let Some(warning) = warning.filter(|_| state != Some(ProposalState::Posted)) {
         card = card.child(

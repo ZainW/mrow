@@ -308,9 +308,9 @@ pub fn filled_mark(fill: &'static Icon, mark: &'static Icon, color: rune::Color,
     el().size(size, size).child(icon(fill, size).color(color).absolute(0.0, 0.0)).child(icon(mark, size).color(ink).absolute(0.0, 0.0))
 }
 
-/// A hairline rule.
+/// A 1-point rule, snapped to whole device pixels as a CSS border is.
 pub fn rule(p: &Pal) -> El {
-    el().w_full().h(1.0).fill(p.line)
+    rune::rule(1.0, p.line).w_full()
 }
 
 /// A thin rounded bar filled to `fraction`; green when full.
