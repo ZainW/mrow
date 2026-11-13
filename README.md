@@ -18,8 +18,13 @@ Mrow keeps itself up to date: it checks the releases every few hours, downloads 
 version in the background, and puts it in place when you click **Restart to Update**. Turn that
 off in Settings → Updates. `mrow --update` does the same from a terminal.
 
+Or download it: on a Mac, [the disk image](https://mrow.wania.app/download/macos), then drag Mrow
+into Applications; on Linux, the archive for your machine from the
+[releases](https://github.com/ZainW/mrow/releases/latest).
+
 The macOS build is signed ad hoc, not notarized. Installed with the script above it opens
-normally; a copy downloaded with a browser needs right-click → Open the first time.
+normally. A downloaded copy is blocked the first time you open it: allow it under System Settings
+→ Privacy & Security → Open Anyway.
 
 ## This repository
 

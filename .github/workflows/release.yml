@@ -2,7 +2,8 @@
 # Nothing here runs on push or merge.
 #
 #   plan     picks the version and checks there's something to release
-#   build    macOS (Apple silicon) and Linux (x86_64, arm64) archives, from the planned commit
+#   build    macOS (Apple silicon: an archive and a disk image) and Linux (x86_64, arm64) archives,
+#            from the planned commit
 #   publish  only once every build passed: bumps the version, writes CHANGELOG.md, tags, signs
 #            latest.json and publishes the GitHub release that installed apps update from
 name: Release
@@ -133,7 +134,10 @@ jobs:
         run: |
           scripts/bundle.sh
           test "$(dist/Mrow.app/Contents/MacOS/Mrow --version)" = "mrow $VERSION"
+          # The archive is what installed copies and the install script fetch; the disk image
+          # is the same app for people who download it in a browser.
           COPYFILE_DISABLE=1 tar -C dist -czf "dist/mrow-${{ matrix.key }}.tar.gz" Mrow.app
+          scripts/dmg.sh "dist/mrow-${{ matrix.key }}.dmg"
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -143,7 +147,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.key }}
-          path: apps/desktop/dist/mrow-${{ matrix.key }}.tar.gz
+          path: |
+            apps/desktop/dist/mrow-${{ matrix.key }}.tar.gz
+            apps/desktop/dist/mrow-${{ matrix.key }}.dmg
           if-no-files-found: error
           retention-days: 3
 
@@ -216,6 +222,7 @@ jobs:
           for key in macos-aarch64 linux-x86_64 linux-aarch64; do
             jq -e --arg k "$key" 'has($k)' <<<"$assets" >/dev/null || { echo "::error::No $key archive"; exit 1; }
           done
+          test -f dist/mrow-macos-aarch64.dmg || { echo "::error::No macOS disk image"; exit 1; }
           jq -n --arg v "$VERSION" --arg n "https://github.com/$REPO/releases/tag/v$VERSION" --argjson a "$assets" \
             '{version: $v, notes_url: $n, assets: $a}' >dist/latest.json
           openssl pkeyutl -sign -rawin -inkey "$RUNNER_TEMP/key.pem" -in dist/latest.json | od -An -tx1 | tr -d ' \n' >dist/latest.json.sig
