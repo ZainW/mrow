@@ -14,11 +14,11 @@ pnpm --filter @mrow/web dev        # http://localhost:3000
 pnpm --filter @mrow/web build      # client + SSR bundles in dist/
 pnpm --filter @mrow/web start      # serve the production build (vite preview)
 pnpm --filter @mrow/web typecheck  # tsc --noEmit
-pnpm --filter @mrow/web deploy     # build, then wrangler deploy to https://mrow.wania.app
+pnpm --filter @mrow/web run deploy # build, then wrangler deploy to https://mrow.wania.app
 ```
 
 The page is prerendered, so `dist/client` is plain static assets (Cloudflare Workers, `wrangler.jsonc`).
-`public/_redirects` gives the short links: `/install` (the install script) and `/download/<build>`.
+`public/_redirects` gives the short links: `/install` (the install script) and `/download/<build>` (`macos` is the disk image).
 
 ## Layout
 

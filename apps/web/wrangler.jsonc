@@ -1,5 +1,5 @@
 // The site is one prerendered page, served as static assets at mrow.wania.app.
-// Deploy: pnpm --filter @mrow/web deploy (builds, then wrangler deploy).
+// Deploy: pnpm --filter @mrow/web run deploy (builds, then wrangler deploy).
 {
   "$schema": "https://unpkg.com/wrangler@4.162.0/config-schema.json",
   "name": "mrow",
