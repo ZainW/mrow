@@ -71,7 +71,15 @@ impl Recording {
 
     /// Loads the recording into a store the way the app holds a refreshed queue.
     pub fn fill(&self, store: &mut Store) {
-        let account = Account { me: Some(self.me.clone()), open: self.open.clone(), done: self.done.clone(), error: None, last_refreshed: Some(Utc::now()) };
+        let account = Account {
+            me: Some(self.me.clone()),
+            open: self.open.clone(),
+            done: self.done.clone(),
+            mine: vec![],
+            mine_error: None,
+            error: None,
+            last_refreshed: Some(Utc::now()),
+        };
         store.load_fixture(BTreeMap::from([(Forge::Gitlab, account)]), self.diffs(), self.threads.clone());
         store.forge = Forge::Gitlab;
         store.set_mode(QueueMode::ToReview);

@@ -28,16 +28,22 @@ pub fn sidebar(s: &App, p: &Pal, k: &Kit, dark: bool) -> El {
     c = c.child(el().px(8.0).pt(2.0).pb(6.0).child(account_switcher(store, p)));
     c = c.child(mode_bar(store, p).px(8.0));
     let oldest = prefs::read(|p| p.oldest_first);
-    let filter_row = row().key("filter-row").gap(2.0).pl(10.0).pr(6.0).pt(10.0).center_y().child(filter_box(s, p, k)).child(author_menu(store, p)).child(
-        ChromeButton::new("sort", if oldest { "Oldest first. Click for newest first" } else { "Newest first. Click for oldest first" })
-            .icon(if oldest { &I::SORT_UP } else { &I::SORT_DOWN }, 13.0)
-            .on(oldest)
-            .build(p)
-            .on_press(|_: &mut App| prefs::update(|p| p.oldest_first = !p.oldest_first)),
-    );
-    c = c.child(filter_row);
-    if let Some(name) = selected_author(store) {
-        c = c.child(el().px(10.0).pt(8.0).child(author_chip(s, p, &name)));
+    let mut filter_row = row().key("filter-row").gap(2.0).pl(10.0).pr(6.0).pt(10.0).center_y().child(filter_box(s, p, k));
+    // Mine is all one author, sorted by whose move it is: it filters by standing instead.
+    if store.mode == QueueMode::Mine {
+        c = c.child(filter_row.pr(10.0)).child(el().px(10.0).pt(8.0).child(crate::ui::mine::filters(store, p)));
+    } else {
+        filter_row = filter_row.child(author_menu(store, p)).child(
+            ChromeButton::new("sort", if oldest { "Oldest first. Click for newest first" } else { "Newest first. Click for oldest first" })
+                .icon(if oldest { &I::SORT_UP } else { &I::SORT_DOWN }, 13.0)
+                .on(oldest)
+                .build(p)
+                .on_press(|_: &mut App| prefs::update(|p| p.oldest_first = !p.oldest_first)),
+        );
+        c = c.child(filter_row);
+        if let Some(name) = selected_author(store) {
+            c = c.child(el().px(10.0).pt(8.0).child(author_chip(s, p, &name)));
+        }
     }
     c = c.child(list(s, p));
     c.child(footer(s, p, dark))
@@ -220,9 +226,16 @@ fn author_chip(s: &App, p: &Pal, name: &str) -> El {
 
 fn list(s: &App, p: &Pal) -> El {
     let store = &s.store;
+    let empty = || el().key("queue").grow(1.0).min_h(0.0).w_full().center().focusable(true).child(empty_state(s, p));
+    if store.mode == QueueMode::Mine {
+        return match crate::ui::mine::rows(s, p) {
+            Some(rows) => queue(rows),
+            None => empty(),
+        };
+    }
     let sections = store.sections();
     if sections.is_empty() {
-        return el().key("queue").grow(1.0).min_h(0.0).w_full().center().focusable(true).child(empty_state(s, p));
+        return empty();
     }
     let mut lines = Vec::new();
     for section in sections {
@@ -255,6 +268,11 @@ fn list(s: &App, p: &Pal) -> El {
             Line::Item(m, selected, unread) => sidebar_row(&pal, m, *selected, *unread),
         },
     );
+    queue(rows)
+}
+
+/// The scrolling list around a mode's rows, with the keys that move through it.
+fn queue(rows: El) -> El {
     let queue = col()
         .key("queue")
         // Refreshes and filtering change the list in place, without rows growing or fading.
@@ -275,6 +293,11 @@ fn list(s: &App, p: &Pal) -> El {
                 rune::Key::Down => s.store.select_offset(1),
                 rune::Key::Text(t) if t == "k" => s.store.select_offset(-1),
                 rune::Key::Text(t) if t == "j" => s.store.select_offset(1),
+                // Mine: Right shows every part of the stacks, Left folds them to what's on me.
+                rune::Key::Right | rune::Key::Left if s.store.mode == QueueMode::Mine => {
+                    tx.instant();
+                    s.store.unfold_stacks(matches!(ev.key, rune::Key::Right));
+                }
                 rune::Key::Enter => {
                     if let Some(item) = s.store.selected() {
                         let _ = tx.open_url(&item.web_url);
@@ -293,7 +316,7 @@ fn list(s: &App, p: &Pal) -> El {
     crate::ui::smooth_scroll::smooth_wheel(queue, "queue")
 }
 
-fn section_header(p: &Pal, title: &str) -> El {
+pub fn section_header(p: &Pal, title: &str) -> El {
     el().w_full().px(18.0).pt(14.0).pb(4.0).child(text(title.to_string()).font(ui(11.5, MEDIUM)).color(p.tertiary).single_line())
 }
 
@@ -344,7 +367,13 @@ fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El
         .child(text(item.author.name.clone()).font(ui(11.5, 400.0)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
         .child(el().grow(1.0).min_w(4.0))
         .child(badges(p, item));
-    let body = col().gap(4.0).grow(1.0).shrink().min_w(0.0).child(title_row).child(meta);
+    let mut body = col().gap(4.0).grow(1.0).shrink().min_w(0.0).child(title_row);
+    if let Some(reason) = crate::data::mine::review_reason(item) {
+        let waiting = item.my_state.needs_review() && !item.draft;
+        body = body
+            .child(text(reason).font(ui(11.5, 400.0)).color(if waiting && item.was_re_requested() { p.accent } else { p.secondary }).single_line().truncate());
+    }
+    let body = body.child(meta);
     let dot = el().size(6.0, 6.0).mt(6.0).radius(3.0).fill(if unread { p.accent } else { p.accent.alpha(0.0) });
     let card = row().key("card").w_full().items_start().gap(8.0).pl(10.0).pr(12.0).py(8.0).radius(7.0).child(dot).child(body);
     let card = if selected { card.fill(p.selected) } else { card.hover(p.hover) };
@@ -411,6 +440,9 @@ fn empty_state(s: &App, p: &Pal) -> El {
             ChromeButton::new("try-again", "Try Again").icon(&I::REFRESH, 13.0).style(Chrome::Field).build(p).on_press(|s: &mut App| s.store.refresh()),
         );
     }
+    if store.mode == QueueMode::Mine && store.filter.is_empty() && store.mine_filter.is_some_and(|_| !store.mine().is_empty()) {
+        return message(p, None, &["None of yours stand like that."]);
+    }
     if !store.filter.is_empty() || store.author_filter.is_some() {
         let line = if store.filter.is_empty() { "Nothing from this author here.".to_string() } else { format!("Nothing matches “{}”", store.filter) };
         return message(p, None, &[&line]);
@@ -419,6 +451,10 @@ fn empty_state(s: &App, p: &Pal) -> El {
     let (glyph, line) = match store.mode {
         QueueMode::ToReview => (&I::SEAL_CHECK, "No reviews waiting on you.".to_string()),
         QueueMode::Reviewed => (&I::TRAY, "Nothing you've reviewed is still open.".to_string()),
+        QueueMode::Mine => match store.mine_error() {
+            Some(error) => (&I::WARNING, format!("Couldn't load yours: {error}")),
+            None => (&I::TRAY, format!("None of your {} are open.", forge.plural_noun())),
+        },
         QueueMode::Done => (&I::TRAY, format!("Nothing merged or closed in the last {done_days} days.")),
     };
     message(p, Some(glyph), &[&line])

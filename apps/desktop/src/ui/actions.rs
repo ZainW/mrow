@@ -231,7 +231,8 @@ const COMMANDS: &[Command] = &[
     cmd(F, "close-others", "Close Other Tabs", Some("cmd+alt+w"), close_other_tabs),
     cmd(V, "mode-0", "To review", Some("cmd+1"), |s, tx| mode(s, tx, QueueMode::ToReview)),
     cmd(V, "mode-1", "Reviewed", Some("cmd+2"), |s, tx| mode(s, tx, QueueMode::Reviewed)),
-    cmd(V, "mode-2", "Done", Some("cmd+3"), |s, tx| mode(s, tx, QueueMode::Done)),
+    cmd(V, "mode-2", "Mine", Some("cmd+3"), |s, tx| mode(s, tx, QueueMode::Mine)),
+    cmd(V, "mode-3", "Done", Some("cmd+4"), |s, tx| mode(s, tx, QueueMode::Done)),
     sep("View"),
     // Ctrl+1 is "To review" off macOS, so the accounts take Alt there.
     Command { other: Some("alt+1"), ..cmd(V, "account-0", "Account 1", Some("ctrl+1"), |s, tx| account(s, tx, 0)) },

@@ -14,7 +14,7 @@ Start site, pnpm).
   - Live read-only check: `target/debug/mrow --queue github` (or `gitlab`). Cursor agent check:
     `target/debug/mrow --ask-models [question]`.
   - Fictional scenes to PNG: `target/debug/mrow --scene <name> --size 1240x820 --snap <png>` (scenes
-    include `to-review`, `changes`, `discussion`, `big-diff`, `ask`, `ask-chat`). Headless runs stay
+    include `to-review`, `changes`, `discussion`, `big-diff`, `ask`, `ask-chat`, `mine`, `mine-stack`). Headless runs stay
     offline; set `MROW_ONLINE_IMAGES=1` to fetch avatars and pictures. Write these to a scratch
     dir, never into the repo.
   - Frame timings: `cargo build --profile perf --features profile`, then run with
@@ -52,6 +52,9 @@ Start site, pnpm).
   (Dock badge, appearance). Commands and their keys are one table, `COMMANDS` in
   `src/ui/actions.rs`: the macOS menu bar on macOS, `on_key` elsewhere. Write shortcut hints with
   Mac glyphs through `components::keys`, which relabels them off macOS.
+- `src/data/mine.rs` works out where each of my own merge requests stands (`Standing`), its
+  one-line next step, and stacks (requests targeting each other's branches), from the shared
+  models only. The store turns that into the Mine list's lines; `src/ui/mine.rs` draws them.
 - High-frequency changes (tab switches, list moves, per-line hover buttons) land instantly; keep
   motion for occasional transitions.
 

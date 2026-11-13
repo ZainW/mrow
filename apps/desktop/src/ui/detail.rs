@@ -284,15 +284,36 @@ fn header(s: &App, p: &Pal, item: &MergeRequest) -> El {
         top = top.child(chip(p, Some(&I::CLOSE), "Closed", p.red, None, false));
     }
     let title = text(item.title.clone()).font(serif(27.0, SEMIBOLD).lines(1.3)).color(p.text).wrap().selectable(true).w_full().max_w(READING_WIDTH);
-    col()
+    let mine = s.store.is_mine(item);
+    let mut c = col()
         .w_full()
         .gap(14.0)
         .child(top)
         .child(title)
-        .child(request_line(s, p, item))
-        .child(chips(p, item))
-        .child(reviewers(s, p, item))
-        .child(action_bar(s, p, item).pt(4.0))
+        .child(if mine { opened_line(s, p, item) } else { request_line(s, p, item) })
+        .child(chips(p, item, mine));
+    if mine && item.is_open() {
+        c = c.child(crate::ui::mine::next_step(s, p, item).mt(4.0));
+    }
+    if let Some(stack) = crate::ui::mine::stack_section(s, p, item) {
+        c = c.child(stack.pt(2.0));
+    }
+    if mine && item.is_open() {
+        c = c.child(crate::ui::mine::checklist(s, p, item).pt(2.0));
+    }
+    c = c.child(reviewers(s, p, item));
+    // An open request of mine has its actions in the next step, above.
+    if mine && item.is_open() { c } else { c.child(action_bar(s, p, item).pt(4.0)) }
+}
+
+/// "You opened this 2 days ago", for a merge request of my own.
+fn opened_line(s: &App, p: &Pal, item: &MergeRequest) -> El {
+    let line = format!("You opened this {}", relative(item.created_at));
+    row()
+        .gap(8.0)
+        .center_y()
+        .child(avatar(s, p, &item.author, 22.0))
+        .child(rich(line, vec![Span::new(0, 3).weight(SEMIBOLD).color(p.text)]).font(ui(13.0, 400.0)).color(p.secondary).help(long_date(item.created_at)))
 }
 
 fn request_line(s: &App, p: &Pal, item: &MergeRequest) -> El {
@@ -320,7 +341,7 @@ fn request_line(s: &App, p: &Pal, item: &MergeRequest) -> El {
     r
 }
 
-fn chips(p: &Pal, item: &MergeRequest) -> El {
+fn chips(p: &Pal, item: &MergeRequest, mine: bool) -> El {
     let branch = item.source_branch.clone();
     let mut r = row().w_full().gap(6.0).flex_wrap().child(
         chip(p, Some(&I::BRANCH), &format!("{} → {}", item.source_branch, item.target_branch), p.secondary, None, true)
@@ -360,7 +381,8 @@ fn chips(p: &Pal, item: &MergeRequest) -> El {
                 .child(text(format!("Pipeline {}", pipe.label().to_lowercase())).font(ui(11.5, MEDIUM)).color(p.secondary).single_line()),
         );
     }
-    if item.is_open() {
+    // On my own, the next step says where the merge stands, stack and all.
+    if item.is_open() && !mine {
         if let Some(status) = item.merge_status_label() {
             let tint = if item.merge_status.as_deref() == Some("conflict") { p.red } else { p.secondary };
             r = r.child(chip(p, None, status, tint, None, false));
@@ -399,7 +421,8 @@ fn i_approved(s: &App, item: &MergeRequest) -> bool {
 fn action_bar(s: &App, p: &Pal, item: &MergeRequest) -> El {
     let idle = s.store.busy.is_none();
     let mut r = row().gap(8.0).center_y();
-    if item.is_open() {
+    // Nobody approves their own.
+    if item.is_open() && !s.store.is_mine(item) {
         if i_approved(s, item) {
             let it = item.clone();
             r = r.child(action_button(p, "revoke", Some(&I::UNDO), "Revoke Approval", false, idle).on_press(move |s: &mut App| {
@@ -415,21 +438,30 @@ fn action_bar(s: &App, p: &Pal, item: &MergeRequest) -> El {
             );
         }
     }
-    let url = item.web_url.clone();
-    r = r.child(action_button(p, "open-forge", Some(&I::ARROW_UP_RIGHT), &format!("Open in {}", item.kind().name()), false, true).on_press_tx(
-        move |_: &mut App, tx: &mut Tx| {
-            let _ = tx.open_url(&url);
-        },
-    ));
-    let branch = item.source_branch.clone();
-    r = r.child(action_button(p, "copy-branch", Some(&I::COPY), "Copy Branch", false, true).on_press_tx(move |s: &mut App, tx: &mut Tx| {
-        tx.copy(branch.clone());
-        s.store.show(&format!("Copied {branch}"));
-    }));
+    for link in link_buttons(p, item) {
+        r = r.child(link);
+    }
     if let Some(busy) = &s.store.busy {
         r = r.child(Spinner::new().size(14.0).build(&p.kit()).ml(4.0)).child(text(busy.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line());
     }
     r
+}
+
+/// "Open in GitLab" and "Copy Branch", in that order.
+pub fn link_buttons(p: &Pal, item: &MergeRequest) -> Vec<El> {
+    let url = item.web_url.clone();
+    let branch = item.source_branch.clone();
+    vec![
+        action_button(p, "open-forge", Some(&I::ARROW_UP_RIGHT), &format!("Open in {}", item.kind().name()), false, true).on_press_tx(
+            move |_: &mut App, tx: &mut Tx| {
+                let _ = tx.open_url(&url);
+            },
+        ),
+        action_button(p, "copy-branch", Some(&I::COPY), "Copy Branch", false, true).on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            tx.copy(branch.clone());
+            s.store.show(&format!("Copied {branch}"));
+        }),
+    ]
 }
 
 fn tab_bar(s: &App, p: &Pal, page: &Page) -> El {

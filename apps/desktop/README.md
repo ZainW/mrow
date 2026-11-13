@@ -60,9 +60,16 @@ On Linux, settings live in `~/.config/mrow` and scratch files in `~/.cache/mrow`
 - **Two accounts, one switcher**: GitLab and GitHub each have their own queue, and the switcher at
   the top of the sidebar flips between them. Both refresh together, so the badge and notifications
   cover both. Turn either off, or point it at a self-hosted or Enterprise host, in Settings.
-- **Three lists**: *To review* (your turn), *Reviewed* (you approved, commented or asked for
-  changes, still open) and *Done* (merged or closed recently), grouped by when you were asked:
-  Today, Yesterday, This week, This month, Older.
+- **Four lists**: *To review* (your turn), *Reviewed* (you approved, commented or asked for
+  changes, still open), *Mine* (the ones you opened) and *Done* (merged or closed recently). The
+  review lists are grouped by when you were asked: Today, Yesterday, This week, This month, Older.
+- **Mine**: your own requests sorted by whose move it is: *Your move* (ready to merge first, then
+  changes requested, a failed pipeline, conflicts, open threads), *Waiting on reviewers* and
+  *Drafts*. Each row says its next step, and the marks above the list filter by standing. A
+  request of yours opens on that next step and on what's left before it merges.
+- **Stacks**: requests that target each other's branches show as one group, bottom first. A stack
+  shows the parts that are on you and folds the rest into a count; click the fold or the stack's
+  name (or press →) to see every part.
 - **Reviews**: the description rendered natively, every file's diff with syntax highlighting and
   line numbers, comment threads in place, line comments, a comment box, and Approve / Revoke.
 - **Tabs**: keep several reviews open; a single click previews, a double click keeps.
@@ -80,7 +87,8 @@ On Linux, Ctrl stands in for ⌘, and the account switch is Alt+1 / Alt+2.
 | | |
 |---|---|
 | ⌃1 ⌃2 | Switch account |
-| ⌘1 ⌘2 ⌘3 | To review, Reviewed, Done |
+| ⌘1 ⌘2 ⌘3 ⌘4 | To review, Reviewed, Mine, Done |
+| → ← | In Mine: show every part of a stack, fold it again |
 | ⌥⌘1 ⌥⌘2 ⌥⌘3 | Overview, Changes, Discussion |
 | ⌥⌘] ⌥⌘[ | Next / previous review |
 | ⌘K or ⌘F | Filter the list |

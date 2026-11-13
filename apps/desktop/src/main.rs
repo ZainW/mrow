@@ -257,6 +257,41 @@ fn scene_done(s: &mut App) {
     s.store.set_mode(QueueMode::Done);
 }
 
+fn scene_mine(s: &mut App) {
+    fixture(s);
+    s.store.set_mode(QueueMode::Mine);
+}
+
+/// A part in the middle of a stack: held until the one below it merges.
+fn scene_mine_stack(s: &mut App) {
+    scene_mine(s);
+    let held = s.store.mine().iter().find(|m| m.iid == "241").map(|m| m.id.clone());
+    s.store.select(held);
+}
+
+/// Every part of the stack shown.
+fn scene_mine_open(s: &mut App) {
+    scene_mine(s);
+    let bottom = s.store.mine().iter().find(|m| m.iid == "240").map(|m| m.id.clone());
+    if let Some(key) = &bottom {
+        s.store.toggle_stack(key);
+    }
+    s.store.select(bottom);
+}
+
+fn scene_mine_work(s: &mut App) {
+    scene_mine(s);
+    let changes = s.store.mine().iter().find(|m| m.iid == "90").map(|m| m.id.clone());
+    s.store.select(changes);
+}
+
+fn scene_mine_waiting(s: &mut App) {
+    scene_mine(s);
+    s.store.mine_filter = Some(data::mine::Standing::Waiting);
+    let first = s.store.visible_items().first().map(|m| m.id.clone());
+    s.store.select(first);
+}
+
 fn scene_github(s: &mut App) {
     fixture(s);
     s.store.switch_forge(Forge::Github);
@@ -295,6 +330,11 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("line-comment", scene_line_comment),
     ("reviewed", scene_reviewed),
     ("done", scene_done),
+    ("mine", scene_mine),
+    ("mine-stack", scene_mine_stack),
+    ("mine-open", scene_mine_open),
+    ("mine-work", scene_mine_work),
+    ("mine-waiting", scene_mine_waiting),
     ("github", scene_github),
     ("empty", scene_empty),
     ("no-sidebar", scene_no_sidebar),
@@ -322,7 +362,26 @@ fn dump_queue(name: &str) -> i32 {
         }
     };
     println!("{} as {} (@{})", forge.name(), queue.me.name, queue.me.username);
-    println!("open: {}, done: {}", queue.open.len(), queue.done.len());
+    println!("open: {}, done: {}, mine: {}", queue.open.len(), queue.done.len(), queue.mine.len());
+    if let Some(e) = &queue.mine_error {
+        println!("mine error: {e}");
+    }
+    let all: Vec<&data::models::MergeRequest> = queue.mine.iter().chain(&queue.open).collect();
+    for item in &queue.mine {
+        let status = data::mine::status(item, data::mine::below(item, &all));
+        println!(
+            "  mine {} [{:?}] {} (threads={:?} failed={:?} merge={:?})",
+            item.full_reference(),
+            status.standing,
+            status.step,
+            item.unresolved_threads,
+            item.failed_job,
+            item.merge_status
+        );
+    }
+    for stack in data::mine::stacks(&all) {
+        println!("  stack {:?}: {} parts", stack.name, stack.ids.len());
+    }
     for item in queue.open.iter().chain(&queue.done) {
         let reviewers: Vec<String> = item.reviewers.iter().map(|r| format!("{}:{:?}", r.person.username, r.state)).collect();
         println!(

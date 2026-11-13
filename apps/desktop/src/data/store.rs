@@ -10,6 +10,7 @@ use chrono::{Local, Utc};
 use super::bg::Bg;
 use super::diff::DiffLine;
 use super::forge::{Forge, QueueResult};
+use super::mine::{self, Stack, Standing, Status};
 use super::models::*;
 use super::prefs;
 
@@ -31,22 +32,25 @@ impl<T> Loadable<T> {
     }
 }
 
-/// The three lists in the sidebar.
+/// The lists in the sidebar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum QueueMode {
     #[default]
     ToReview,
     Reviewed,
+    /// The ones I opened, by whose move it is.
+    Mine,
     Done,
 }
 
 impl QueueMode {
-    pub const ALL: [QueueMode; 3] = [QueueMode::ToReview, QueueMode::Reviewed, QueueMode::Done];
+    pub const ALL: [QueueMode; 4] = [QueueMode::ToReview, QueueMode::Reviewed, QueueMode::Mine, QueueMode::Done];
 
     pub fn title(self) -> &'static str {
         match self {
             QueueMode::ToReview => "To review",
             QueueMode::Reviewed => "Reviewed",
+            QueueMode::Mine => "Mine",
             QueueMode::Done => "Done",
         }
     }
@@ -57,12 +61,56 @@ pub struct QueueSection {
     pub items: Vec<MergeRequest>,
 }
 
+/// Where a row sits on a stack's rail: the line runs up from all but the first, down from all
+/// but the last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rail {
+    pub first: bool,
+    pub last: bool,
+}
+
+/// A line of the Mine list.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MineLine {
+    Header(&'static str),
+    /// `place` is "2 of 3" in its stack, shown when the list is flat (filtered).
+    Item {
+        item: MergeRequest,
+        status: Status,
+        rail: Option<Rail>,
+        place: Option<(usize, usize)>,
+    },
+    /// A stack's title, above its rows. `open` shows every part.
+    StackHead {
+        key: String,
+        name: String,
+        count: usize,
+        open: bool,
+    },
+    /// The parts of a stack that aren't on me, folded into a count: "3 more · 1 held, 2 waiting".
+    Folded {
+        key: String,
+        text: String,
+        rail: Rail,
+    },
+    /// A stack with nothing on me, folded to one row.
+    Whole {
+        key: String,
+        name: String,
+        text: String,
+    },
+}
+
 /// One forge's side of the queue: who I am there and what's waiting.
 #[derive(Clone, Debug, Default)]
 pub struct Account {
     pub me: Option<Person>,
     pub open: Vec<MergeRequest>,
     pub done: Vec<MergeRequest>,
+    /// The open ones I wrote.
+    pub mine: Vec<MergeRequest>,
+    /// Why `mine` couldn't be fetched, while the reviews could.
+    pub mine_error: Option<String>,
     pub error: Option<String>,
     pub last_refreshed: Option<Date>,
 }
@@ -109,6 +157,10 @@ pub struct Store {
     pub filter: String,
     /// Only merge requests by this author (a username), when set.
     pub author_filter: Option<String>,
+    /// Mine: only requests standing like this (quiet and held ones count as waiting).
+    pub mine_filter: Option<Standing>,
+    /// Mine: the stacks showing every part, by `Stack::key`. The rest fold what isn't on me.
+    pub open_stacks: HashSet<String>,
     pub selected_id: Option<String>,
     /// Merge requests kept open in tabs, in order. The selected one may be outside it, as a
     /// preview (a single click), the way VS Code previews a file.
@@ -149,6 +201,8 @@ impl Default for Store {
             mode: QueueMode::ToReview,
             filter: String::new(),
             author_filter: None,
+            mine_filter: None,
+            open_stacks: HashSet::new(),
             selected_id: None,
             tabs: p.tabs,
             last_seen: p.last_seen,
@@ -232,7 +286,7 @@ impl Store {
 
     /// Every account's merge requests, for finding tabs and the selection whichever account they're in.
     fn every_item(&self) -> impl Iterator<Item = &MergeRequest> {
-        self.accounts.values().flat_map(|a| a.open.iter().chain(&a.done))
+        self.accounts.values().flat_map(|a| a.open.iter().chain(&a.done).chain(&a.mine))
     }
 
     pub fn item(&self, id: &str) -> Option<&MergeRequest> {
@@ -250,6 +304,7 @@ impl Store {
         let mut items: Vec<MergeRequest> = match mode {
             QueueMode::ToReview => self.open().iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft)).cloned().collect(),
             QueueMode::Reviewed => self.open().iter().filter(|m| !m.my_state.needs_review()).cloned().collect(),
+            QueueMode::Mine => self.mine().to_vec(),
             QueueMode::Done => self.done().to_vec(),
         };
         let key = |m: &MergeRequest| if mode == QueueMode::Done { m.finished_at() } else { m.requested_at };
@@ -278,11 +333,187 @@ impl Store {
     }
 
     pub fn visible_items(&self) -> Vec<MergeRequest> {
+        if self.mode == QueueMode::Mine {
+            return self
+                .mine_lines()
+                .into_iter()
+                .filter_map(|l| match l {
+                    MineLine::Item { item, .. } => Some(item),
+                    _ => None,
+                })
+                .collect();
+        }
         self.sections().into_iter().flat_map(|s| s.items).collect()
     }
 
+    /// The number beside a list's name. For Mine, the ones that are my move.
     pub fn count(&self, mode: QueueMode) -> usize {
+        if mode == QueueMode::Mine {
+            return self.mine().iter().filter(|m| self.status_of(m).standing.on_me()).count();
+        }
         self.items(mode).len()
+    }
+
+    // MARK: Mine
+
+    pub fn mine(&self) -> &[MergeRequest] {
+        self.accounts.get(&self.forge).map_or(&[], |a| &a.mine)
+    }
+
+    pub fn mine_error(&self) -> Option<&str> {
+        self.accounts.get(&self.forge).and_then(|a| a.mine_error.as_deref())
+    }
+
+    pub fn is_mine(&self, item: &MergeRequest) -> bool {
+        self.accounts.get(&item.forge).is_some_and(|a| a.mine.iter().any(|m| m.id == item.id))
+    }
+
+    /// Everything open in an account, mine or asked of me: where stacks are looked for.
+    fn open_in(&self, forge: Forge) -> Vec<&MergeRequest> {
+        self.accounts.get(&forge).map(|a| a.mine.iter().chain(&a.open).collect()).unwrap_or_default()
+    }
+
+    /// Where one of my merge requests stands, knowing what it's stacked on.
+    pub fn status_of(&self, item: &MergeRequest) -> Status {
+        let all = self.open_in(item.forge);
+        mine::status(item, mine::below(item, &all))
+    }
+
+    /// The stack a merge request is part of, with its parts, bottom first.
+    pub fn stack_of(&self, item: &MergeRequest) -> Option<(Stack, Vec<MergeRequest>)> {
+        let all = self.open_in(item.forge);
+        let stack = mine::stacks(&all).into_iter().find(|s| s.ids.contains(&item.id))?;
+        let parts = stack.ids.iter().filter_map(|id| all.iter().find(|m| &m.id == id).map(|m| (*m).clone())).collect();
+        Some((stack, parts))
+    }
+
+    /// How many of mine stand like `filter` (quiet and held ones count as waiting).
+    pub fn mine_count(&self, filter: Standing) -> usize {
+        self.mine().iter().filter(|m| self.status_of(m).standing.group() == filter).count()
+    }
+
+    pub fn toggle_stack(&mut self, key: &str) {
+        if !self.open_stacks.remove(key) {
+            self.open_stacks.insert(key.to_string());
+        }
+    }
+
+    /// Shows every part of the selected request's stack, or folds it again. With no stack
+    /// selected it does the same to all of them, so a stack folded to one row can be opened
+    /// from the keyboard.
+    pub fn unfold_stacks(&mut self, open: bool) {
+        let refs: Vec<&MergeRequest> = self.mine().iter().collect();
+        let stacks = mine::stacks(&refs);
+        let selected = self.selected_id.as_deref();
+        let keys: Vec<String> = match stacks.iter().find(|s| selected.is_some_and(|id| s.ids.iter().any(|i| i == id))) {
+            Some(stack) => vec![stack.key.clone()],
+            None => stacks.into_iter().map(|s| s.key).collect(),
+        };
+        for key in keys {
+            if open {
+                self.open_stacks.insert(key);
+            } else {
+                self.open_stacks.remove(&key);
+            }
+        }
+    }
+
+    /// The Mine list: my move first, then what's waiting on reviewers, then drafts. A stack is
+    /// one group, placed where its most actionable part belongs, showing the parts that are on
+    /// me and folding the rest. With a filter or a search the list is flat.
+    pub fn mine_lines(&self) -> Vec<MineLine> {
+        let query = self.filter.trim().to_lowercase();
+        let all: Vec<(&MergeRequest, Status)> = self.mine().iter().map(|m| (m, self.status_of(m))).collect();
+        let refs: Vec<&MergeRequest> = all.iter().map(|(m, _)| *m).collect();
+        let stacks = mine::stacks(&refs);
+        let place = |id: &str| stacks.iter().find_map(|s| s.ids.iter().position(|i| i == id).map(|at| (at + 1, s.ids.len())));
+        let newest_first =
+            |a: &(&MergeRequest, Status), b: &(&MergeRequest, Status)| a.1.standing.rank().cmp(&b.1.standing.rank()).then(b.0.updated_at.cmp(&a.0.updated_at));
+        let mut lines = Vec::new();
+
+        if self.mine_filter.is_some() || !query.is_empty() {
+            let mut found: Vec<&(&MergeRequest, Status)> =
+                all.iter().filter(|(m, st)| self.mine_filter.is_none_or(|f| st.standing.group() == f) && (query.is_empty() || matches(m, &query))).collect();
+            found.sort_by(|a, b| newest_first(a, b));
+            if !found.is_empty() {
+                lines.push(MineLine::Header(self.mine_filter.map_or("Matches", Standing::label)));
+            }
+            lines.extend(found.into_iter().map(|(m, st)| MineLine::Item { item: (*m).clone(), status: st.clone(), rail: None, place: place(&m.id) }));
+            return lines;
+        }
+
+        // A unit is one request or one stack, sorted by its most actionable part.
+        let mut units: Vec<(Vec<&(&MergeRequest, Status)>, Option<&Stack>)> = Vec::new();
+        for stack in &stacks {
+            units.push((stack.ids.iter().filter_map(|id| all.iter().find(|(m, _)| &m.id == id)).collect(), Some(stack)));
+        }
+        units.extend(all.iter().filter(|(m, _)| place(&m.id).is_none()).map(|one| (vec![one], None)));
+        let best = |unit: &Vec<&(&MergeRequest, Status)>| unit.iter().copied().min_by(|a, b| newest_first(a, b)).map(|(m, st)| (st.standing, m.updated_at));
+        units.sort_by(|a, b| {
+            let (a, b) = (best(&a.0), best(&b.0));
+            a.map(|x| x.0.rank()).cmp(&b.map(|x| x.0.rank())).then(b.map(|x| x.1).cmp(&a.map(|x| x.1)))
+        });
+        let section = |standing: Standing| match standing {
+            s if s.on_me() => "Your move",
+            Standing::Draft => "Drafts",
+            _ => "Waiting on reviewers",
+        };
+        let mut title = "";
+        for (parts, stack) in units {
+            let Some((standing, _)) = best(&parts) else { continue };
+            if section(standing) != title {
+                title = section(standing);
+                lines.push(MineLine::Header(title));
+            }
+            let Some(stack) = stack else {
+                let (m, st) = parts[0];
+                lines.push(MineLine::Item { item: (*m).clone(), status: st.clone(), rail: None, place: None });
+                continue;
+            };
+            let open = self.open_stacks.contains(&stack.key);
+            let shown = |(m, st): &(&MergeRequest, Status)| open || st.standing.on_me() || self.selected_id.as_deref() == Some(m.id.as_str());
+            let tally = |parts: &[&(&MergeRequest, Status)]| {
+                let mut counts: Vec<(&str, usize)> = Vec::new();
+                for (_, st) in parts {
+                    match counts.iter_mut().find(|(w, _)| *w == st.standing.word()) {
+                        Some(c) => c.1 += 1,
+                        None => counts.push((st.standing.word(), 1)),
+                    }
+                }
+                counts.iter().map(|(w, n)| format!("{n} {w}")).collect::<Vec<_>>().join(", ")
+            };
+            if !parts.iter().any(|p| shown(p)) {
+                lines
+                    .push(MineLine::Whole { key: stack.key.clone(), name: stack.name.clone(), text: format!("Stack of {} · {}", parts.len(), tally(&parts)) });
+                continue;
+            }
+            lines.push(MineLine::StackHead { key: stack.key.clone(), name: stack.name.clone(), count: parts.len(), open });
+            let from = lines.len();
+            let mut run: Vec<&(&MergeRequest, Status)> = Vec::new();
+            let rail = Rail { first: false, last: false };
+            let fold = |run: &mut Vec<&(&MergeRequest, Status)>, lines: &mut Vec<MineLine>| {
+                if !run.is_empty() {
+                    lines.push(MineLine::Folded { key: stack.key.clone(), text: format!("{} more · {}", run.len(), tally(run)), rail });
+                    run.clear();
+                }
+            };
+            for part in parts {
+                if shown(part) {
+                    fold(&mut run, &mut lines);
+                    lines.push(MineLine::Item { item: (*part.0).clone(), status: part.1.clone(), rail: Some(rail), place: None });
+                } else {
+                    run.push(part);
+                }
+            }
+            fold(&mut run, &mut lines);
+            let last = lines.len() - 1;
+            for (i, line) in lines.iter_mut().enumerate().skip(from) {
+                if let MineLine::Item { rail: Some(r), .. } | MineLine::Folded { rail: r, .. } = line {
+                    *r = Rail { first: i == from, last: i == last };
+                }
+            }
+        }
+        lines
     }
 
     /// Everyone with something in the current list, most merge requests first.
@@ -507,6 +738,8 @@ impl Store {
                     account.me = Some(q.me);
                     account.open = q.open;
                     account.done = q.done;
+                    account.mine = q.mine;
+                    account.mine_error = q.mine_error;
                     account.error = None;
                     account.last_refreshed = Some(Utc::now());
                 }

@@ -87,6 +87,8 @@ fn mr(s: Spec, description: &str) -> MergeRequest {
         requested_at_is_guess: false,
         my_state: s.my_state,
         forge: s.forge,
+        unresolved_threads: None,
+        failed_job: None,
     }
 }
 
@@ -176,6 +178,211 @@ const DIFF_MD: &str = "@@ -0,0 +1,6 @@
 +
 +Partial files from failed jobs are kept for an hour.
 ";
+
+/// One of Robin's own merge requests.
+struct Own {
+    iid: &'static str,
+    title: &'static str,
+    project: &'static str,
+    /// Source and target branch; a target that is another's source stacks it on that one.
+    branches: (&'static str, &'static str),
+    /// Minutes since anything happened on it.
+    minutes: i64,
+    draft: bool,
+    merge: &'static str,
+    pipeline: PipelineStatus,
+    reviewers: &'static [(&'static str, &'static str, ReviewState)],
+    threads: i64,
+    failed: Option<&'static str>,
+}
+
+/// Robin's open merge requests: two ready, two that need work, some waiting, a draft, and two
+/// stacks (one with its bottom ready, one with nothing to do).
+fn mine() -> Vec<MergeRequest> {
+    use PipelineStatus::{Failed, Running, Success};
+    use ReviewState::{Approved, RequestedChanges, Unreviewed};
+    const MAYA: (&str, &str) = ("maya.lind", "Maya Lindqvist");
+    const SAM: (&str, &str) = ("sam", "Samuel Achterberg");
+    const DEV: (&str, &str) = ("dev.k", "Devika Rao");
+    const TOMAS: (&str, &str) = ("tomas.v", "Tomás Varga");
+    let both = &[(MAYA.0, MAYA.1, Approved), (SAM.0, SAM.1, Approved)];
+    let own = [
+        Own {
+            iid: "231",
+            title: "Drop the legacy export endpoint",
+            project: "fieldnotes/ledger",
+            branches: ("robin/drop-legacy-export", "main"),
+            minutes: 12,
+            draft: false,
+            merge: "mergeable",
+            pipeline: Success,
+            reviewers: &[(TOMAS.0, TOMAS.1, Approved), (SAM.0, SAM.1, Approved)],
+            threads: 0,
+            failed: None,
+        },
+        Own {
+            iid: "240",
+            title: "Ledger paging 1: add cursor columns",
+            project: "fieldnotes/ledger",
+            branches: ("robin/paging-1", "main"),
+            minutes: 25,
+            draft: false,
+            merge: "mergeable",
+            pipeline: Success,
+            reviewers: both,
+            threads: 0,
+            failed: None,
+        },
+        Own {
+            iid: "241",
+            title: "Ledger paging 2: paginate the endpoint",
+            project: "fieldnotes/ledger",
+            branches: ("robin/paging-2", "robin/paging-1"),
+            minutes: 190,
+            draft: false,
+            merge: "mergeable",
+            pipeline: Success,
+            reviewers: both,
+            threads: 0,
+            failed: None,
+        },
+        Own {
+            iid: "242",
+            title: "Ledger paging 3: switch the client to cursors",
+            project: "fieldnotes/ledger",
+            branches: ("robin/paging-3", "robin/paging-2"),
+            minutes: 26 * 60,
+            draft: false,
+            merge: "not_approved",
+            pipeline: Success,
+            reviewers: &[(SAM.0, SAM.1, Unreviewed)],
+            threads: 0,
+            failed: None,
+        },
+        Own {
+            iid: "243",
+            title: "Ledger paging 4: remove offset paging",
+            project: "fieldnotes/ledger",
+            branches: ("robin/paging-4", "robin/paging-3"),
+            minutes: 27 * 60,
+            draft: true,
+            merge: "draft_status",
+            pipeline: Success,
+            reviewers: &[],
+            threads: 0,
+            failed: None,
+        },
+        Own {
+            iid: "92",
+            title: "Cache tenant settings per request",
+            project: "fieldnotes/hooks",
+            branches: ("robin/tenant-cache", "main"),
+            minutes: 40,
+            draft: false,
+            merge: "ci_must_pass",
+            pipeline: Failed,
+            reviewers: &[(DEV.0, DEV.1, Unreviewed)],
+            threads: 0,
+            failed: Some("test:integration"),
+        },
+        Own {
+            iid: "90",
+            title: "Verify webhook signatures before queueing",
+            project: "fieldnotes/hooks",
+            branches: ("robin/verify-signatures", "main"),
+            minutes: 130,
+            draft: false,
+            merge: "discussions_not_resolved",
+            pipeline: Success,
+            reviewers: &[(MAYA.0, MAYA.1, RequestedChanges), (TOMAS.0, TOMAS.1, Approved)],
+            threads: 2,
+            failed: None,
+        },
+        Own {
+            iid: "307",
+            title: "Stream audit log exports",
+            project: "fieldnotes/billing",
+            branches: ("robin/audit-stream", "main"),
+            minutes: 3 * 24 * 60 + 90,
+            draft: false,
+            merge: "not_approved",
+            pipeline: Success,
+            reviewers: &[(TOMAS.0, TOMAS.1, Unreviewed)],
+            threads: 0,
+            failed: None,
+        },
+        Own {
+            iid: "61",
+            title: "Exports rework 1: move the job to the worker",
+            project: "fieldnotes/desktop",
+            branches: ("robin/exports-1", "main"),
+            minutes: 5 * 60,
+            draft: false,
+            merge: "not_approved",
+            pipeline: Running,
+            reviewers: &[(DEV.0, DEV.1, Unreviewed)],
+            threads: 0,
+            failed: None,
+        },
+        Own {
+            iid: "62",
+            title: "Exports rework 2: drop the synchronous path",
+            project: "fieldnotes/desktop",
+            branches: ("robin/exports-2", "robin/exports-1"),
+            minutes: 5 * 60 + 10,
+            draft: true,
+            merge: "draft_status",
+            pipeline: Success,
+            reviewers: &[],
+            threads: 0,
+            failed: None,
+        },
+        Own {
+            iid: "233",
+            title: "Spike: move sessions to Redis",
+            project: "fieldnotes/ledger",
+            branches: ("robin/redis-sessions", "main"),
+            minutes: 28 * 60,
+            draft: true,
+            merge: "draft_status",
+            pipeline: Success,
+            reviewers: &[],
+            threads: 0,
+            failed: None,
+        },
+    ];
+    own.into_iter()
+        .map(|o| {
+            let spec = Spec {
+                forge: Forge::Gitlab,
+                iid: o.iid,
+                title: o.title,
+                project: o.project,
+                author: ("robin", "Robin Okafor"),
+                hours: o.minutes / 60,
+                state: "opened",
+                draft: o.draft,
+                my_state: ReviewState::Unknown,
+                pipeline: Some(o.pipeline),
+                branch: o.branches.0,
+                counts: (48, 12, 4),
+            };
+            let mut m = mr(spec, "Cursor paging for the ledger, in parts small enough to review in one sitting.");
+            m.target_branch = o.branches.1.into();
+            m.updated_at = Utc::now() - Duration::minutes(o.minutes);
+            m.merge_status = Some(o.merge.into());
+            m.reviewers =
+                o.reviewers.iter().map(|(u, n, state)| Reviewer { person: person(u, n), state: *state, approved: *state == ReviewState::Approved }).collect();
+            m.approved_by = m.reviewers.iter().filter(|r| r.approved).map(|r| r.person.username.clone()).collect();
+            m.labels.clear();
+            m.requested_by = None;
+            m.requested_at_is_guess = true;
+            m.unresolved_threads = Some(o.threads);
+            m.failed_job = o.failed.map(String::from);
+            m
+        })
+        .collect()
+}
 
 fn file(old: &str, new: &str, diff: &str, new_file: bool) -> FileDiff {
     FileDiff {
@@ -328,8 +535,11 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
     let me = person("robin", "Robin Okafor");
     let mut accounts = BTreeMap::new();
     let now = Some(Utc::now());
-    accounts.insert(Forge::Gitlab, Account { me: Some(me.clone()), open: gitlab_open.clone(), done: gitlab_done, error: None, last_refreshed: now });
-    accounts.insert(Forge::Github, Account { me: Some(me), open: github_open, done: vec![], error: None, last_refreshed: now });
+    accounts.insert(
+        Forge::Gitlab,
+        Account { me: Some(me.clone()), open: gitlab_open.clone(), done: gitlab_done, mine: mine(), mine_error: None, error: None, last_refreshed: now },
+    );
+    accounts.insert(Forge::Github, Account { me: Some(me), open: github_open, done: vec![], mine: vec![], mine_error: None, error: None, last_refreshed: now });
 
     let first = &gitlab_open[0];
     let mut diffs = HashMap::new();

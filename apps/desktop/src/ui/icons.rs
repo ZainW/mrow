@@ -226,3 +226,13 @@ icon!(
 icon!(SQUARE, "square", r#"<rect x="3" y="3" width="10" height="10" rx="2.2" stroke="currentColor" stroke-width="1.3" fill="none"/>"#);
 icon!(ROUNDED_FILL, "rounded-fill", r#"<rect x="2.6" y="2.6" width="10.8" height="10.8" rx="2.4" fill="currentColor"/>"#);
 icon!(PLUS, "plus", r#"<path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#);
+icon!(
+    CLOCK,
+    "clock",
+    r#"<circle cx="8" cy="8" r="5.6" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M8 5v3.2l2 1.3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#
+);
+icon!(
+    HELD,
+    "held",
+    r#"<circle cx="8" cy="8" r="5.6" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M5.7 6.7h4.6M5.7 9.3h4.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#
+);

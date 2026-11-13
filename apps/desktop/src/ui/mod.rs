@@ -9,6 +9,7 @@ pub mod icons;
 pub mod images;
 pub mod markdown;
 pub mod menus;
+pub mod mine;
 pub mod settings;
 pub mod sidebar;
 pub mod smooth_scroll;
