@@ -308,6 +308,25 @@ pub fn filled_mark(fill: &'static Icon, mark: &'static Icon, color: rune::Color,
     el().size(size, size).child(icon(fill, size).color(color).absolute(0.0, 0.0)).child(icon(mark, size).color(ink).absolute(0.0, 0.0))
 }
 
+/// Every count of comment threads: a bubble and the number, nothing for none. A reply you
+/// haven't seen fills the bubble and turns both clay, so the state isn't carried by colour alone.
+pub fn comment_count(p: &Pal, n: usize, fresh: bool) -> Option<El> {
+    if n == 0 {
+        return None;
+    }
+    let (glyph, tint) = if fresh { (&I::BUBBLE_12, p.accent) } else { (&I::BUBBLE_LINE_12, p.secondary) };
+    let threads = if n == 1 { "1 thread".to_string() } else { format!("{n} threads") };
+    let tip = if fresh { format!("{threads}, with a reply you haven’t seen") } else { threads };
+    Some(
+        row()
+            .gap(3.0)
+            .center_y()
+            .help(tip)
+            .child(icon(glyph, 12.0).color(tint))
+            .child(text(n.to_string()).font(mono(12.0, MEDIUM).features("'tnum' 1")).color(tint).single_line()),
+    )
+}
+
 /// A 1-point rule, snapped to whole device pixels as a CSS border is.
 pub fn rule(p: &Pal) -> El {
     rune::rule(1.0, p.line).w_full()

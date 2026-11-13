@@ -1,11 +1,15 @@
 //! Mrow's icons: the SF Symbols the Swift app used, redrawn as small SVG bodies on a 16 pt grid
-//! with round 1.4 pt strokes, so they rasterise into Rune's glyph atlas on every platform.
+//! with round 1.4 pt strokes, so they rasterise into Rune's glyph atlas on every platform. The
+//! few drawn at 12 pt have a 12-unit grid of their own, so their edges land on whole pixels.
 
 use rune::Icon;
 
 macro_rules! icon {
     ($name:ident, $id:literal, $body:literal) => {
-        pub static $name: Icon = Icon { name: concat!("mrow-", $id), view: 16.0, body: $body };
+        icon!($name, $id, 16.0, $body);
+    };
+    ($name:ident, $id:literal, $view:literal, $body:literal) => {
+        pub static $name: Icon = Icon { name: concat!("mrow-", $id), view: $view, body: $body };
     };
 }
 
@@ -240,4 +244,11 @@ icon!(
     BELL,
     "bell",
     r#"<path d="M4.2 10.4V7.3a3.8 3.8 0 0 1 7.6 0v3.1l1.3 1.7H2.9z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M6.6 13.8c.3.5.8.8 1.4.8s1.1-.3 1.4-.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/>"#
+);
+icon!(BUBBLE_12, "bubble-12", 12.0, r#"<path d="M3 1h6a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6l-3 2V9a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2z" fill="currentColor"/>"#);
+icon!(
+    BUBBLE_LINE_12,
+    "bubble-line-12",
+    12.0,
+    r#"<path d="M3.5 1.5h5a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H6.2l-2.7 2v-2a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z" fill="none" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>"#
 );

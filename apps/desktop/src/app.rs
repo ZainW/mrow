@@ -20,26 +20,6 @@ pub enum Confirm {
     Stack,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum DetailTab {
-    #[default]
-    Overview,
-    Changes,
-    Discussion,
-}
-
-impl DetailTab {
-    pub const ALL: [DetailTab; 3] = [DetailTab::Overview, DetailTab::Changes, DetailTab::Discussion];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            DetailTab::Overview => "Overview",
-            DetailTab::Changes => "Changes",
-            DetailTab::Discussion => "Discussion",
-        }
-    }
-}
-
 /// Where a comment being written goes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DraftKey {
@@ -58,8 +38,10 @@ pub struct App {
     /// The inbox's popover, under the bell.
     pub inbox_open: bool,
     pub filter: TextEdit,
-    /// The tab each merge request was last left on.
-    pub detail_tabs: HashMap<String, DetailTab>,
+    /// Which part of each merge request's page is being read, for the contents rail and J/K.
+    pub spies: HashMap<String, crate::ui::detail::Spy>,
+    /// A place to scroll the page to on the next frame, for callers without a `Tx` (scenes).
+    pub pending_jump: Option<crate::ui::detail::Part>,
     pub sidebar_width: f32,
     /// The width when a resize drag started.
     pub drag_from: f32,
@@ -163,7 +145,8 @@ impl Default for App {
             settings_open: false,
             inbox_open: false,
             filter: TextEdit::new(""),
-            detail_tabs: HashMap::new(),
+            spies: HashMap::new(),
+            pending_jump: None,
             sidebar_width: p.sidebar_width as f32,
             drag_from: 0.0,
             collapsed: HashSet::new(),
@@ -200,16 +183,6 @@ impl Default for App {
 }
 
 impl App {
-    pub fn tab(&self, item: &MergeRequest) -> DetailTab {
-        self.detail_tabs.get(&item.id).copied().unwrap_or_default()
-    }
-
-    pub fn set_tab(&mut self, tab: DetailTab) {
-        if let Some(id) = self.store.selected_id.clone() {
-            self.detail_tabs.insert(id, tab);
-        }
-    }
-
     pub fn draft(&self, key: &DraftKey) -> Option<&TextEdit> {
         self.drafts.get(key)
     }

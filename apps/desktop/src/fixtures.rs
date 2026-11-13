@@ -579,6 +579,27 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
                     None,
                 )],
             },
+            // On a file this change doesn't touch, so it has no line to sit under.
+            Discussion {
+                id: "t3".into(),
+                individual_note: false,
+                notes: vec![Note {
+                    resolved: Some(true),
+                    ..note(
+                        4,
+                        ("tomas.v", "Tomás Varga"),
+                        "`Batch::rows` could take a `NonZeroUsize`, so a zero batch can't loop forever.",
+                        26,
+                        Some(Position {
+                            new_path: Some("src/export/batch.rs".into()),
+                            old_path: Some("src/export/batch.rs".into()),
+                            new_line: Some(14),
+                            old_line: None,
+                            head_sha: None,
+                        }),
+                    )
+                }],
+            },
         ],
     );
     (accounts, diffs, threads)

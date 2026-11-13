@@ -18,11 +18,12 @@ use rune::{TextEdit, Tx};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::app::{App, DetailTab};
+use crate::app::App;
 use crate::data::forge::Forge;
 use crate::data::models::{Discussion, FileDiff, MergeRequest, Person};
 use crate::data::store::{Account, QueueMode, Store};
 use crate::data::{gitlab, markup, styler};
+use crate::ui::detail::Part;
 
 /// Swift's `Date` counts from 2001-01-01; Unix time from 1970.
 const SWIFT_EPOCH: f64 = 978_307_200.0;
@@ -431,11 +432,12 @@ impl Driver {
                 if s.store.selected_id.as_deref() != Some(&id) {
                     s.store.select(Some(id));
                 }
-                s.set_tab(match tab {
-                    Tab::Overview => DetailTab::Overview,
-                    Tab::Changes => DetailTab::Changes,
-                    Tab::Discussion => DetailTab::Discussion,
-                });
+                let part = match tab {
+                    Tab::Overview => Part::Ask,
+                    Tab::Changes => Part::Changes,
+                    Tab::Discussion => Part::Conversation,
+                };
+                crate::ui::detail::jump(s, tx, part);
             }
             Step::Scroll { id, y } => {
                 // Like a person scrolling: the page moves, nothing in the app's state changes.

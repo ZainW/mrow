@@ -197,6 +197,9 @@ pub struct Store {
     pub inbox: Vec<Event>,
     /// My requests merged from here: their leaving the list is my doing, not news.
     merged_here: HashSet<String>,
+    /// When each merge request was last seen before this visit to it, for the replies that came
+    /// since. This session only; none for one never seen before.
+    pub seen_before: HashMap<String, f64>,
     pub viewed_files: BTreeMap<String, BTreeMap<String, i64>>,
     /// Shared, so drawing a page takes a reference rather than copying every line.
     pub diffs: HashMap<String, Loadable<Rc<Vec<FileDiff>>>>,
@@ -240,6 +243,7 @@ impl Default for Store {
             last_seen: p.last_seen,
             inbox: p.inbox,
             merged_here: HashSet::new(),
+            seen_before: HashMap::new(),
             viewed_files: p.viewed_files,
             diffs: HashMap::new(),
             discussions: HashMap::new(),
@@ -584,6 +588,14 @@ impl Store {
 
     /// Selects a merge request (or nothing), marking it seen and bringing its account along.
     pub fn select(&mut self, id: Option<String>) {
+        if id != self.selected_id {
+            if let Some(id) = &id {
+                match self.last_seen.get(id) {
+                    Some(&at) => self.seen_before.insert(id.clone(), at),
+                    None => self.seen_before.remove(id),
+                };
+            }
+        }
         self.selected_id = id;
         let Some(item) = self.selected().cloned() else { return };
         self.mark_seen(&item);
@@ -707,6 +719,17 @@ impl Store {
             let seen = self.last_seen.clone();
             prefs::update(|p| p.last_seen = seen);
         }
+    }
+
+    /// A note someone else wrote since I last looked at its merge request. Nothing is fresh on
+    /// a first visit.
+    pub fn is_fresh(&self, item: &MergeRequest, note: &Note) -> bool {
+        let Some(&seen) = self.seen_before.get(&item.id) else { return false };
+        !note.system && self.me().is_none_or(|me| me.username != note.author.username) && note.created_at.timestamp() as f64 > seen
+    }
+
+    pub fn has_fresh(&self, item: &MergeRequest, thread: &Discussion) -> bool {
+        thread.notes.iter().any(|n| self.is_fresh(item, n))
     }
 
     // MARK: Viewed files

@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use rune::{El, GrowthSpec, PointerPress, Tx, col, el, icon, row, text};
 
-use crate::app::{App, Confirm, DetailTab};
+use crate::app::{App, Confirm};
 use crate::data::mine::{self, Standing, Status};
 use crate::data::models::{MergeRequest, PipelineStatus, ReviewState};
 use crate::data::store::{MineLine, Rail, Store};
@@ -436,12 +436,10 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
                 ));
             }
             Standing::NeedsYou if item.unresolved_threads.unwrap_or(0) > 0 => {
-                actions = actions.child(action_button(p, "threads", Some(&I::BUBBLE_TEXT), "Go to the Threads", true, true).on_press_tx(
-                    |s: &mut App, tx: &mut Tx| {
-                        tx.instant();
-                        s.set_tab(DetailTab::Discussion);
-                    },
-                ));
+                actions = actions.child(
+                    action_button(p, "threads", Some(&I::BUBBLE_TEXT), "Go to the Threads", true, true)
+                        .on_press_tx(|s: &mut App, tx: &mut Tx| crate::ui::detail::jump(s, tx, crate::ui::detail::Part::Conversation)),
+                );
             }
             Standing::Waiting | Standing::Quiet if item.auto_merge => {
                 actions = actions

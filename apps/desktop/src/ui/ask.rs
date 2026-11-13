@@ -9,7 +9,7 @@ use rune::text::Span;
 use rune::{Cursor, Drag, El, FileDialogOptions, Phase as DragPhase, PopupItem, PopupMenu, ScrollSpec, Tx, col, el, icon, rich, row, text};
 use rune_kit::{Kit, TextArea};
 
-use crate::app::{App, DetailTab, DraftKey, ProposalState, ProposalTarget};
+use crate::app::{App, DraftKey, ProposalState, ProposalTarget};
 use crate::data::ask::agents::AgentKind;
 use crate::data::ask::citations;
 use crate::data::ask::model::{AgentModel, MAKERS, featured};
@@ -516,16 +516,14 @@ fn proposal_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, key: &str, prop
     card.child(row().w_full().px(12.0).pb(10.0).gap(8.0).center_y().child(el().grow(1.0)).child(edit_button).child(post_button))
 }
 
-/// Adds an answer to the merge request's comment draft and opens the Discussion tab on it, with
-/// the caret in the box. Nothing posts until the comment is sent from there.
+/// Adds an answer to the merge request's comment draft and shows that box, at the end of the
+/// conversation, with the caret in it. Nothing posts until the comment is sent from there.
 fn draft_comment(s: &mut App, tx: &mut Tx, id: &str, body: &str) {
     let key = DraftKey::Comment(id.to_string());
     let draft = s.draft_mut(&key);
     let text = if draft.text.trim().is_empty() { body.to_string() } else { format!("{}\n\n{body}", draft.text.trim_end()) };
     *draft = rune::TextEdit::new(text);
-    s.detail_tabs.insert(id.to_string(), DetailTab::Discussion);
-    tx.scroll_to_bottom(format!("page-{id}"));
-    tx.focus(crate::ui::detail::draft_field_key(&key), false);
+    crate::ui::detail::compose(tx, id);
 }
 
 thread_local! {

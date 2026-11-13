@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use rune::{AppSpec, Chrome, Tx, Waker};
 
-use app::{App, DetailTab};
+use app::App;
 use data::ask;
 use data::forge::Forge;
 use data::prefs;
@@ -71,6 +71,10 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     changed |= s.settle_posts();
     changed |= s.images.poll();
     changed |= fold_viewed(s);
+    if let Some(part) = s.pending_jump.take() {
+        ui::detail::jump(s, tx, part);
+        changed = true;
+    }
     if s.ask_visible {
         if let Some(item) = s.store.selected().cloned() {
             s.ask.prepare(&item);
@@ -169,6 +173,10 @@ fn fixture(s: &mut App) {
     s.store.forge = Forge::Gitlab;
     s.store.tabs = vec![];
     let first = s.store.visible_items().first().map(|m| m.id.clone());
+    // Seen an hour and a half ago, between the comment on a line and its reply, so the reply is new.
+    if let Some(id) = &first {
+        s.store.last_seen.insert(id.clone(), (chrono::Utc::now() - chrono::Duration::minutes(90)).timestamp() as f64);
+    }
     s.store.select(first);
     // After the selection, which would deal with what's new on it.
     s.store.inbox = fixtures::events();
@@ -180,12 +188,12 @@ fn scene_to_review(s: &mut App) {
 
 fn scene_changes(s: &mut App) {
     fixture(s);
-    s.set_tab(DetailTab::Changes);
+    s.pending_jump = Some(ui::detail::Part::Changes);
 }
 
 fn scene_discussion(s: &mut App) {
     fixture(s);
-    s.set_tab(DetailTab::Discussion);
+    s.pending_jump = Some(ui::detail::Part::Conversation);
 }
 
 fn scene_tabs(s: &mut App) {
