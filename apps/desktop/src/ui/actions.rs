@@ -50,6 +50,7 @@ pub fn toggle_sidebar(s: &mut App, tx: &mut Tx) {
     tx.instant();
     let v = !s.sidebar_visible;
     s.set_sidebar_visible(v);
+    s.inbox_open &= v;
 }
 
 /// Shows the sidebar and puts the caret in its filter.
@@ -246,6 +247,7 @@ const COMMANDS: &[Command] = &[
     cmd(V, "ask", "Ask an Agent", Some("cmd+l"), toggle_ask),
     cmd(V, "new-chat", "New Chat", Some("cmd+shift+l"), new_chat),
     cmd(V, "choose-model", "Choose Model…", Some("cmd+alt+l"), choose_model),
+    cmd(V, "inbox", "Inbox", Some("cmd+shift+i"), crate::ui::inbox::toggle),
     cmd(V, "drafts", "Show Drafts", None, toggle_drafts),
     cmd(V, "refresh", "Refresh", Some("cmd+r"), refresh),
     cmd(R, "next", "Next Review", Some("cmd+alt+bracketright"), next_item),
@@ -306,6 +308,11 @@ pub fn on_key(s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
             } else {
                 next_tab(s, tx)
             }
+            true
+        }
+        rune::Key::Escape if s.inbox_open => {
+            tx.instant();
+            s.inbox_open = false;
             true
         }
         rune::Key::Escape if s.settings_open => {

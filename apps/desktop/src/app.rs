@@ -55,6 +55,8 @@ pub struct App {
     pub store: Store,
     pub sidebar_visible: bool,
     pub settings_open: bool,
+    /// The inbox's popover, under the bell.
+    pub inbox_open: bool,
     pub filter: TextEdit,
     /// The tab each merge request was last left on.
     pub detail_tabs: HashMap<String, DetailTab>,
@@ -159,6 +161,7 @@ impl Default for App {
             store: Store::default(),
             sidebar_visible: p.sidebar_visible,
             settings_open: false,
+            inbox_open: false,
             filter: TextEdit::new(""),
             detail_tabs: HashMap::new(),
             sidebar_width: p.sidebar_width as f32,

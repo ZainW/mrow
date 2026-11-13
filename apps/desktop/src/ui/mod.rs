@@ -7,6 +7,7 @@ pub mod detail;
 pub mod diff;
 pub mod icons;
 pub mod images;
+pub mod inbox;
 pub mod markdown;
 pub mod menus;
 pub mod mine;
@@ -84,6 +85,10 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     if let Some(message) = &s.store.toast {
         root = root.child(toast(p, message));
     }
+    // After the sidebar, which holds the bell it hangs from.
+    if s.inbox_open && s.sidebar_visible {
+        root = root.child(inbox::panel(s, p));
+    }
     if s.settings_open {
         for layer in settings::sheet(s, p, k) {
             root = root.child(layer);
@@ -160,7 +165,7 @@ fn tab_strip(s: &App, p: &Pal) -> El {
     let mut r = row().key("tabs").instant_changes().gap(3.0).center_y().clip_rounded(0.0);
     for item in store.tab_items() {
         let active = store.selected_id.as_deref() == Some(item.id.as_str());
-        r = r.child(tab_chip(p, &item, active, false, store.is_unread(&item)));
+        r = r.child(tab_chip(p, &item, active, false, store.unread(&item)));
     }
     if let Some(item) = store.selected() {
         if !store.tabs.contains(&item.id) {

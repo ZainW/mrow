@@ -9,6 +9,7 @@ pub mod forge;
 pub mod github;
 pub mod gitlab;
 pub mod images;
+pub mod inbox;
 pub mod markup;
 pub mod mine;
 pub mod models;

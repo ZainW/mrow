@@ -97,7 +97,7 @@ pub fn rows(s: &App, p: &Pal) -> Option<El> {
     let flags: Vec<(bool, bool)> = lines
         .iter()
         .map(|l| match l {
-            MineLine::Item { item, .. } => (store.selected_id.as_deref() == Some(item.id.as_str()), store.is_unread(item)),
+            MineLine::Item { item, .. } => (store.selected_id.as_deref() == Some(item.id.as_str()), store.has_news(&item.id)),
             _ => (false, false),
         })
         .collect();
@@ -392,7 +392,7 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
                     },
                     Confirm::Merge => |s, item| {
                         s.confirm = None;
-                        s.store.merge(item);
+                        s.store.merge_here(item);
                     },
                 },
             ))

@@ -10,6 +10,7 @@ use chrono::{Local, Utc};
 use super::bg::Bg;
 use super::diff::DiffLine;
 use super::forge::{Forge, QueueResult};
+use super::inbox::{self, Event, Notice};
 use super::mine::{self, Stack, Standing, Status, WalkStep};
 use super::models::*;
 use super::prefs;
@@ -118,6 +119,10 @@ pub struct Walk {
     moved_at: Date,
 }
 
+/// The fewest of my own requests a forge's query can return when it has run out of pages
+/// (GitHub's two pages of 30). At or past this, the list may be cut short.
+const MINE_PAGE_FLOOR: usize = 60;
+
 /// How long a walk waits on a part (a pipeline, usually) before it gives up.
 const WALK_PATIENCE_MINUTES: i64 = 45;
 
@@ -188,6 +193,10 @@ pub struct Store {
     /// preview (a single click), the way VS Code previews a file.
     pub tabs: Vec<String>,
     pub last_seen: BTreeMap<String, f64>,
+    /// What changed, newest first: the bell's list.
+    pub inbox: Vec<Event>,
+    /// My requests merged from here: their leaving the list is my doing, not news.
+    merged_here: HashSet<String>,
     pub viewed_files: BTreeMap<String, BTreeMap<String, i64>>,
     /// Shared, so drawing a page takes a reference rather than copying every line.
     pub diffs: HashMap<String, Loadable<Rc<Vec<FileDiff>>>>,
@@ -229,6 +238,8 @@ impl Default for Store {
             selected_id: None,
             tabs: p.tabs,
             last_seen: p.last_seen,
+            inbox: p.inbox,
+            merged_here: HashSet::new(),
             viewed_files: p.viewed_files,
             diffs: HashMap::new(),
             discussions: HashMap::new(),
@@ -553,6 +564,12 @@ impl Store {
         counts
     }
 
+    /// Whether to put a dot on it: for mine, a new event in the inbox (so my own pushes don't
+    /// light it); for a review, activity since I last opened it.
+    pub fn unread(&self, item: &MergeRequest) -> bool {
+        if self.is_mine(item) { self.has_news(&item.id) } else { self.is_unread(item) }
+    }
+
     pub fn is_unread(&self, item: &MergeRequest) -> bool {
         if !item.is_open() {
             return false;
@@ -570,6 +587,7 @@ impl Store {
         self.selected_id = id;
         let Some(item) = self.selected().cloned() else { return };
         self.mark_seen(&item);
+        self.mark_request_done(&item.id);
         // A tab from the other account brings its account along, so the sidebar matches.
         if item.kind() != self.forge {
             self.set_forge(item.kind());
@@ -755,6 +773,8 @@ impl Store {
         self.is_loading = false;
         // An account that fails keeps what it had, marked offline.
         let any_ok = results.iter().any(|(_, r)| r.is_ok());
+        // The accounts that loaded, with any of mine a search still listed after it finished.
+        let mut fresh: Vec<(Forge, Vec<MergeRequest>)> = Vec::new();
         for (forge, result) in results {
             let account = self.accounts.entry(forge).or_default();
             match result {
@@ -763,7 +783,9 @@ impl Store {
                     account.open = q.open;
                     account.done = q.done;
                     // A search can lag a merge by a few seconds and still list it.
-                    account.mine = q.mine.into_iter().filter(MergeRequest::is_open).collect();
+                    let (open, ended): (Vec<MergeRequest>, Vec<MergeRequest>) = q.mine.into_iter().partition(MergeRequest::is_open);
+                    account.mine = open;
+                    fresh.push((forge, ended));
                     account.mine_error = q.mine_error;
                     account.error = None;
                     account.last_refreshed = Some(Utc::now());
@@ -802,9 +824,10 @@ impl Store {
             self.load_diffs(&item);
             self.load_discussions(&item);
         }
+        // Before the walks move on: a part they merged is still on record as theirs.
+        effects.notify = self.note_changes(&fresh, every_loaded);
         self.advance_walks();
         effects.badge = Some(self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review() && !m.draft).count());
-        effects.notify = self.new_requests();
         effects
     }
 
@@ -1106,40 +1129,148 @@ impl Store {
         (changed, effects)
     }
 
-    /// A notification for each review request that wasn't in the queue last time, or that was
-    /// asked again since.
-    fn new_requests(&mut self) -> Vec<MergeRequest> {
+    /// Compares the accounts that loaded with what the last refresh saw, adds what changed to the
+    /// inbox, and returns the banners to post. The first look at an account finds nothing.
+    fn note_changes(&mut self, fresh: &[(Forge, Vec<MergeRequest>)], every_loaded: bool) -> Vec<Notice> {
         if self.offline {
             return vec![];
         }
-        let waiting: Vec<MergeRequest> = self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review()).cloned().collect();
-        let (known_list, initialized, notify) = prefs::read(|p| (p.known_requests.clone(), p.known_requests_initialized, p.notify));
-        // Stored as "id@seconds", so a re-request (a later time) notifies again.
-        let known: HashMap<String, i64> = known_list
+        let (prev, known, initialized, levels, banners) =
+            prefs::read(|p| (p.inbox_snapshot.clone(), p.known_requests.clone(), p.known_requests_initialized, p.inbox_levels.clone(), p.notify));
+        let forges: Vec<Forge> = fresh.iter().map(|(f, _)| *f).collect();
+        let prev = prev.unwrap_or_else(|| {
+            // Mrow before the inbox kept only the review requests it had notified about.
+            let waiting: Vec<&MergeRequest> = self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review()).collect();
+            if initialized { inbox::Snapshot::from_known(&known, &waiting, &forges) } else { inbox::Snapshot::default() }
+        });
+        let mut merged_here = self.merged_here.clone();
+        merged_here.extend(self.walks.iter().flat_map(|w| w.merged.iter().cloned()));
+        let ended: Vec<Vec<MergeRequest>> =
+            fresh.iter().map(|(forge, lagged)| self.accounts.get(forge).map(|a| a.done.iter().chain(lagged).cloned().collect()).unwrap_or_default()).collect();
+        let looks: Vec<inbox::Look> = fresh
             .iter()
-            .filter_map(|e| {
-                let at = e.rfind('@')?;
-                Some((e[..at].to_string(), e[at + 1..].parse().ok()?))
+            .zip(&ended)
+            .filter_map(|((forge, _), ended)| {
+                let a = self.accounts.get(forge)?;
+                Some(inbox::Look {
+                    forge: *forge,
+                    me: a.me.as_ref().map_or("", |m| m.username.as_str()),
+                    open: &a.open,
+                    mine: a.mine_error.is_none().then_some(a.mine.as_slice()),
+                    mine_capped: a.mine.len() >= MINE_PAGE_FLOOR,
+                    ended,
+                })
             })
             .collect();
-        let next = waiting.iter().map(|m| format!("{}@{}", m.id, m.requested_at.timestamp())).collect();
-        prefs::update(|p| {
-            p.known_requests = next;
-            p.known_requests_initialized = true;
-        });
-        // The first run knows nothing yet; an empty queue later is still a known state.
-        if !initialized || !notify {
-            return vec![];
+        let now = Utc::now();
+        let (next, mut found) = inbox::detect(&prev, &looks, &merged_here, now);
+        found.retain(|e| inbox::level(&levels, e.kind) != inbox::Level::Off);
+        let notices = inbox::notices(&found, &levels, banners);
+        inbox::add(&mut self.inbox, found);
+        // A review request is dealt with once it no longer waits on me.
+        let waiting: HashSet<&str> = looks.iter().flat_map(|l| l.open.iter()).filter(|m| m.my_state.needs_review()).map(|m| m.id.as_str()).collect();
+        for e in self.inbox.iter_mut().filter(|e| !e.kind.on_mine() && forges.contains(&e.forge)) {
+            if !waiting.contains(e.request.as_str()) {
+                e.done = true;
+            }
         }
-        waiting
-            .into_iter()
-            .filter(|m| match known.get(&m.id) {
-                None => true,
-                // A failed note lookup can swap the request time for the creation time; that's no new ask.
-                Some(seconds) => !m.requested_at_is_guess && m.requested_at.timestamp() > seconds + 60,
-            })
-            .take(5)
-            .collect()
+        // Only a full set of lists says a request is gone.
+        let whole = every_loaded && self.accounts.values().all(|a| a.error.is_none() && a.mine_error.is_none());
+        let live: HashSet<String> = self.every_item().map(|m| m.id.clone()).collect();
+        inbox::prune(&mut self.inbox, now, whole.then_some(&live));
+        if whole {
+            self.merged_here.retain(|id| live.contains(id));
+        }
+        let events = self.inbox.clone();
+        prefs::update(|p| {
+            p.inbox_snapshot = Some(next);
+            p.inbox = events;
+            p.known_requests.clear();
+        });
+        notices
+    }
+
+    // MARK: Inbox
+
+    /// The events not dealt with yet, newest first.
+    pub fn new_events(&self) -> impl Iterator<Item = &Event> {
+        self.inbox.iter().filter(|e| !e.done)
+    }
+
+    /// The bell's count, across every account.
+    pub fn news_count(&self) -> usize {
+        self.new_events().count()
+    }
+
+    /// Whether a merge request has an event not dealt with.
+    pub fn has_news(&self, id: &str) -> bool {
+        self.new_events().any(|e| e.request == id)
+    }
+
+    fn save_inbox(&self) {
+        if !self.offline {
+            let events = self.inbox.clone();
+            prefs::update(|p| p.inbox = events);
+        }
+    }
+
+    pub fn mark_done(&mut self, event: &str) {
+        if let Some(e) = self.inbox.iter_mut().find(|e| e.id == event && !e.done) {
+            e.done = true;
+            self.save_inbox();
+        }
+    }
+
+    pub fn mark_all_done(&mut self) {
+        if self.inbox.iter().any(|e| !e.done) {
+            self.inbox.iter_mut().for_each(|e| e.done = true);
+            self.save_inbox();
+        }
+    }
+
+    /// Opening a request deals with everything the inbox says about it.
+    fn mark_request_done(&mut self, id: &str) {
+        if self.has_news(id) {
+            self.inbox.iter_mut().filter(|e| e.request == id).for_each(|e| e.done = true);
+            self.save_inbox();
+        }
+    }
+
+    /// Shows a merge request in the list it's in (Mine for my own, To review or Reviewed for a
+    /// review), bringing its account along. Returns its address when it has left every list,
+    /// to open on the forge instead.
+    pub fn open_request(&mut self, id: &str) -> Option<String> {
+        let Some(item) = self.item(id).cloned() else {
+            let url = self.inbox.iter().find(|e| e.request == id).map(|e| e.url.clone());
+            self.mark_request_done(id);
+            return url.filter(|u| !u.is_empty());
+        };
+        self.mode = if self.is_mine(&item) {
+            QueueMode::Mine
+        } else if !item.is_open() {
+            QueueMode::Done
+        } else if item.my_state.needs_review() {
+            QueueMode::ToReview
+        } else {
+            QueueMode::Reviewed
+        };
+        self.select(Some(item.id));
+        None
+    }
+
+    /// Opens what an event is about and marks it done.
+    pub fn open_event(&mut self, event: &str) -> Option<String> {
+        let request = self.inbox.iter().find(|e| e.id == event)?.request.clone();
+        self.mark_done(event);
+        self.open_request(&request)
+    }
+
+    /// Merges one of mine from here (see `merge`), so its leaving the list isn't news.
+    pub fn merge_here(&mut self, item: &MergeRequest) {
+        self.merge(item);
+        if self.busy.is_some() {
+            self.merged_here.insert(item.id.clone());
+        }
     }
 
     /// Loads a recorded queue instead of asking a forge (snapshots, benchmarks, tests).
@@ -1155,7 +1286,7 @@ impl Store {
 #[derive(Default)]
 pub struct Effects {
     pub badge: Option<usize>,
-    pub notify: Vec<MergeRequest>,
+    pub notify: Vec<Notice>,
     pub wake_at: Option<f64>,
     pub announce: Option<String>,
 }

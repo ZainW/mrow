@@ -236,3 +236,8 @@ icon!(
     "held",
     r#"<circle cx="8" cy="8" r="5.6" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M5.7 6.7h4.6M5.7 9.3h4.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#
 );
+icon!(
+    BELL,
+    "bell",
+    r#"<path d="M4.2 10.4V7.3a3.8 3.8 0 0 1 7.6 0v3.1l1.3 1.7H2.9z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M6.6 13.8c.3.5.8.8 1.4.8s1.1-.3 1.4-.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/>"#
+);

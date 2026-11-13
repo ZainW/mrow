@@ -529,3 +529,335 @@ mod mine_list {
         assert_eq!(shape(&store), ["# Matches", "243 (4 of 4)"]);
     }
 }
+
+mod inbox {
+    use std::collections::{BTreeMap, HashSet};
+
+    use chrono::{Duration, Utc};
+
+    use crate::data::forge::Forge;
+    use crate::data::inbox::{CAP, Event, Kind, Level, Look, Snapshot, add, detect, notices, prune};
+    use crate::data::models::*;
+
+    fn request(iid: &str, author: &str) -> MergeRequest {
+        let now = Utc::now() - Duration::hours(1);
+        MergeRequest {
+            id: format!("id-{iid}"),
+            iid: iid.into(),
+            title: format!("Request {iid}"),
+            web_url: format!("https://example.com/{iid}"),
+            project_path: "group/project".into(),
+            project_name: "project".into(),
+            author: Person::new(author, author),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            state: "opened".into(),
+            draft: false,
+            source_branch: format!("branch-{iid}"),
+            target_branch: "main".into(),
+            merge_status: Some("not_approved".into()),
+            comment_count: 0,
+            description: String::new(),
+            reviewers: vec![],
+            approved_by: vec![],
+            additions: 0,
+            deletions: 0,
+            file_count: 0,
+            pipeline: Some(PipelineStatus::Success),
+            labels: vec![],
+            requested_at: now,
+            first_requested_at: now,
+            requested_by: Some(Person::new(author, "Maya Lind")),
+            requested_at_is_guess: false,
+            my_state: ReviewState::Unreviewed,
+            forge: Forge::Gitlab,
+            unresolved_threads: Some(0),
+            failed_job: None,
+            auto_merge: false,
+            merge_method: None,
+        }
+    }
+
+    /// One of mine, waiting on two reviewers.
+    fn own(iid: &str) -> MergeRequest {
+        let mut m = request(iid, "me");
+        m.my_state = ReviewState::Unknown;
+        m.requested_by = None;
+        m.reviewers = ["maya", "sam"]
+            .iter()
+            .map(|u| Reviewer { person: Person::new(u, &format!("{u} name")), state: ReviewState::Unreviewed, approved: false })
+            .collect();
+        m
+    }
+
+    fn approve(m: &mut MergeRequest, who: &str) {
+        let r = m.reviewers.iter_mut().find(|r| r.person.username == who).unwrap();
+        r.state = ReviewState::Approved;
+        r.approved = true;
+        m.approved_by.push(who.into());
+    }
+
+    struct Queue {
+        open: Vec<MergeRequest>,
+        mine: Vec<MergeRequest>,
+        ended: Vec<MergeRequest>,
+        capped: bool,
+        mine_failed: bool,
+    }
+
+    impl Queue {
+        fn new(open: Vec<MergeRequest>, mine: Vec<MergeRequest>) -> Queue {
+            Queue { open, mine, ended: vec![], capped: false, mine_failed: false }
+        }
+    }
+
+    fn run(prev: &Snapshot, q: &Queue, merged_here: &HashSet<String>) -> (Snapshot, Vec<Event>) {
+        let look =
+            Look { forge: Forge::Gitlab, me: "me", open: &q.open, mine: (!q.mine_failed).then_some(q.mine.as_slice()), mine_capped: q.capped, ended: &q.ended };
+        detect(prev, &[look], merged_here, Utc::now())
+    }
+
+    fn kinds(events: &[Event]) -> Vec<(String, Kind, String)> {
+        events.iter().map(|e| (e.request.clone(), e.kind, e.title.clone())).collect()
+    }
+
+    #[test]
+    fn the_first_look_finds_nothing() {
+        let q = Queue::new(vec![request("1", "maya")], vec![own("2")]);
+        let (snapshot, events) = run(&Snapshot::default(), &q, &HashSet::new());
+        assert!(events.is_empty(), "{events:?}");
+        assert!(snapshot.review_forges.contains(&Forge::Gitlab) && snapshot.mine_forges.contains(&Forge::Gitlab));
+        assert_eq!((snapshot.reviews.len(), snapshot.mine.len()), (1, 1));
+    }
+
+    #[test]
+    fn a_list_cut_short_says_nothing_about_what_left_it() {
+        let none = HashSet::new();
+        let mut q = Queue::new(vec![], vec![own("2"), own("3")]);
+        let (snapshot, _) = run(&Snapshot::default(), &q, &none);
+        // The forge ran out of pages: "3" may only have slipped past the end.
+        q.mine.pop();
+        q.capped = true;
+        let (_, events) = run(&snapshot, &q, &none);
+        assert!(events.is_empty(), "{events:?}");
+        q.capped = false;
+        assert_eq!(run(&snapshot, &q, &none).1.len(), 1);
+    }
+
+    #[test]
+    fn each_change_is_found_once() {
+        let none = HashSet::new();
+        let mut q = Queue::new(vec![request("1", "maya")], vec![own("2"), own("3"), own("4"), own("5"), own("6")]);
+        let (snapshot, _) = run(&Snapshot::default(), &q, &none);
+
+        q.open.push(request("7", "sam"));
+        approve(&mut q.mine[0], "maya");
+        q.mine[1].reviewers[0].state = ReviewState::RequestedChanges;
+        q.mine[2].pipeline = Some(PipelineStatus::Failed);
+        q.mine[2].failed_job = Some("test:integration".into());
+        q.mine[3].unresolved_threads = Some(2);
+        // Both approve and nothing blocks it: ready, which says the approval too.
+        approve(&mut q.mine[4], "maya");
+        approve(&mut q.mine[4], "sam");
+        q.mine[4].merge_status = Some("mergeable".into());
+        let (snapshot, events) = run(&snapshot, &q, &none);
+        assert_eq!(
+            kinds(&events),
+            [
+                ("id-7".to_string(), Kind::ReviewAsked, "Maya Lind asked for your review".to_string()),
+                ("id-2".into(), Kind::Approved, "maya name approved".into()),
+                ("id-3".into(), Kind::ChangesRequested, "maya name asked for changes".into()),
+                ("id-4".into(), Kind::PipelineFailed, "Pipeline failed · test:integration".into()),
+                ("id-5".into(), Kind::Threads, "2 new threads".into()),
+                ("id-6".into(), Kind::Ready, "Ready to merge".into()),
+            ]
+        );
+        assert_eq!(events[0].reference, "project!7");
+
+        // The same queue again is no news.
+        let (snapshot, events) = run(&snapshot, &q, &none);
+        assert!(events.is_empty(), "{events:?}");
+
+        // One of mine leaves the list, and the Done list says how.
+        let mut merged = q.mine.remove(4);
+        merged.state = "merged".into();
+        q.ended.push(merged);
+        let gone = q.mine.remove(0);
+        let (snapshot, events) = run(&snapshot, &q, &none);
+        assert_eq!(kinds(&events), [("id-2".to_string(), Kind::Closed, "Merged or closed".to_string()), ("id-6".into(), Kind::Closed, "Merged".into())]);
+        assert!(!snapshot.mine.contains_key(&gone.id));
+    }
+
+    #[test]
+    fn a_re_request_is_news_and_a_guessed_time_is_not() {
+        let none = HashSet::new();
+        let mut q = Queue::new(vec![request("1", "maya")], vec![]);
+        let (snapshot, _) = run(&Snapshot::default(), &q, &none);
+
+        // Thirty seconds later is the same ask.
+        q.open[0].requested_at += Duration::seconds(30);
+        let (snapshot, events) = run(&snapshot, &q, &none);
+        assert!(events.is_empty());
+
+        // A failed note lookup puts the creation time in its place: no new ask.
+        let mut guessed = q.open[0].clone();
+        guessed.requested_at = Utc::now();
+        guessed.requested_at_is_guess = true;
+        let (_, events) = run(&snapshot, &Queue::new(vec![guessed], vec![]), &none);
+        assert!(events.is_empty());
+
+        q.open[0].requested_at += Duration::hours(2);
+        let (snapshot, events) = run(&snapshot, &q, &none);
+        assert_eq!(kinds(&events), [("id-1".to_string(), Kind::AskedAgain, "Maya Lind asked again".to_string())]);
+        assert!(run(&snapshot, &q, &none).1.is_empty());
+
+        // Reviewed, then asked again: back in the list as a re-request.
+        let (snapshot, _) = run(&snapshot, &Queue::new(vec![], vec![]), &none);
+        q.open[0].first_requested_at = q.open[0].requested_at - Duration::hours(5);
+        q.open[0].requested_at += Duration::hours(1);
+        assert_eq!(run(&snapshot, &q, &none).1[0].kind, Kind::AskedAgain);
+    }
+
+    #[test]
+    fn my_own_doing_is_no_news() {
+        let mut q = Queue::new(vec![request("1", "maya")], vec![own("2"), own("3")]);
+        q.mine[0].reviewers.push(Reviewer { person: Person::new("me", "Me"), state: ReviewState::Unreviewed, approved: false });
+        let (snapshot, _) = run(&Snapshot::default(), &q, &HashSet::new());
+
+        // I approve the review and my own request, and merge the other from Mrow.
+        q.open[0].my_state = ReviewState::Approved;
+        approve(&mut q.mine[0], "me");
+        q.mine.remove(1);
+        let merged_here: HashSet<String> = ["id-3".to_string()].into();
+        let (_, events) = run(&snapshot, &q, &merged_here);
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn the_requests_notified_before_the_inbox_carry_over() {
+        let mut q = Queue::new(vec![request("1", "maya"), request("2", "sam")], vec![own("3")]);
+        let known = [format!("id-1@{}", q.open[0].requested_at.timestamp())].into();
+        let waiting: Vec<&MergeRequest> = q.open.iter().collect();
+        let snapshot = Snapshot::from_known(&known, &waiting, &[Forge::Gitlab]);
+        q.open.push(request("4", "sam"));
+        let (_, events) = run(&snapshot, &q, &HashSet::new());
+        // Mine are seen for the first time; the reviews pick up where the notifications left off.
+        assert_eq!(events.iter().map(|e| e.request.as_str()).collect::<Vec<_>>(), ["id-2", "id-4"]);
+    }
+
+    #[test]
+    fn a_failed_fetch_of_mine_says_nothing_about_them() {
+        let none = HashSet::new();
+        let mut q = Queue::new(vec![], vec![own("2")]);
+        let (snapshot, _) = run(&Snapshot::default(), &q, &none);
+        q.mine.clear();
+        q.mine_failed = true;
+        let (snapshot, events) = run(&snapshot, &q, &none);
+        assert!(events.is_empty());
+        assert!(snapshot.mine.contains_key("id-2"), "kept for when they load again");
+    }
+
+    #[test]
+    fn a_held_part_becomes_ready_when_the_one_below_merges() {
+        let none = HashSet::new();
+        let mut bottom = own("1");
+        let mut top = own("2");
+        top.target_branch = bottom.source_branch.clone();
+        for m in [&mut bottom, &mut top] {
+            approve(m, "maya");
+            approve(m, "sam");
+            m.merge_status = Some("mergeable".into());
+        }
+        let (snapshot, _) = run(&Snapshot::default(), &Queue::new(vec![], vec![bottom.clone(), top.clone()]), &none);
+        assert_eq!(snapshot.mine["id-2"].standing, crate::data::mine::Standing::Held);
+        top.target_branch = "main".into();
+        let merged: HashSet<String> = ["id-1".to_string()].into();
+        let (_, events) = run(&snapshot, &Queue::new(vec![], vec![top]), &merged);
+        assert_eq!(kinds(&events), [("id-2".to_string(), Kind::Ready, "Ready to merge".to_string())]);
+    }
+
+    fn event(request: &str, kind: Kind, hours: i64) -> Event {
+        let at = Utc::now() - Duration::hours(hours);
+        Event {
+            id: format!("{request}|{kind:?}|{}", at.timestamp()),
+            request: request.into(),
+            forge: Forge::Gitlab,
+            kind,
+            title: format!("{kind:?}"),
+            subject: "A request".into(),
+            reference: format!("project!{request}"),
+            url: String::new(),
+            at,
+            done: false,
+        }
+    }
+
+    #[test]
+    fn the_inbox_keeps_the_newest_and_lets_old_and_gone_ones_go() {
+        let mut inbox = Vec::new();
+        add(&mut inbox, (0..CAP as i64 + 20).map(|i| event(&format!("{i}"), Kind::Threads, i)).collect());
+        add(&mut inbox, vec![event("0", Kind::Threads, 0)]);
+        assert_eq!(inbox.len(), CAP + 20, "the same event isn't added twice");
+        prune(&mut inbox, Utc::now(), None);
+        assert_eq!(inbox.len(), CAP);
+        assert_eq!(inbox[0].request, "0", "newest first");
+
+        let mut inbox =
+            vec![event("a", Kind::Threads, 15 * 24), event("b", Kind::Threads, 3 * 24), event("c", Kind::Threads, 1), event("d", Kind::Closed, 3 * 24)];
+        let live: HashSet<String> = HashSet::new();
+        prune(&mut inbox, Utc::now(), Some(&live));
+        let left: Vec<&str> = inbox.iter().map(|e| e.request.as_str()).collect();
+        assert_eq!(left, ["c", "d"], "too old, and long gone, go; a recent one and the leaving itself stay");
+    }
+
+    #[test]
+    fn several_events_on_one_request_make_one_banner() {
+        let found = vec![event("1", Kind::Threads, 0), event("1", Kind::Ready, 0), event("1", Kind::Approved, 0), event("2", Kind::Approved, 0)];
+        let levels = BTreeMap::new();
+        let banners = notices(&found, &levels, true);
+        assert_eq!(banners.len(), 1, "approvals and threads only go in the inbox by default: {banners:?}");
+        assert_eq!(banners[0].title, "Ready");
+        assert_eq!(banners[0].body, "project!1 · 3 updates\nA request");
+        assert!(notices(&found, &levels, false).is_empty(), "the master switch");
+
+        let levels: BTreeMap<Kind, Level> = [(Kind::Ready, Level::Inbox), (Kind::Approved, Level::Notify)].into();
+        let banners = notices(&found, &levels, true);
+        assert_eq!(banners.iter().map(|b| b.title.as_str()).collect::<Vec<_>>(), ["Approved", "Approved"]);
+    }
+}
+
+mod inbox_store {
+    use crate::data::forge::Forge;
+    use crate::data::prefs;
+    use crate::data::store::{QueueMode, Store};
+
+    #[test]
+    fn opening_an_event_goes_to_its_list_and_deals_with_it() {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        store.inbox = crate::fixtures::events();
+        let new = store.news_count();
+        assert!(new > 0);
+        let pipeline = store.inbox.iter().find(|e| e.reference == "hooks!92").unwrap().id.clone();
+        assert!(store.has_news("gitlab:fieldnotes/hooks!92"));
+        assert!(store.open_event(&pipeline).is_none());
+        assert_eq!((store.mode, store.selected_id.as_deref()), (QueueMode::Mine, Some("gitlab:fieldnotes/hooks!92")));
+        assert_eq!(store.news_count(), new - 1);
+
+        // A review in the other account brings it along.
+        let review = store.inbox.iter().find(|e| e.reference == "cli#42").unwrap().id.clone();
+        store.open_event(&review);
+        assert_eq!((store.forge, store.mode), (Forge::Github, QueueMode::ToReview));
+
+        // One that has left every list opens on the forge.
+        let merged = store.inbox.iter().find(|e| e.reference == "ledger!229").unwrap().id.clone();
+        assert!(store.open_event(&merged).is_some_and(|url| url.contains("229")));
+
+        store.mark_all_done();
+        assert_eq!(store.news_count(), 0);
+    }
+}

@@ -53,7 +53,8 @@ Intel, AMD and software rendering).
 container's architecture (arm64 on Apple silicon). Use `PLATFORM=linux/amd64` for x86_64.
 
 On Linux, settings live in `~/.config/mrow` and scratch files in `~/.cache/mrow` (or the
-`XDG_*` folders). Notifications and the Dock badge are macOS-only for now.
+`XDG_*` folders). Notifications work on both (on Linux through the desktop's notification daemon); the Dock
+badge is macOS-only for now.
 
 ## What it does
 
@@ -78,8 +79,16 @@ On Linux, settings live in `~/.config/mrow` and scratch files in `~/.cache/mrow`
   line numbers, comment threads in place, line comments, a comment box, and Approve / Revoke.
 - **Tabs**: keep several reviews open; a single click previews, a double click keeps.
 - **Ask**: a chat with Cursor's agent about the open review, beside the card.
-- Unread dots, a badge with what's waiting on you, a notification per new or re-requested review,
-  and a refresh every 5 minutes (configurable) and whenever you come back to the app.
+- **Inbox**: the bell at the top of the sidebar counts what changed since you last looked: a
+  review asked of you or asked again, and on your own requests an approval, changes asked for,
+  a failed pipeline, new threads, ready to merge, merged or closed. Click a row to open its
+  request; mark one or all done. Mrow works these out by comparing each refresh with the last,
+  so the first refresh finds nothing and your own approvals and merges don't count.
+- **Notifications**: one per request when something set to Notify happens (review requests,
+  changes asked for, a failed pipeline, ready to merge, by default). Settings → Notifications
+  sets each kind to Notify, Inbox only or Off.
+- Unread dots (on Mine, from the inbox), a badge with what's waiting on you, and a refresh every
+  5 minutes (configurable) and whenever you come back to the app.
 
 GitHub keeps no per-reviewer state, so yours is pieced together from review requests and your
 latest review. Revoking an approval dismisses your review, which needs maintainer rights there.
@@ -97,6 +106,7 @@ On Linux, Ctrl stands in for ⌘, and the account switch is Alt+1 / Alt+2.
 | ⌥⌘] ⌥⌘[ | Next / previous review |
 | ⌘K or ⌘F | Filter the list |
 | ⌘R | Refresh |
+| ⇧⌘I | Inbox |
 | ⌘O | Open in GitLab / GitHub |
 | ⇧⌘A | Approve |
 | ⇧⌘C | Copy link |

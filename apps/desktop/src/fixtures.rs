@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::{Duration, Utc};
 
 use crate::data::forge::Forge;
+use crate::data::inbox::{Event, Kind};
 use crate::data::models::*;
 use crate::data::store::Account;
 
@@ -581,6 +582,59 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
         ],
     );
     (accounts, diffs, threads)
+}
+
+/// The inbox: four new events (on Robin's own requests and a review asked of them) and some
+/// already dealt with, one about a request that has since merged.
+pub fn events() -> Vec<Event> {
+    let event = |forge: Forge, project: &str, iid: &str, kind: Kind, title: &str, subject: &str, minutes: i64, done: bool| {
+        let request = format!("{}:{project}!{iid}", forge.raw());
+        let at = Utc::now() - Duration::minutes(minutes);
+        let name = project.rsplit('/').next().unwrap_or(project);
+        let host = if forge == Forge::Gitlab { "https://gitlab.example.com" } else { "https://github.com" };
+        Event {
+            id: format!("{request}|{kind:?}|{}", at.timestamp()),
+            request,
+            forge,
+            kind,
+            title: title.into(),
+            subject: subject.into(),
+            reference: format!("{name}{}{iid}", forge.reference_mark()),
+            url: format!("{host}/{project}/-/merge_requests/{iid}"),
+            at,
+            done,
+        }
+    };
+    use Forge::{Github, Gitlab};
+    vec![
+        event(Gitlab, "fieldnotes/ledger", "231", Kind::Ready, "Ready to merge", "Drop the legacy export endpoint", 12, false),
+        event(Gitlab, "fieldnotes/hooks", "92", Kind::PipelineFailed, "Pipeline failed · test:integration", "Cache tenant settings per request", 40, false),
+        event(
+            Gitlab,
+            "fieldnotes/hooks",
+            "90",
+            Kind::ChangesRequested,
+            "Maya Lindqvist asked for changes",
+            "Verify webhook signatures before queueing",
+            130,
+            false,
+        ),
+        event(
+            Gitlab,
+            "fieldnotes/ledger",
+            "214",
+            Kind::ReviewAsked,
+            "Maya Lindqvist asked for your review",
+            "Stream ledger exports in batches on a read replica",
+            180,
+            false,
+        ),
+        event(Gitlab, "fieldnotes/hooks", "90", Kind::Threads, "2 new threads", "Verify webhook signatures before queueing", 150, true),
+        event(Gitlab, "fieldnotes/ledger", "240", Kind::Approved, "Samuel Achterberg approved", "Ledger paging 1: add cursor columns", 300, true),
+        event(Github, "fieldnotes/cli", "42", Kind::ReviewAsked, "Jo Whitfield asked for your review", "Add a --dry-run flag to the import command", 360, true),
+        event(Gitlab, "fieldnotes/ledger", "229", Kind::Closed, "Merged", "Rename the export settings", 22 * 60, true),
+        event(Gitlab, "fieldnotes/hooks", "88", Kind::AskedAgain, "Devika Rao asked again", "Retry webhook deliveries with jittered backoff", 30 * 60, true),
+    ]
 }
 
 /// A large review for timing: `files` Rust files of `lines` lines each.
