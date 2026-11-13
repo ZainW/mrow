@@ -10,33 +10,102 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AskRouteImport } from './routes/ask'
+import { Route as DownloadRouteImport } from './routes/download'
+import { Route as KeysRouteImport } from './routes/keys'
+import { Route as MineRouteImport } from './routes/mine'
+import { Route as PrivacyRouteImport } from './routes/privacy'
+import { Route as ReviewingRouteImport } from './routes/reviewing'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AskRoute = AskRouteImport.update({
+  id: '/ask',
+  path: '/ask',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DownloadRoute = DownloadRouteImport.update({
+  id: '/download',
+  path: '/download',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const KeysRoute = KeysRouteImport.update({
+  id: '/keys',
+  path: '/keys',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MineRoute = MineRouteImport.update({
+  id: '/mine',
+  path: '/mine',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivacyRoute = PrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ReviewingRoute = ReviewingRouteImport.update({
+  id: '/reviewing',
+  path: '/reviewing',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/ask': typeof AskRoute
+  '/download': typeof DownloadRoute
+  '/keys': typeof KeysRoute
+  '/mine': typeof MineRoute
+  '/privacy': typeof PrivacyRoute
+  '/reviewing': typeof ReviewingRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/ask': typeof AskRoute
+  '/download': typeof DownloadRoute
+  '/keys': typeof KeysRoute
+  '/mine': typeof MineRoute
+  '/privacy': typeof PrivacyRoute
+  '/reviewing': typeof ReviewingRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/ask': typeof AskRoute
+  '/download': typeof DownloadRoute
+  '/keys': typeof KeysRoute
+  '/mine': typeof MineRoute
+  '/privacy': typeof PrivacyRoute
+  '/reviewing': typeof ReviewingRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    '/' | '/ask' | '/download' | '/keys' | '/mine' | '/privacy' | '/reviewing'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/ask' | '/download' | '/keys' | '/mine' | '/privacy' | '/reviewing'
+  id:
+    | '__root__'
+    | '/'
+    | '/ask'
+    | '/download'
+    | '/keys'
+    | '/mine'
+    | '/privacy'
+    | '/reviewing'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AskRoute: typeof AskRoute
+  DownloadRoute: typeof DownloadRoute
+  KeysRoute: typeof KeysRoute
+  MineRoute: typeof MineRoute
+  PrivacyRoute: typeof PrivacyRoute
+  ReviewingRoute: typeof ReviewingRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +117,59 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/ask': {
+      id: '/ask'
+      path: '/ask'
+      fullPath: '/ask'
+      preLoaderRoute: typeof AskRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/download': {
+      id: '/download'
+      path: '/download'
+      fullPath: '/download'
+      preLoaderRoute: typeof DownloadRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/keys': {
+      id: '/keys'
+      path: '/keys'
+      fullPath: '/keys'
+      preLoaderRoute: typeof KeysRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/mine': {
+      id: '/mine'
+      path: '/mine'
+      fullPath: '/mine'
+      preLoaderRoute: typeof MineRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/privacy': {
+      id: '/privacy'
+      path: '/privacy'
+      fullPath: '/privacy'
+      preLoaderRoute: typeof PrivacyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reviewing': {
+      id: '/reviewing'
+      path: '/reviewing'
+      fullPath: '/reviewing'
+      preLoaderRoute: typeof ReviewingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AskRoute: AskRoute,
+  DownloadRoute: DownloadRoute,
+  KeysRoute: KeysRoute,
+  MineRoute: MineRoute,
+  PrivacyRoute: PrivacyRoute,
+  ReviewingRoute: ReviewingRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
