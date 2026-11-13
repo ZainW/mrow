@@ -46,21 +46,21 @@ pub fn bell(s: &App, p: &Pal) -> El {
     if count > 0 {
         let shown = if count > 99 { "99+".to_string() } else { count.to_string() };
         let badge = el()
-            .h(14.0)
-            .min_w(14.0)
+            .h(15.0)
+            .min_w(15.0)
             .px(4.0)
-            .radius(7.0)
+            .radius(7.5)
             .fill(p.accent)
             .center()
-            .child(text(shown).font(ui(9.5, SEMIBOLD).features("'tnum' 1")).color(p.paper).single_line());
+            .child(text(shown).font(ui(11.0, SEMIBOLD).features("'tnum' 1")).color(p.paper).single_line());
         // A ring of the sidebar's colour keeps the count off the bell's outline.
-        b = b.child(el().key("count").pin(Some(14.0), Some(2.0), None, None).padding(1.5).radius(8.5).fill(p.chrome).inert().child(badge));
+        b = b.child(el().key("count").pin(Some(14.0), Some(2.0), None, None).padding(1.5).radius(9.0).fill(p.chrome).inert().child(badge));
     }
     b.on_press_tx(toggle)
 }
 
 fn caption(p: &Pal, title: &str) -> El {
-    el().w_full().px(10.0).pt(10.0).pb(4.0).child(text(title.to_string()).font(ui(11.5, MEDIUM)).color(p.tertiary).single_line())
+    el().w_full().px(10.0).pt(10.0).pb(4.0).child(text(title.to_string()).font(ui(12.0, MEDIUM)).color(p.tertiary).single_line())
 }
 
 /// The popover under the bell, as a layer over the window.
@@ -127,7 +127,7 @@ pub fn panel(s: &App, p: &Pal) -> El {
 /// the request; a new one can be marked done from the check on hover, or with Delete.
 fn event_row(p: &Pal, e: &Event) -> El {
     let new = !e.done;
-    let time = text(short_time(e.at)).font(ui(11.0, MEDIUM).features("'tnum' 1")).color(p.tertiary).single_line().help(long_date(e.at));
+    let time = text(short_time(e.at)).font(ui(12.0, MEDIUM).features("'tnum' 1")).color(p.tertiary).single_line().help(long_date(e.at));
     let mut corner = el().h(16.0).min_w(22.0).child(row().w_full().justify_end().child(if new { time.group_opacity(1.0, 0.0) } else { time }));
     if new {
         let id = e.id.clone();
@@ -155,7 +155,7 @@ fn event_row(p: &Pal, e: &Event) -> El {
     let title_row = row()
         .gap(8.0)
         .items_start()
-        .child(text(e.title.clone()).font(ui(12.5, MEDIUM)).color(kind_color(p, e.kind)).single_line().truncate().grow(1.0).shrink().min_w(0.0))
+        .child(text(e.title.clone()).font(ui(13.0, MEDIUM)).color(kind_color(p, e.kind)).single_line().truncate().grow(1.0).shrink().min_w(0.0))
         .child(corner);
     let body = col()
         .gap(3.0)
@@ -163,8 +163,8 @@ fn event_row(p: &Pal, e: &Event) -> El {
         .shrink()
         .min_w(0.0)
         .child(title_row)
-        .child(text(e.subject.clone()).font(ui(12.5, 400.0)).color(if new { p.text } else { p.secondary }).single_line().truncate())
-        .child(text(e.reference.clone()).font(mono(11.0, 400.0)).color(p.tertiary).single_line().truncate());
+        .child(text(e.subject.clone()).font(ui(13.0, 400.0)).color(if new { p.text } else { p.secondary }).single_line().truncate())
+        .child(text(e.reference.clone()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate());
     let dot = el().size(6.0, 6.0).mt(5.5).radius(3.0).fill(if new { p.accent } else { p.accent.alpha(0.0) });
     let (open_id, done_id) = (e.id.clone(), e.id.clone());
     row()

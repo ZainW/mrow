@@ -1,6 +1,6 @@
 //! The merge requests I opened: the Mine list in the sidebar (status marks, filters, stacks
-//! that fold to what's on me) and what a request of mine shows above its tabs (the next step,
-//! its stack, what's left before it merges).
+//! that fold to what's on me) and what a request of mine adds to its page (the next step and its
+//! stack at the top, what's left before it merges at the end).
 
 use std::rc::Rc;
 
@@ -53,7 +53,7 @@ pub fn filters(store: &Store, p: &Pal) -> El {
     let ink = |on: bool| if on { p.text } else { p.secondary };
     let all = store.mine_filter.is_none();
     let mut r = row().key("mine-filters").gap(4.0).center_y().child(
-        chip("standing-all", all, "Everything of yours").px(11.0).child(text("All").font(ui(11.5, MEDIUM)).color(ink(all)).single_line()).on_press_tx(
+        chip("standing-all", all, "Everything of yours").px(11.0).child(text("All").font(ui(12.0, MEDIUM)).color(ink(all)).single_line()).on_press_tx(
             |s: &mut App, tx: &mut Tx| {
                 tx.instant();
                 s.store.mine_filter = None;
@@ -68,7 +68,7 @@ pub fn filters(store: &Store, p: &Pal) -> El {
                 .pl(7.0)
                 .pr(10.0)
                 .child(standing_mark(p, standing, 12.0, if on { p.elevated } else { p.chrome }))
-                .child(text(count.to_string()).font(ui(11.5, MEDIUM).features("'tnum' 1")).color(ink(on)).single_line())
+                .child(text(count.to_string()).font(ui(12.0, MEDIUM).features("'tnum' 1")).color(ink(on)).single_line())
                 .on_press_tx(move |s: &mut App, tx: &mut Tx| {
                     // A filter is flipped often while triaging: the list changes at once.
                     tx.instant();
@@ -157,7 +157,7 @@ fn item_row(p: &Pal, item: &MergeRequest, status: &Status, rail: Option<Rail>, p
         )
         .child(
             text(short_time(item.updated_at))
-                .font(ui(11.0, MEDIUM).features("'tnum' 1"))
+                .font(ui(12.0, MEDIUM).features("'tnum' 1"))
                 .color(if quiet { p.accent } else { p.tertiary })
                 .single_line()
                 .pt(1.5)
@@ -167,11 +167,11 @@ fn item_row(p: &Pal, item: &MergeRequest, status: &Status, rail: Option<Rail>, p
         Standing::Ready | Standing::NeedsYou | Standing::Quiet => standing_color(p, status.standing),
         _ => p.secondary,
     };
-    let step = text(status.step.clone()).font(ui(11.5, 400.0)).color(step_color).single_line().truncate();
+    let step = text(status.step.clone()).font(ui(12.0, 400.0)).color(step_color).single_line().truncate();
     let mut meta = row()
         .gap(6.0)
         .center_y()
-        .child(text(item.short_reference()).font(mono(11.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0))
+        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0))
         .child(el().grow(1.0).min_w(4.0));
     if let Some((at, of)) = place {
         meta = meta.child(
@@ -181,7 +181,7 @@ fn item_row(p: &Pal, item: &MergeRequest, status: &Status, rail: Option<Rail>, p
                 .fill(p.hover)
                 .center()
                 .help("Its place in a stack, from the bottom")
-                .child(text(format!("{at} of {of}")).font(ui(10.5, MEDIUM).features("'tnum' 1")).color(p.secondary).single_line()),
+                .child(text(format!("{at} of {of}")).font(ui(11.0, MEDIUM).features("'tnum' 1")).color(p.secondary).single_line()),
         );
     }
     meta = meta.child(standing_mark(p, status.standing, 12.0, p.chrome));
@@ -255,10 +255,10 @@ fn stack_head(p: &Pal, key: &str, name: &str, count: usize, open: bool, merging:
             .press(p.hover)
             .help(label)
             .child(el().size(10.0, 10.0).center().child(chevron(p, open)))
-            .child(text(name.to_string()).font(ui(11.5, SEMIBOLD)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
+            .child(text(name.to_string()).font(ui(12.0, SEMIBOLD)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
             .child(
                 text(if merging { format!("stack of {count} · merging") } else { format!("stack of {count}") })
-                    .font(ui(11.5, 400.0))
+                    .font(ui(12.0, 400.0))
                     .color(if merging { p.accent } else { p.tertiary })
                     .single_line(),
             )
@@ -286,7 +286,7 @@ fn folded(p: &Pal, key: &str, summary: &str, rail: Rail) -> El {
         .help("Show every part")
         .child(dot)
         .child(
-            text(summary.to_string()).font(ui(11.5, 400.0)).color(p.tertiary).group_color(p.secondary).single_line().truncate().grow(1.0).shrink().min_w(0.0),
+            text(summary.to_string()).font(ui(12.0, 400.0)).color(p.tertiary).group_color(p.secondary).single_line().truncate().grow(1.0).shrink().min_w(0.0),
         );
     let mut outer = el().key(format!("fold-{key}-{summary}")).w_full().px(8.0).pb(1.0);
     for line in rail_lines(p, rail, NODE) {
@@ -303,7 +303,7 @@ fn whole(p: &Pal, key: &str, name: &str, summary: &str) -> El {
         .shrink()
         .min_w(0.0)
         .child(text(name.to_string()).font(ui(13.0, MEDIUM).lines(1.3)).color(p.secondary).single_line().truncate())
-        .child(text(summary.to_string()).font(ui(11.5, 400.0)).color(p.tertiary).single_line().truncate());
+        .child(text(summary.to_string()).font(ui(12.0, 400.0)).color(p.tertiary).single_line().truncate());
     let card = row()
         .key("card")
         .role("button")
@@ -326,7 +326,7 @@ fn whole(p: &Pal, key: &str, name: &str, summary: &str) -> El {
 // MARK: The request
 
 fn caption(p: &Pal, label: impl Into<String>) -> El {
-    text(label.into()).font(ui(11.5, MEDIUM)).color(p.tertiary).single_line()
+    text(label.into()).font(ui(12.0, MEDIUM)).color(p.tertiary).single_line()
 }
 
 /// The next step for one of my merge requests: where it stands, why, and the button that moves it.
@@ -427,8 +427,7 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
                 }
             }
             Standing::NeedsYou if item.pipeline == Some(PipelineStatus::Failed) => {
-                let page = if item.kind() == crate::data::forge::Forge::Gitlab { "pipelines" } else { "checks" };
-                let url = format!("{}/{page}", item.web_url);
+                let url = pipeline_url(item);
                 actions = actions.child(action_button(p, "pipeline", Some(&I::ARROW_UP_RIGHT), "Open the Pipeline", true, true).on_press_tx(
                     move |_: &mut App, tx: &mut Tx| {
                         let _ = tx.open_url(&url);
@@ -437,8 +436,7 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
             }
             Standing::NeedsYou if item.unresolved_threads.unwrap_or(0) > 0 => {
                 actions = actions.child(
-                    action_button(p, "threads", Some(&I::BUBBLE_TEXT), "Go to the Threads", true, true)
-                        .on_press_tx(|s: &mut App, tx: &mut Tx| crate::ui::detail::jump(s, tx, crate::ui::detail::Part::Conversation)),
+                    action_button(p, "threads", Some(&I::BUBBLE_TEXT), "Go to the Threads", true, true).on_press_tx(crate::ui::detail::jump_to_open_thread),
                 );
             }
             Standing::Waiting | Standing::Quiet if item.auto_merge => {
@@ -481,7 +479,7 @@ pub fn stack_section(s: &App, p: &Pal, item: &MergeRequest) -> Option<El> {
         .padding(3.0)
         .radius(10.0)
         .border(1.0, p.line)
-        .child(el().h(24.0).pl(31.0).center_y().child(text(base).font(mono(11.5, 400.0)).color(p.tertiary).single_line()));
+        .child(el().h(24.0).pl(31.0).center_y().child(text(base).font(mono(12.0, 400.0)).color(p.tertiary).single_line()));
     for part in &parts {
         let here = part.id == item.id;
         let (mark, note) = if store.is_mine(part) {
@@ -499,7 +497,7 @@ pub fn stack_section(s: &App, p: &Pal, item: &MergeRequest) -> Option<El> {
             .center_y()
             .radius(7.0)
             .child(mark)
-            .child(text(part.reference()).font(mono(11.5, 400.0)).color(p.tertiary).single_line())
+            .child(text(part.reference()).font(mono(12.0, 400.0)).color(p.tertiary).single_line())
             // One weight for every part, so moving through the stack never reflows a title.
             .child(text(part.title.clone()).font(ui(13.0, 400.0)).color(p.text).single_line().truncate().grow(1.0).shrink().min_w(0.0))
             .child(text(if here { "This one".to_string() } else { note }).font(ui(12.0, 400.0)).color(p.tertiary).single_line());
@@ -517,6 +515,19 @@ pub fn stack_section(s: &App, p: &Pal, item: &MergeRequest) -> Option<El> {
     Some(col().w_full().gap(8.0).child(caption(p, format!("Stack · {}", stack.name))).child(list))
 }
 
+/// The page on the forge that lists a merge request's pipelines or checks.
+fn pipeline_url(item: &MergeRequest) -> String {
+    let page = if item.kind() == crate::data::forge::Forge::Gitlab { "pipelines" } else { "checks" };
+    format!("{}/{page}", item.web_url)
+}
+
+/// Where a line of the checklist goes when pressed.
+enum Go {
+    Pipeline(String),
+    OpenThread,
+    Request(String),
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Check {
     Ok,
@@ -524,10 +535,11 @@ enum Check {
     Wait,
 }
 
-/// What stands between one of my merge requests and its merge.
+/// What stands between one of my merge requests and its merge. A line that names something to
+/// look at goes there when pressed.
 pub fn checklist(s: &App, p: &Pal, item: &MergeRequest) -> El {
     let store = &s.store;
-    let mut lines: Vec<(Check, &str, String)> = Vec::new();
+    let mut lines: Vec<(Check, &str, String, Option<Go>)> = Vec::new();
     let pending: Vec<&str> = item.reviewers.iter().filter(|r| r.state.needs_review() && !r.approved).map(|r| r.person.name.as_str()).collect();
     let approved = item.approved_by.len();
     let asked_changes = item.reviewers.iter().find(|r| r.state == ReviewState::RequestedChanges);
@@ -538,7 +550,7 @@ pub fn checklist(s: &App, p: &Pal, item: &MergeRequest) -> El {
         (None, [one]) => (Check::Wait, format!("{approved} approved · waiting on {one}")),
         (None, more) => (Check::Wait, format!("{approved} approved · waiting on {}", more.len())),
     };
-    lines.push((approvals.0, "Approvals", approvals.1));
+    lines.push((approvals.0, "Approvals", approvals.1, None));
     if let Some(pipe) = item.pipeline {
         let check = match pipe {
             PipelineStatus::Success | PipelineStatus::Skipped => Check::Ok,
@@ -549,36 +561,63 @@ pub fn checklist(s: &App, p: &Pal, item: &MergeRequest) -> El {
             (Some(job), PipelineStatus::Failed) => format!("{job} failed"),
             _ => pipe.label().to_lowercase(),
         };
-        lines.push((check, "Pipeline", detail));
+        lines.push((check, "Pipeline", detail, Some(Go::Pipeline(pipeline_url(item)))));
     }
     if let Some(open) = item.unresolved_threads {
-        lines.push(if open > 0 { (Check::Bad, "Threads", format!("{open} open")) } else { (Check::Ok, "Threads", "none open".into()) });
+        lines.push(if open > 0 {
+            (Check::Bad, "Threads", format!("{open} open"), Some(Go::OpenThread))
+        } else {
+            (Check::Ok, "Threads", "none open".into(), None)
+        });
     }
     match item.merge_status.as_deref() {
-        Some("conflict") => lines.push((Check::Bad, "Conflicts", format!("with {}", item.target_branch))),
-        Some("need_rebase") => lines.push((Check::Bad, "Conflicts", "needs a rebase".into())),
-        Some(_) => lines.push((Check::Ok, "Conflicts", "none".into())),
+        Some("conflict") => lines.push((Check::Bad, "Conflicts", format!("with {}", item.target_branch), None)),
+        Some("need_rebase") => lines.push((Check::Bad, "Conflicts", "needs a rebase".into(), None)),
+        Some(_) => lines.push((Check::Ok, "Conflicts", "none".into(), None)),
         None => {}
     }
     let all = store.stack_of(item);
     if let Some(below) = all.as_ref().and_then(|(_, parts)| parts.iter().position(|m| m.id == item.id).filter(|i| *i > 0).map(|i| &parts[i - 1])) {
-        lines.push((Check::Wait, "Stack", format!("waits for {}", below.reference())));
+        lines.push((Check::Wait, "Stack", format!("waits for {}", below.reference()), Some(Go::Request(below.id.clone()))));
     }
     let mut list = col().key("checks").w_full().max_w(READING_WIDTH);
     let count = lines.len();
-    for (i, (check, title, detail)) in lines.into_iter().enumerate() {
+    for (i, (check, title, detail, go)) in lines.into_iter().enumerate() {
         let mark = match check {
             Check::Ok => filled_mark(&I::DISC, &I::SMALL_CHECK, p.green, p.paper, 14.0),
             Check::Bad => icon(&I::EXCLAIM_CIRCLE, 14.0).color(p.red),
             Check::Wait => icon(&I::CLOCK, 14.0).color(p.tertiary),
         };
-        let line = row().h(32.0).gap(10.0).center_y().child(mark).child(text(title).font(ui(13.0, MEDIUM)).color(p.text).single_line()).child(
-            text(detail).font(ui(13.0, 400.0)).color(if check == Check::Bad { p.red } else { p.secondary }).single_line().truncate().shrink().min_w(0.0),
-        );
+        let ink = if check == Check::Bad { p.red } else { p.secondary };
+        let mut line = row()
+            .key(format!("check-{}", title.to_lowercase()))
+            .h(32.0)
+            .gap(10.0)
+            .center_y()
+            .child(mark)
+            .child(text(title).font(ui(13.0, MEDIUM)).color(p.text).single_line())
+            .child(text(detail.clone()).font(ui(13.0, 400.0)).color(ink).group_color(p.text).single_line().truncate().shrink().min_w(0.0));
+        if let Some(go) = go {
+            line = line
+                .role("button")
+                .label(format!("{title}: {detail}"))
+                .hover_group()
+                .child(icon(&I::CHEVRON_RIGHT, 10.0).color(p.tertiary).group_color(p.text))
+                .on_press_tx(move |s: &mut App, tx: &mut Tx| match &go {
+                    Go::Pipeline(url) => {
+                        let _ = tx.open_url(url);
+                    }
+                    Go::OpenThread => crate::ui::detail::jump_to_open_thread(s, tx),
+                    Go::Request(id) => {
+                        tx.instant();
+                        s.store.select(Some(id.clone()));
+                    }
+                });
+        }
         list = list.child(line);
         if i + 1 < count {
             list = list.child(crate::ui::components::rule(p));
         }
     }
-    col().w_full().gap(4.0).child(caption(p, "Before it merges")).child(list)
+    list
 }

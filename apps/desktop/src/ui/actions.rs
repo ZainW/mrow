@@ -340,8 +340,8 @@ pub fn on_key(s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
             s.confirm = None;
             true
         }
-        _ if !s.settings_open && NEXT_SECTION.matches_tx(ev, tx) => crate::ui::detail::step(s, tx, 1),
-        _ if !s.settings_open && PREVIOUS_SECTION.matches_tx(ev, tx) => crate::ui::detail::step(s, tx, -1),
+        _ if !s.settings_open && !s.inbox_open && NEXT_SECTION.matches_tx(ev, tx) => crate::ui::detail::step(s, tx, 1),
+        _ if !s.settings_open && !s.inbox_open && PREVIOUS_SECTION.matches_tx(ev, tx) => crate::ui::detail::step(s, tx, -1),
         _ if cfg!(not(target_os = "macos")) => match chords().iter().find(|(chord, _)| chord.matches_tx(ev, tx)) {
             Some((_, run)) => {
                 run(s, tx);

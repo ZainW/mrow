@@ -325,6 +325,10 @@ fn scene_mine_merging(s: &mut App) {
 fn scene_mine_work(s: &mut App) {
     scene_mine(s);
     let changes = s.store.mine().iter().find(|m| m.iid == "90").map(|m| m.id.clone());
+    // Seen between its two comments, so the later one is new.
+    if let Some(id) = &changes {
+        s.store.last_seen.insert(id.clone(), (chrono::Utc::now() - chrono::Duration::minutes(90)).timestamp() as f64);
+    }
     s.store.select(changes);
 }
 

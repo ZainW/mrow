@@ -182,6 +182,52 @@ const DIFF_MD: &str = "@@ -0,0 +1,6 @@
 +Partial files from failed jobs are kept for an hour.
 ";
 
+const DIFF_HOOK: &str = "@@ -18,5 +18,13 @@ pub async fn receive(req: Request, queue: &Queue) -> Result<Response> {
+     let body = req.bytes().await?;
++    let Some(sent) = req.header(\"X-Signature-256\") else {
++        return Ok(Response::unauthorized());
++    };
++    // Compare in constant time, so the check leaks nothing about the secret.
++    if !signature::matches(&secret(), &body, sent) {
++        return Ok(Response::unauthorized());
++    }
+     queue.push(Delivery::new(body)).await?;
+     Ok(Response::accepted())
+ }
+";
+
+const DIFF_HOOK_TEST: &str = "@@ -40,3 +40,11 @@ async fn accepts_a_delivery() {
+     assert_eq!(queue.len(), 1);
+ }
++
++#[tokio::test]
++async fn turns_away_a_bad_signature() {
++    let queue = Queue::default();
++    let res = receive(signed(\"wrong\", BODY), &queue).await.unwrap();
++    assert_eq!(res.status(), 401);
++    assert!(queue.is_empty());
++}
+";
+
+const DIFF_LEGACY: &str = "@@ -31,9 +31,6 @@ pub fn routes() -> Router {
+     Router::new()
+         .route(\"/exports\", post(start))
+         .route(\"/exports/:id\", get(status))
+-        // The old synchronous export, for clients before 4.2.
+-        .route(\"/export.csv\", get(legacy::download))
+-        .layer(legacy::warn_header())
+ }
+";
+
+const DIFF_PAGING: &str = "@@ -9,6 +9,8 @@ pub struct Page {
+     pub rows: Vec<Row>,
+-    pub offset: usize,
+-    pub total: usize,
++    /// Where the next page starts; none on the last one.
++    pub next: Option<Cursor>,
+ }
+";
+
 /// One of Robin's own merge requests.
 struct Own {
     iid: &'static str,
@@ -602,6 +648,47 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
             },
         ],
     );
+    // Robin's own: one with threads still open (one on a line, one on the whole), the rest quiet.
+    for m in mine() {
+        let changes = match m.iid.as_str() {
+            "90" => {
+                vec![file("src/hooks/receive.rs", "src/hooks/receive.rs", DIFF_HOOK, false), file("tests/hooks.rs", "tests/hooks.rs", DIFF_HOOK_TEST, false)]
+            }
+            "231" => vec![file("src/export/routes.rs", "src/export/routes.rs", DIFF_LEGACY, false)],
+            _ => vec![file("src/ledger/page.rs", "src/ledger/page.rs", DIFF_PAGING, false)],
+        };
+        diffs.insert(m.id.clone(), changes);
+        let talk = if m.iid == "90" {
+            let at = Position {
+                new_path: Some("src/hooks/receive.rs".into()),
+                old_path: Some("src/hooks/receive.rs".into()),
+                new_line: Some(23),
+                old_line: None,
+                head_sha: None,
+            };
+            vec![
+                Discussion {
+                    id: "h1".into(),
+                    individual_note: false,
+                    notes: vec![note(11, maya, "`secret()` reads the environment on every delivery. Can it load once at startup?", 2, Some(at))],
+                },
+                Discussion {
+                    id: "h2".into(),
+                    individual_note: false,
+                    notes: vec![note(
+                        12,
+                        maya,
+                        "Can this also turn away deliveries older than five minutes? Otherwise a captured one can be sent again.",
+                        1,
+                        None,
+                    )],
+                },
+            ]
+        } else {
+            vec![]
+        };
+        threads.insert(m.id.clone(), talk);
+    }
     (accounts, diffs, threads)
 }
 
