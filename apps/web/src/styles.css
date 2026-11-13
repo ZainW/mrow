@@ -1329,7 +1329,7 @@ main {
   font-size: 12.5px;
 }
 
-/* Build */
+/* Install */
 .terminal {
   overflow: hidden;
   border-radius: var(--radius-card);
@@ -1373,7 +1373,8 @@ main {
   color: var(--text-3);
   font-size: 12px;
 }
-.steps code {
+.steps code,
+.command code {
   font-size: inherit;
 }
 .build-after {
@@ -1381,8 +1382,74 @@ main {
   color: var(--text-2);
   font-size: 14.5px;
 }
-.build-links {
-  margin-top: 28px;
+.command {
+  margin: 0;
+  padding: 16px;
+  overflow-x: auto;
+  font: 400 14px/1.5 var(--mono);
+}
+.command::before {
+  content: '$ ';
+  color: var(--text-3);
+  user-select: none;
+}
+.install-sub {
+  margin: 48px 0 14px;
+  font: 400 22px/1.25 var(--serif);
+  letter-spacing: -0.01em;
+}
+.downloads {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+}
+.download {
+  display: grid;
+  grid-template-columns: 5.5em minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 12px;
+  padding: 14px 16px;
+  border-radius: var(--radius-card);
+  background: var(--elevated);
+  box-shadow: 0 0 0 1px var(--line-strong);
+  color: var(--text);
+  text-decoration: none;
+  transition: box-shadow 0.15s ease;
+}
+.download:hover {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line-strong));
+}
+.download.is-local {
+  box-shadow: 0 0 0 1.5px var(--accent);
+}
+.download-system {
+  font-weight: 600;
+  font-size: 15px;
+}
+.download-arch {
+  color: var(--text-2);
+  font-size: 14.5px;
+}
+.download-local {
+  grid-column: 3;
+  grid-row: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+}
+.download-file {
+  grid-column: 2 / -1;
+  margin-top: 4px;
+  color: var(--text-3);
+  font: 400 12.5px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+.text-link.inline {
+  font: inherit;
 }
 
 /* Footer */
@@ -1399,6 +1466,12 @@ main {
 }
 .site-footer .wordmark {
   margin-bottom: 6px;
+}
+.footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  margin-top: 6px;
 }
 
 .not-found {

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import { AccountPicker, AppMock, CursorChat, DiffView, ProviderMark } from '../components/AppMock'
 import { CopyButton } from '../components/CopyButton'
@@ -9,7 +9,17 @@ export const Route = createFileRoute('/')({
 })
 
 const REPO = 'https://github.com/ZainW/mrow'
+const RELEASES = `${REPO}/releases`
+const INSTALL = 'curl -fsSL https://mrow.wania.app/install | bash'
 const BUILD_STEPS = ['git clone https://github.com/ZainW/mrow.git', 'cd mrow/apps/desktop', 'scripts/install.sh']
+
+type Build = 'macos-aarch64' | 'linux-x86_64' | 'linux-aarch64'
+
+const DOWNLOADS: { build: Build; system: string; arch: string }[] = [
+  { build: 'macos-aarch64', system: 'macOS', arch: 'Apple silicon' },
+  { build: 'linux-x86_64', system: 'Linux', arch: 'x86_64' },
+  { build: 'linux-aarch64', system: 'Linux', arch: 'arm64' },
+]
 
 function Home() {
   return (
@@ -26,7 +36,7 @@ function Home() {
         <AskCursor />
         <Privacy />
         <Keys />
-        <Build />
+        <Install />
       </main>
       <SiteFooter />
     </>
@@ -61,8 +71,8 @@ function SiteHeader() {
         <a href="#privacy">Privacy</a>
         <a href="#keys">Keys</a>
       </nav>
-      <a className="btn btn-small" href="#build">
-        Build from source
+      <a className="btn btn-small" href="#install">
+        Install
       </a>
     </header>
   )
@@ -79,13 +89,13 @@ function Hero() {
           someone asks for you.
         </p>
         <div className="hero-actions">
-          <a className="btn" href="#build">
-            Build from source
+          <a className="btn" href="#install">
+            Install Mrow
           </a>
           <a className="text-link" href={REPO}>
             Source on GitHub
           </a>
-          <span className="hero-note">Free, for macOS 15 and later, and Linux.</span>
+          <span className="hero-note">Free, for macOS 15 and later on Apple silicon, and Linux.</span>
         </div>
       </div>
       <div className="hero-window">
@@ -458,14 +468,98 @@ function Keys() {
   )
 }
 
-function Build() {
+/**
+ * The build that fits the visitor's computer, worked out after hydration so the server render stays
+ * neutral. Undefined on phones, Windows, or when we can't tell; an Intel Mac reads as Apple silicon.
+ */
+function useLocalBuild() {
+  const [build, setBuild] = useState<Build>()
+  useEffect(() => {
+    const nav = navigator as Navigator & {
+      userAgentData?: {
+        platform: string
+        getHighEntropyValues?: (hints: string[]) => Promise<{ architecture?: string }>
+      }
+    }
+    const ua = navigator.userAgent
+    const platform = nav.userAgentData?.platform ?? navigator.platform
+    if (/android|iphone|ipad/i.test(ua)) return
+    if (/mac/i.test(platform)) {
+      setBuild('macos-aarch64')
+    } else if (/linux/i.test(platform)) {
+      setBuild(/aarch64|arm/i.test(platform + ua) ? 'linux-aarch64' : 'linux-x86_64')
+      nav.userAgentData?.getHighEntropyValues?.(['architecture']).then(
+        ({ architecture }) => {
+          if (architecture) setBuild(architecture === 'arm' ? 'linux-aarch64' : 'linux-x86_64')
+        },
+        () => {},
+      )
+    }
+  }, [])
+  return build
+}
+
+function Install() {
+  const local = useLocalBuild()
   return (
     <Chapter
-      id="build"
-      title="Build it from source"
+      id="install"
+      title="Install it"
+      aside={
+        <>
+          <p>
+            Mrow keeps itself up to date. It checks for a new release every few hours and asks you to Restart to
+            Update. Turn that off in Settings → Updates.
+          </p>
+          <p>
+            The Mac build isn’t notarized. Installed with the command it opens normally; a copy downloaded in the
+            browser needs right-click → Open the first time.
+          </p>
+        </>
+      }
       figureWidth="text"
       figure={
-        <div className="build">
+        <div className="install">
+          <div className="terminal">
+            <div className="terminal-head">
+              <span>Terminal</span>
+              <CopyButton text={INSTALL} />
+            </div>
+            <pre className="command">
+              <code>{INSTALL}</code>
+            </pre>
+          </div>
+          <p className="build-after">
+            On a Mac it puts Mrow in <code>~/Applications</code> and opens it. On Linux it installs <code>mrow</code>{' '}
+            and its desktop entry into <code>~/.local</code>. Then sign in with <code>glab auth login</code>,{' '}
+            <code>gh auth login</code>, or both.
+          </p>
+
+          <h3 className="install-sub">Or download it</h3>
+          <ul className="downloads">
+            {DOWNLOADS.map((d) => (
+              <li key={d.build}>
+                <a
+                  className={d.build === local ? 'download is-local' : 'download'}
+                  href={`${RELEASES}/latest/download/mrow-${d.build}.tar.gz`}
+                >
+                  <span className="download-system">{d.system}</span>
+                  <span className="download-arch">{d.arch}</span>
+                  {d.build === local && <span className="download-local">Your computer</span>}
+                  <span className="download-file">mrow-{d.build}.tar.gz</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+          <p className="build-after">
+            The latest release. Older ones, and what changed in each, are on the{' '}
+            <a className="text-link inline" href={RELEASES}>
+              releases page
+            </a>
+            .
+          </p>
+
+          <h3 className="install-sub">Or build it yourself</h3>
           <div className="terminal">
             <div className="terminal-head">
               <span>Terminal</span>
@@ -480,27 +574,16 @@ function Build() {
             </ol>
           </div>
           <p className="build-after">
-            The script makes a release build, puts Mrow in <code>~/Applications</code> and opens it. On Linux, run{' '}
-            <code>scripts/package-linux.sh --install</code> instead; it installs into <code>~/.local</code>.
+            Needs a Rust toolchain (<code>rustup</code>); on Linux, also <code>libxkbcommon-dev</code> and{' '}
+            <code>libwayland-dev</code>, and run <code>scripts/package-linux.sh --install</code> instead. Builds from
+            source don’t update themselves.
           </p>
-          <div className="build-links">
-            <a className="btn" href={REPO}>
-              Open the repository
-            </a>
-          </div>
         </div>
       }
     >
-      <p>
-        Mrow isn’t packaged for download yet, so for now you build it yourself. The repository is private while it
-        settles, so ask for access first.
-      </p>
+      <p>One command downloads the latest release, checks it against the release’s checksum and installs it.</p>
       <ul className="needs">
-        <li>macOS 15 or later, or Linux with a Vulkan driver</li>
-        <li>
-          A Rust toolchain (<code>rustup</code>). On Linux, also <code>libxkbcommon-dev</code> and{' '}
-          <code>libwayland-dev</code>.
-        </li>
+        <li>macOS 15 or later on Apple silicon, or Linux (x86_64 or arm64) with a Vulkan driver</li>
         <li>
           <code>glab</code> signed in for GitLab, <code>gh</code> for GitHub, or both
         </li>
@@ -515,9 +598,17 @@ function SiteFooter() {
       <Wordmark />
       <p>Free, and it runs entirely on your computer.</p>
       <p className="quiet">Not affiliated with GitLab, GitHub or Cursor. Everyone in the illustrations is made up.</p>
-      <a className="text-link" href={REPO}>
-        Source on GitHub
-      </a>
+      <p className="footer-links">
+        <a className="text-link" href="#install">
+          Install
+        </a>
+        <a className="text-link" href={RELEASES}>
+          Releases
+        </a>
+        <a className="text-link" href={REPO}>
+          Source on GitHub
+        </a>
+      </p>
     </footer>
   )
 }

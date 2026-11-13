@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs the latest Mrow release, for people who don't build it themselves:
-#   curl -fsSL https://raw.githubusercontent.com/ZainW/mrow/main/apps/desktop/scripts/get.sh | bash
+#   curl -fsSL https://mrow.wania.app/install | bash
 #
 # macOS (Apple silicon): Mrow.app into ~/Applications (DEST=… to change).
 # Linux (x86_64, arm64): bin, desktop entry and icon into ~/.local (PREFIX=… to change).
