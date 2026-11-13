@@ -167,6 +167,12 @@ pub struct MergeRequest {
     /// The first failed job or check, by name. Only asked for on my own requests.
     #[serde(default)]
     pub failed_job: Option<String>,
+    /// Set to merge by itself once everything passes. Only asked for on my own requests.
+    #[serde(default)]
+    pub auto_merge: bool,
+    /// GitHub: how this repository merges for me ("merge", "squash" or "rebase").
+    #[serde(default)]
+    pub merge_method: Option<String>,
 }
 
 impl MergeRequest {

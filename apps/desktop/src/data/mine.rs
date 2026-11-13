@@ -173,7 +173,43 @@ pub fn status(item: &MergeRequest, below: Option<&MergeRequest>) -> Status {
         step.push_str(" · pipeline running");
     }
     let quiet = !pending.is_empty() && (Utc::now() - item.updated_at).num_days() >= QUIET_DAYS;
+    if item.auto_merge {
+        let mut chars = step.chars();
+        step = format!("Auto-merge on · {}", chars.next().map(|c| c.to_lowercase().chain(chars).collect::<String>()).unwrap_or_default());
+    }
     is(if quiet { Standing::Quiet } else { Standing::Waiting }, step)
+}
+
+/// What merging a stack does next, one part at a time from the bottom.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WalkStep {
+    /// Every part has merged.
+    Done,
+    /// The next part isn't ready, but nothing is asked of anyone: its pipeline is running, or
+    /// the part below it is still merging.
+    Wait,
+    /// The part below merged; the next one still targets its branch and has to move down.
+    Retarget(String),
+    Merge,
+    /// The next part needs a person, so the walk ends here, with why.
+    Stop(String),
+}
+
+/// The next step for a stack being merged onto `target`. `next` is its lowest part still open,
+/// and `all` is everything open, for seeing whether the part below `next` is still there.
+pub fn walk_step(next: Option<&MergeRequest>, target: &str, all: &[&MergeRequest]) -> WalkStep {
+    let Some(next) = next else { return WalkStep::Done };
+    if next.target_branch != target {
+        return if below(next, all).is_some() { WalkStep::Wait } else { WalkStep::Retarget(target.to_string()) };
+    }
+    let status = status(next, below(next, all));
+    let waiting_on_someone = next.reviewers.iter().any(|r| r.state.needs_review() && !r.approved);
+    match status.standing {
+        Standing::Ready => WalkStep::Merge,
+        Standing::Held => WalkStep::Wait,
+        Standing::Waiting | Standing::Quiet if !waiting_on_someone => WalkStep::Wait,
+        _ => WalkStep::Stop(status.step),
+    }
 }
 
 /// The line under a review's title: who asked, or what I said. None for finished ones.
@@ -284,6 +320,7 @@ pub fn explain(item: &MergeRequest, status: &Status, below: Option<&MergeRequest
                 None => "Reviewers left threads that are still open.".into(),
             },
         },
+        Standing::Waiting | Standing::Quiet if item.auto_merge => format!("{} merges it by itself once everything passes.", item.kind().name()),
         Standing::Quiet => format!("{} {was} asked {} ago and {has} reviewed yet.", names(&pending), span(item.updated_at)),
         Standing::Waiting if pending.is_empty() => "Nothing for you to do right now.".into(),
         Standing::Waiting => format!("Nothing for you to do. {} {has} reviewed yet.", names(&pending)),

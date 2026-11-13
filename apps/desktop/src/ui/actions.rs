@@ -312,6 +312,10 @@ pub fn on_key(s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
             s.settings_open = false;
             true
         }
+        rune::Key::Escape if s.confirm.is_some() => {
+            s.confirm = None;
+            true
+        }
         _ if cfg!(not(target_os = "macos")) => match chords().iter().find(|(chord, _)| chord.matches_tx(ev, tx)) {
             Some((_, run)) => {
                 run(s, tx);

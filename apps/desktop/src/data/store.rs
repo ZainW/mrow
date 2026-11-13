@@ -10,7 +10,7 @@ use chrono::{Local, Utc};
 use super::bg::Bg;
 use super::diff::DiffLine;
 use super::forge::{Forge, QueueResult};
-use super::mine::{self, Stack, Standing, Status};
+use super::mine::{self, Stack, Standing, Status, WalkStep};
 use super::models::*;
 use super::prefs;
 
@@ -80,12 +80,13 @@ pub enum MineLine {
         rail: Option<Rail>,
         place: Option<(usize, usize)>,
     },
-    /// A stack's title, above its rows. `open` shows every part.
+    /// A stack's title, above its rows. `open` shows every part; `merging` says a walk is on.
     StackHead {
         key: String,
         name: String,
         count: usize,
         open: bool,
+        merging: bool,
     },
     /// The parts of a stack that aren't on me, folded into a count: "3 more · 1 held, 2 waiting".
     Folded {
@@ -100,6 +101,25 @@ pub enum MineLine {
         text: String,
     },
 }
+
+/// A stack being merged from the bottom up: each part merges once it's ready, after moving
+/// onto the branch the stack lands on. It lives only while Mrow runs.
+#[derive(Clone, Debug)]
+pub struct Walk {
+    /// The parts still to merge, bottom first.
+    pub ids: Vec<String>,
+    /// The branch the whole stack lands on.
+    pub target: String,
+    pub forge: Forge,
+    /// The parts this walk merged itself. A part that leaves the list any other way (closed,
+    /// say) ends the walk: what was stacked on it still carries its commits.
+    merged: Vec<String>,
+    /// When it last did something; a walk that only waits gives up after `WALK_PATIENCE_MINUTES`.
+    moved_at: Date,
+}
+
+/// How long a walk waits on a part (a pipeline, usually) before it gives up.
+const WALK_PATIENCE_MINUTES: i64 = 45;
 
 /// One forge's side of the queue: who I am there and what's waiting.
 #[derive(Clone, Debug, Default)]
@@ -161,6 +181,8 @@ pub struct Store {
     pub mine_filter: Option<Standing>,
     /// Mine: the stacks showing every part, by `Stack::key`. The rest fold what isn't on me.
     pub open_stacks: HashSet<String>,
+    /// Stacks being merged part by part.
+    pub walks: Vec<Walk>,
     pub selected_id: Option<String>,
     /// Merge requests kept open in tabs, in order. The selected one may be outside it, as a
     /// preview (a single click), the way VS Code previews a file.
@@ -203,6 +225,7 @@ impl Default for Store {
             author_filter: None,
             mine_filter: None,
             open_stacks: HashSet::new(),
+            walks: Vec::new(),
             selected_id: None,
             tabs: p.tabs,
             last_seen: p.last_seen,
@@ -487,7 +510,8 @@ impl Store {
                     .push(MineLine::Whole { key: stack.key.clone(), name: stack.name.clone(), text: format!("Stack of {} · {}", parts.len(), tally(&parts)) });
                 continue;
             }
-            lines.push(MineLine::StackHead { key: stack.key.clone(), name: stack.name.clone(), count: parts.len(), open });
+            let merging = stack.ids.iter().any(|id| self.walk_of(id).is_some());
+            lines.push(MineLine::StackHead { key: stack.key.clone(), name: stack.name.clone(), count: parts.len(), open, merging });
             let from = lines.len();
             let mut run: Vec<&(&MergeRequest, Status)> = Vec::new();
             let rail = Rail { first: false, last: false };
@@ -738,7 +762,8 @@ impl Store {
                     account.me = Some(q.me);
                     account.open = q.open;
                     account.done = q.done;
-                    account.mine = q.mine;
+                    // A search can lag a merge by a few seconds and still list it.
+                    account.mine = q.mine.into_iter().filter(MergeRequest::is_open).collect();
                     account.mine_error = q.mine_error;
                     account.error = None;
                     account.last_refreshed = Some(Utc::now());
@@ -777,6 +802,7 @@ impl Store {
             self.load_diffs(&item);
             self.load_discussions(&item);
         }
+        self.advance_walks();
         effects.badge = Some(self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review() && !m.draft).count());
         effects.notify = self.new_requests();
         effects
@@ -829,6 +855,118 @@ impl Store {
     pub fn approve(&mut self, item: &MergeRequest) {
         let it = item.clone();
         self.perform("Approving…", format!("Approved {}", item.short_reference()), true, None, move || it.kind().approve(&it));
+    }
+
+    /// Merges one of my merge requests, if nothing blocks it.
+    pub fn merge(&mut self, item: &MergeRequest) {
+        if !self.is_mine(item) || self.status_of(item).standing != Standing::Ready {
+            self.show("It isn't ready to merge.");
+            return;
+        }
+        let it = item.clone();
+        self.perform(&format!("Merging {}…", item.reference()), format!("Merged {}", item.short_reference()), true, None, move || it.kind().merge(&it));
+    }
+
+    /// Merges a stack from its bottom part up: `bottom` now, then each of my parts above it
+    /// once it's ready. It stops at the first part that needs someone.
+    pub fn merge_stack(&mut self, bottom: &MergeRequest) {
+        let Some((_, parts)) = self.stack_of(bottom) else { return };
+        if parts.first().map(|m| &m.id) != Some(&bottom.id) || self.status_of(bottom).standing != Standing::Ready {
+            self.show("Start from the bottom of the stack, once it's ready to merge.");
+            return;
+        }
+        let ids: Vec<String> = parts.iter().take_while(|m| self.is_mine(m)).map(|m| m.id.clone()).collect();
+        self.walks.retain(|w| !w.ids.iter().any(|id| ids.contains(id)));
+        self.walks.push(Walk { ids, target: bottom.target_branch.clone(), forge: bottom.forge, merged: vec![], moved_at: Utc::now() });
+        self.advance_walks();
+    }
+
+    /// The walk a merge request is part of, if its stack is being merged.
+    pub fn walk_of(&self, id: &str) -> Option<&Walk> {
+        self.walks.iter().find(|w| w.ids.iter().any(|i| i == id))
+    }
+
+    pub fn stop_walk(&mut self, id: &str) {
+        self.walks.retain(|w| !w.ids.iter().any(|i| i == id));
+        self.show("Stopped merging the stack");
+    }
+
+    /// Whether a stack is being merged, which wants the queue refreshed often.
+    pub fn walking(&self) -> bool {
+        !self.walks.is_empty()
+    }
+
+    /// Takes each walk's next step, from what the forge last said. One action runs at a time;
+    /// its result refreshes the queue, which comes back here.
+    pub(super) fn advance_walks(&mut self) {
+        // A newer fetch is on its way (an action just finished): what's here may predate it.
+        if self.refreshing {
+            return;
+        }
+        let mut at = 0;
+        while at < self.walks.len() {
+            if self.busy.is_some() {
+                return;
+            }
+            let walk = self.walks[at].clone();
+            // An account that failed to load says nothing about what has merged.
+            let Some(account) = self.accounts.get(&walk.forge).filter(|a| a.error.is_none() && a.mine_error.is_none()) else {
+                at += 1;
+                continue;
+            };
+            let left: Vec<String> = walk.ids.iter().filter(|id| account.mine.iter().any(|m| &m.id == *id)).cloned().collect();
+            if walk.ids.iter().any(|id| !left.contains(id) && !walk.merged.contains(id)) {
+                self.walks.remove(at);
+                self.show("Stopped merging the stack: a part was closed or merged somewhere else");
+                continue;
+            }
+            let next = left.first().and_then(|id| account.mine.iter().find(|m| &m.id == id)).cloned();
+            let step = mine::walk_step(next.as_ref(), &walk.target, &self.open_in(walk.forge));
+            self.walks[at].ids = left;
+            let waited = (Utc::now() - walk.moved_at).num_minutes();
+            match (step, next) {
+                (WalkStep::Done, _) | (_, None) => {
+                    self.walks.remove(at);
+                    self.show("The stack is merged");
+                }
+                (WalkStep::Stop(why), Some(next)) => {
+                    self.walks.remove(at);
+                    self.show(&format!("Stopped merging the stack at {}: {why}", next.reference()));
+                }
+                (WalkStep::Wait, Some(next)) if waited >= WALK_PATIENCE_MINUTES => {
+                    self.walks.remove(at);
+                    self.show(&format!("Stopped merging the stack: {} still isn't ready after {waited} minutes", next.reference()));
+                }
+                (WalkStep::Wait, _) => at += 1,
+                (WalkStep::Retarget(branch), Some(next)) => {
+                    self.walks[at].moved_at = Utc::now();
+                    let label = format!("Moving {} onto {branch}…", next.reference());
+                    let done = format!("Moved {} onto {branch}", next.reference());
+                    self.perform(&label, done, true, None, move || next.kind().retarget(&next, &branch));
+                    return;
+                }
+                (WalkStep::Merge, Some(next)) => {
+                    self.walks[at].moved_at = Utc::now();
+                    self.walks[at].merged.push(next.id.clone());
+                    let label = format!("Merging {}…", next.reference());
+                    self.perform(&label, format!("Merged {}", next.short_reference()), true, None, move || next.kind().merge(&next));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Has the forge merge it by itself once everything passes, or stops that.
+    pub fn set_auto_merge(&mut self, item: &MergeRequest, on: bool) {
+        let it = item.clone();
+        let (label, done) =
+            if on { ("Turning auto-merge on…", "It merges once everything passes") } else { ("Turning auto-merge off…", "Auto-merge is off") };
+        self.perform(label, done.into(), true, None, move || it.kind().set_auto_merge(&it, on));
+    }
+
+    pub fn mark_ready(&mut self, item: &MergeRequest) {
+        let it = item.clone();
+        self.perform("Marking it ready…", format!("{} is ready for review", item.short_reference()), true, None, move || it.kind().mark_ready(&it));
     }
 
     pub fn unapprove(&mut self, item: &MergeRequest) {
@@ -938,6 +1076,11 @@ impl Store {
                             if refresh {
                                 self.refresh();
                             }
+                        }
+                        // A failed step ends a stack's merge: nothing goes on without a look.
+                        Err(e) if !self.walks.is_empty() => {
+                            self.walks.clear();
+                            self.show(&format!("Stopped merging the stack: {e}"));
                         }
                         Err(e) => self.show(&e),
                     }

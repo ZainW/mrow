@@ -123,6 +123,37 @@ impl Forge {
         }
     }
 
+    pub fn merge(self, item: &MergeRequest) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::merge(item),
+            Forge::Github => github::merge(item),
+        }
+    }
+
+    /// Has the forge merge it by itself once everything passes, or stops that.
+    pub fn set_auto_merge(self, item: &MergeRequest, on: bool) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::set_auto_merge(item, on),
+            Forge::Github => github::set_auto_merge(item, on),
+        }
+    }
+
+    /// Takes a draft out of draft.
+    pub fn mark_ready(self, item: &MergeRequest) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::mark_ready(item),
+            Forge::Github => github::mark_ready(item),
+        }
+    }
+
+    /// Points a merge request at another target branch.
+    pub fn retarget(self, item: &MergeRequest, branch: &str) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::retarget(item, branch),
+            Forge::Github => github::retarget(item, branch),
+        }
+    }
+
     pub fn comment(self, item: &MergeRequest, body: &str) -> Result<(), String> {
         match self {
             Forge::Gitlab => gitlab::comment(item, body),

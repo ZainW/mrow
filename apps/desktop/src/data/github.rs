@@ -22,12 +22,13 @@ const ACTOR: &str = "login avatarUrl ... on User { name }";
 /// and which check failed.
 fn pull_fields(mine: bool) -> String {
     let checks = if mine { " contexts(first: 40) { nodes { ... on CheckRun { name conclusion } ... on StatusContext { context state } } }" } else { "" };
-    let threads = if mine { "reviewThreads(first: 100) { nodes { isResolved } }" } else { "" };
+    let threads = if mine { "reviewThreads(first: 100) { nodes { isResolved } } autoMergeRequest { enabledAt }" } else { "" };
+    let method = if mine { " viewerDefaultMergeMethod" } else { "" };
     format!(
         "id number title url createdAt updatedAt mergedAt closedAt state isDraft
     headRefName baseRefName mergeStateStatus totalCommentsCount body
     additions deletions changedFiles
-    repository {{ nameWithOwner name }}
+    repository {{ nameWithOwner name{method} }}
     author {{ {ACTOR} }}
     reviewRequests(first: 20) {{
       nodes {{ requestedReviewer {{ ... on User {{ login name avatarUrl }} ... on Team {{ slug name }} }} }}
@@ -213,6 +214,8 @@ struct PullNode {
     commits: Option<Nodes<CommitNode>>,
     timeline_items: Option<Nodes<Option<RequestEvent>>>,
     review_threads: Option<Nodes<ThreadNode>>,
+    /// Present (whatever is in it) when auto-merge is on.
+    auto_merge_request: Option<Value>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -220,6 +223,7 @@ struct PullNode {
 struct Repo {
     name_with_owner: String,
     name: String,
+    viewer_default_merge_method: Option<String>,
 }
 
 fn cli() -> Cli {
@@ -429,6 +433,8 @@ fn build(node: &PullNode, me: &str, pending: bool) -> MergeRequest {
         forge: Forge::Github,
         unresolved_threads: node.review_threads.as_ref().map(|t| t.nodes.iter().filter(|n| !n.is_resolved).count() as i64),
         failed_job,
+        auto_merge: node.auto_merge_request.is_some(),
+        merge_method: node.repository.viewer_default_merge_method.as_ref().map(|m| m.to_lowercase()),
     }
 }
 
@@ -687,6 +693,33 @@ pub fn unapprove(item: &MergeRequest) -> Result<(), String> {
         .find(|r| r.state == "APPROVED" && r.user.as_ref().is_some_and(|u| u.login.eq_ignore_ascii_case(&me.login)))
         .ok_or("There's no approval of yours to revoke.")?;
     cli().send(&format!("{}/reviews/{}/dismissals", base(item), mine.id), "PUT", &json!({ "message": "Approval revoked.", "event": "DISMISS" })).map(drop)
+}
+
+/// Merges it the way the repository merges for me (a merge commit when that's unknown).
+pub fn merge(item: &MergeRequest) -> Result<(), String> {
+    let method = item.merge_method.as_deref().unwrap_or("merge");
+    cli().send(&format!("{}/merge", base(item)), "PUT", &json!({ "merge_method": method })).map(drop)
+}
+
+/// Turns auto-merge on or off: GitHub merges it once its requirements are met.
+pub fn set_auto_merge(item: &MergeRequest, on: bool) -> Result<(), String> {
+    let query = if on {
+        let method = item.merge_method.as_deref().unwrap_or("merge").to_uppercase();
+        format!("mutation($id: ID!) {{ enablePullRequestAutoMerge(input: {{ pullRequestId: $id, mergeMethod: {method} }}) {{ clientMutationId }} }}")
+    } else {
+        "mutation($id: ID!) { disablePullRequestAutoMerge(input: { pullRequestId: $id }) { clientMutationId } }".to_string()
+    };
+    cli().graphql::<Value>(&query, &[("id", Some(item.id.clone()))], &[]).map(drop)
+}
+
+pub fn mark_ready(item: &MergeRequest) -> Result<(), String> {
+    let query = "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }";
+    cli().graphql::<Value>(query, &[("id", Some(item.id.clone()))], &[]).map(drop)
+}
+
+/// Points it at another branch: what a stacked pull request needs once the one below it merged.
+pub fn retarget(item: &MergeRequest, branch: &str) -> Result<(), String> {
+    cli().send(&base(item), "PATCH", &json!({ "base": branch })).map(drop)
 }
 
 pub fn comment(item: &MergeRequest, body: &str) -> Result<(), String> {

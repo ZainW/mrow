@@ -89,6 +89,8 @@ fn mr(s: Spec, description: &str) -> MergeRequest {
         forge: s.forge,
         unresolved_threads: None,
         failed_job: None,
+        auto_merge: false,
+        merge_method: None,
     }
 }
 

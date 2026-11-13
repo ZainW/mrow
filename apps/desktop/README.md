@@ -66,10 +66,14 @@ On Linux, settings live in `~/.config/mrow` and scratch files in `~/.cache/mrow`
 - **Mine**: your own requests sorted by whose move it is: *Your move* (ready to merge first, then
   changes requested, a failed pipeline, conflicts, open threads), *Waiting on reviewers* and
   *Drafts*. Each row says its next step, and the marks above the list filter by standing. A
-  request of yours opens on that next step and on what's left before it merges.
+  request of yours opens on that next step and on what's left before it merges, with the button
+  for it: **Merge** (it asks once more first), **Merge When Ready** (the forge's auto-merge) or
+  **Mark Ready**.
 - **Stacks**: requests that target each other's branches show as one group, bottom first. A stack
   shows the parts that are on you and folds the rest into a count; click the fold or the stack's
-  name (or press →) to see every part.
+  name (or press →) to see every part. **Merge the Stack** on a ready bottom part merges it,
+  then each part above it as soon as that one is approved and green, and stops at the first that
+  isn't. Mrow has to stay open while it does.
 - **Reviews**: the description rendered natively, every file's diff with syntax highlighting and
   line numbers, comment threads in place, line comments, a comment box, and Approve / Revoke.
 - **Tabs**: keep several reviews open; a single click previews, a double click keeps.
