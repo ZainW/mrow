@@ -374,7 +374,7 @@ fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El
     if let Some(reason) = crate::data::mine::review_reason(item) {
         let waiting = item.my_state.needs_review() && !item.draft;
         body = body
-            .child(text(reason).font(ui(11.5, 400.0)).color(if waiting && item.was_re_requested() { p.accent } else { p.secondary }).single_line().truncate());
+            .child(text(reason).font(ui(12.0, 400.0)).color(if waiting && item.was_re_requested() { p.accent } else { p.secondary }).single_line().truncate());
     }
     let body = body.child(meta);
     let dot = el().size(6.0, 6.0).mt(6.0).radius(3.0).fill(if unread { p.accent } else { p.accent.alpha(0.0) });

@@ -67,16 +67,20 @@ badge is macOS-only for now.
 - **Mine**: your own requests sorted by whose move it is: *Your move* (ready to merge first, then
   changes requested, a failed pipeline, conflicts, open threads), *Waiting on reviewers* and
   *Drafts*. Each row says its next step, and the marks above the list filter by standing. A
-  request of yours opens on that next step and on what's left before it merges, with the button
-  for it: **Merge** (it asks once more first), **Merge When Ready** (the forge's auto-merge) or
-  **Mark Ready**.
+  request of yours opens on that next step, with the button for it: **Merge** (it asks once more
+  first), **Merge When Ready** (the forge's auto-merge) or **Mark Ready**. Its page ends with
+  what's left before it merges; a line there goes to what it names (the open thread, the
+  pipeline, the part below it in a stack).
 - **Stacks**: requests that target each other's branches show as one group, bottom first. A stack
   shows the parts that are on you and folds the rest into a count; click the fold or the stack's
   name (or press →) to see every part. **Merge the Stack** on a ready bottom part merges it,
   then each part above it as soon as that one is approved and green, and stops at the first that
   isn't. Mrow has to stay open while it does.
-- **Reviews**: the description rendered natively, every file's diff with syntax highlighting and
-  line numbers, comment threads in place, line comments, a comment box, and Approve / Revoke.
+- **Reviews**: one page read top to bottom: the ask, the description rendered natively, every
+  file's diff with syntax highlighting and line numbers (comment threads under their line), the
+  conversation with a comment box, and your verdict with Approve / Revoke. A contents rail
+  beside it lists those parts and every file, marks the one you're reading and jumps on a click.
+  Each file shows its thread count, filled when there's a reply you haven't seen.
 - **Tabs**: keep several reviews open; a single click previews, a double click keeps.
 - **Ask**: a chat with Cursor's agent about the open review, beside the card.
 - **Inbox**: the bell at the top of the sidebar counts what changed since you last looked: a
@@ -102,7 +106,8 @@ On Linux, Ctrl stands in for ⌘, and the account switch is Alt+1 / Alt+2.
 | ⌃1 ⌃2 | Switch account |
 | ⌘1 ⌘2 ⌘3 ⌘4 | To review, Reviewed, Mine, Done |
 | → ← | In Mine: show every part of a stack, fold it again |
-| ⌥⌘1 ⌥⌘2 ⌥⌘3 | Overview, Changes, Discussion |
+| ⌥⌘1 ⌥⌘2 ⌥⌘3 | Top of the page, the changes, the conversation |
+| J K | Next / previous part of the page (each file is one) |
 | ⌥⌘] ⌥⌘[ | Next / previous review |
 | ⌘K or ⌘F | Filter the list |
 | ⌘R | Refresh |

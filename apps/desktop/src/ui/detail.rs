@@ -1,6 +1,7 @@
 //! A merge request on its card, as one document read top to bottom: the ask (its header), the
 //! description, the changes file by file with each line's threads under that line, the
-//! conversation (the threads that aren't on a line, and a comment box), and your verdict. It's
+//! conversation (the threads that aren't on a line, and a comment box), and your verdict. One of
+//! my own reads the same way, from where it stands to what's left before it merges. It's
 //! all one virtualized list in one scroll view, so the page scrolls together while only the rows
 //! on screen are built: a diff of thousands of lines costs what a screenful does. Beside it, when
 //! the card is wide enough, a contents rail lists those parts and every file, follows the reading
@@ -35,9 +36,9 @@ use crate::ui::{Look, actions, look};
 pub const LARGE_FILE: usize = 400;
 const PAGE_WIDTH: f32 = 1100.0;
 /// The contents rail's width, the room between it and the page, and the card's inset around both.
-const RAIL_WIDTH: f32 = 180.0;
-const RAIL_GAP: f32 = 28.0;
-const RAIL_INSET: f32 = 32.0;
+const RAIL_WIDTH: f32 = 156.0;
+const RAIL_GAP: f32 = 20.0;
+const RAIL_INSET: f32 = 24.0;
 /// The narrowest the page's column gets beside the rail; a narrower card goes without the rail.
 const COLUMN_MIN: f32 = 600.0;
 /// Where the page and the rail start: the room above the first row.
@@ -182,6 +183,8 @@ struct Page {
     look: Rc<Look>,
     /// The contents rail shows beside the page.
     rail: bool,
+    /// I opened it: it starts with where it stands and ends with what's left before it merges.
+    mine: bool,
 }
 
 /// How far in from the card's left edge the contents rail starts, or `None` when the card is too
@@ -213,6 +216,7 @@ pub fn detail(s: &App, p: &Pal, _k: &Kit, item: &MergeRequest, rail: Option<f32>
         placed: made.placed,
         look,
         rail: rail.is_some(),
+        mine: store.is_mine(item),
     });
     let key_list = made.keys;
     let built = page.clone();
@@ -501,6 +505,7 @@ fn build_row(s: &App, page: &Page, i: usize) -> El {
             "Comment",
             false,
         )),
+        Row::Verdict if page.mine => before_it_merges(s, p, item),
         Row::Verdict => verdict(s, p, page),
     };
     frame(page, i, content)
@@ -571,6 +576,28 @@ fn verdict(s: &App, p: &Pal, page: &Page) -> El {
     c.child(actions)
 }
 
+/// The end of a request of my own: what stands between it and its merge, or how it ended.
+fn before_it_merges(s: &App, p: &Pal, item: &MergeRequest) -> El {
+    let c = col().w_full().max_w(READING_WIDTH).gap(14.0);
+    if item.is_open() {
+        return c.child(heading(p, "Before it merges", None).pb(0.0)).child(crate::ui::mine::checklist(s, p, item));
+    }
+    let end = if item.state == "merged" { "was merged" } else { "was closed without merging" };
+    c.child(heading(p, "How it ended", None).pb(0.0))
+        .child(text(format!("This {} {end}.", item.kind().noun())).font(serif(16.0, 400.0).lines(1.6)).color(p.text).wrap().selectable(true))
+}
+
+/// Jumps to the first thread someone can still resolve: the file it's on, or the conversation.
+pub fn jump_to_open_thread(s: &mut App, tx: &mut Tx) {
+    let Some(id) = s.store.selected_id.clone() else { return };
+    let files = s.store.diffs.get(&id).and_then(Loadable::value).cloned().unwrap_or_default();
+    let threads = s.store.discussions.get(&id).and_then(Loadable::value).cloned().unwrap_or_default();
+    let head = s.store.diff_refs.get(&id).map(|r| r.head_sha.as_str());
+    let placed = Placed::new(&threads, head, &files);
+    let file = placed.by_file.iter().position(|on| on.iter().any(|&t| is_open(&threads[t])));
+    jump(s, tx, file.map_or(Part::Conversation, Part::File));
+}
+
 /// A thread someone can still resolve.
 fn is_open(thread: &Discussion) -> bool {
     let notes: Vec<&Note> = thread.notes.iter().filter(|n| !n.system).collect();
@@ -604,7 +631,16 @@ fn contents(s: &App, p: &Pal, page: &Page, inset: f32) -> El {
     let label = |title: &str, part: Part| {
         text(title.to_string()).font(ui(13.0, 400.0)).color(if part == current { p.text } else { p.secondary }).group_color(p.text).single_line().truncate()
     };
-    c = c.child(rail_row(p, &rail_key(Part::Ask), Part::Ask, current, 10.0, label("The ask", Part::Ask), vec![]));
+    // My own starts with where it stands (its mark here too) and ends with what's left.
+    let (first, last, standing) = match (page.mine, item.is_open()) {
+        (true, true) => {
+            let standing = s.store.status_of(item).standing;
+            ("Where it stands", "Before it merges", vec![crate::ui::mine::standing_mark(p, standing, 12.0, p.paper)])
+        }
+        (true, false) => ("Where it stands", "How it ended", vec![]),
+        (false, _) => ("The ask", "Your verdict", vec![]),
+    };
+    c = c.child(rail_row(p, &rail_key(Part::Ask), Part::Ask, current, 10.0, label(first, Part::Ask), standing));
     c = c.child(rail_row(p, &rail_key(Part::Description), Part::Description, current, 10.0, label("Description", Part::Description), vec![]));
     let mut tally = vec![];
     if page.changes && !files.is_empty() {
@@ -651,8 +687,9 @@ fn contents(s: &App, p: &Pal, page: &Page, inset: f32) -> El {
         label("Conversation", Part::Conversation),
         comment_count(p, general.len(), fresh).into_iter().collect(),
     ));
-    c = c.child(rail_row(p, &rail_key(Part::Verdict), Part::Verdict, current, 10.0, label("Your verdict", Part::Verdict), vec![]));
-    if item.is_open() && !s.store.is_mine(item) {
+    c = c.child(rail_row(p, &rail_key(Part::Verdict), Part::Verdict, current, 10.0, label(last, Part::Verdict), vec![]));
+    // Nobody approves their own.
+    if item.is_open() && !page.mine {
         c = c.child(el().pt(18.0).pl(12.0).child(approval_button(s, p, item, false).key("rail-approve")));
     }
     col().key("contents").role("navigation").label("Contents").w(RAIL_WIDTH + inset).h_full().min_h(0.0).child(c).scroll(ScrollSpec { stick_bottom: false })
@@ -723,9 +760,6 @@ fn header(s: &App, p: &Pal, item: &MergeRequest, with_actions: bool) -> El {
     }
     if let Some(stack) = crate::ui::mine::stack_section(s, p, item) {
         c = c.child(stack.pt(2.0));
-    }
-    if mine && item.is_open() {
-        c = c.child(crate::ui::mine::checklist(s, p, item).pt(2.0));
     }
     c = c.child(reviewers(s, p, item));
     // An open request of mine has its actions in the next step, above.
@@ -1361,7 +1395,7 @@ mod tests {
     #[test]
     fn every_thread_shows_once_on_a_line_or_in_the_conversation() {
         let (_, diffs, threads) = crate::fixtures::load();
-        let (id, files) = diffs.into_iter().next().unwrap();
+        let (id, files) = diffs.into_iter().find(|(_, files)| files[0].new_path == "src/export/job.rs").unwrap();
         let threads = &threads[&id];
         let placed = Placed::new(threads, None, &files);
         let on_lines: usize = placed.by_file.iter().map(Vec::len).sum();
