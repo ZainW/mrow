@@ -3,6 +3,8 @@ import type { ReactNode } from 'react'
 import { createRootRoute, HeadContent, Outlet, Scripts } from '@tanstack/react-router'
 import appCss from '../styles.css?url'
 
+const SITE = 'https://mrow.wania.app'
+
 const description =
   'Mrow is a small desktop app for the pull and merge requests waiting on your review. GitLab through glab, GitHub through gh, nothing else.'
 
@@ -16,10 +18,12 @@ export const Route = createRootRoute({
       { name: 'color-scheme', content: 'light dark' },
       { property: 'og:title', content: 'Mrow' },
       { property: 'og:description', content: description },
+      { property: 'og:url', content: SITE },
     ],
     links: [
       { rel: 'preload', href: '/fonts/InterVariable.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
       { rel: 'stylesheet', href: appCss },
+      { rel: 'canonical', href: SITE },
       { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
     ],
   }),

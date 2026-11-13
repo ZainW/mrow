@@ -6,7 +6,8 @@
     "dev": "vite dev --port 3000",
     "build": "vite build",
     "start": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "deploy": "vite build && npx -y wrangler@4.162.0 deploy"
   },
   "dependencies": {
     "@tanstack/react-router": "1.170.46",
