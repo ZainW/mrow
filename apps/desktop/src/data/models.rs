@@ -161,6 +161,12 @@ pub struct MergeRequest {
     pub requested_at_is_guess: bool,
     pub my_state: ReviewState,
     pub forge: Forge,
+    /// Threads still open. Only asked for on my own requests.
+    #[serde(default)]
+    pub unresolved_threads: Option<i64>,
+    /// The first failed job or check, by name. Only asked for on my own requests.
+    #[serde(default)]
+    pub failed_job: Option<String>,
 }
 
 impl MergeRequest {

@@ -23,16 +23,23 @@ const MR_FIELDS: &str = "
       nodes { body createdAt author { username name avatarUrl } }
     }";
 
-fn queue_query() -> String {
+/// What only matters on my own merge requests: how many threads are open, and which job failed.
+const MINE_FIELDS: &str = "
+    resolvableDiscussionsCount resolvedDiscussionsCount
+    headPipeline { jobs(statuses: FAILED, first: 3) { nodes { name } } }";
+
+/// The queue's query: the merge requests I'm asked to review, or (`mine`) the ones I wrote.
+fn queue_query(mine: bool) -> String {
+    let (list, extra) = if mine { ("authoredMergeRequests", MINE_FIELDS) } else { ("reviewRequestedMergeRequests", "") };
     format!(
         "query($state: MergeRequestState!, $after: String, $updatedAfter: Time) {{
       currentUser {{
         username name
-        reviewRequestedMergeRequests(
+        list: {list}(
           state: $state, first: 40, after: $after, updatedAfter: $updatedAfter, sort: UPDATED_DESC
         ) {{
           pageInfo {{ hasNextPage endCursor }}
-          nodes {{ {MR_FIELDS} }}
+          nodes {{ {MR_FIELDS} {extra} }}
         }}
       }}
     }}"
@@ -109,7 +116,7 @@ struct QueuePayload {
 struct QueueUser {
     username: String,
     name: String,
-    review_requested_merge_requests: Connection<MrNode>,
+    list: Connection<MrNode>,
 }
 
 #[derive(Deserialize)]
@@ -152,6 +159,8 @@ struct MrNode {
     head_pipeline: Option<Pipeline>,
     labels: Option<Connection<LabelNode>>,
     notes: Connection<ActivityNote>,
+    resolvable_discussions_count: Option<i64>,
+    resolved_discussions_count: Option<i64>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -193,6 +202,12 @@ struct DiffStats {
 #[derive(Deserialize, Clone)]
 struct Pipeline {
     status: String,
+    jobs: Option<Connection<JobNode>>,
+}
+
+#[derive(Deserialize, Clone)]
+struct JobNode {
+    name: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -212,10 +227,12 @@ fn cli() -> Cli {
 pub fn queue(done_days: i64) -> Result<QueueResult, String> {
     let since = chrono::Utc::now() - chrono::Duration::days(done_days);
     let mut pages = parallel(vec![
-        Box::new(|| fetch("opened", None, 5)),
-        Box::new(move || fetch("merged", Some(since), 2)),
-        Box::new(move || fetch("closed", Some(since), 1)),
+        Box::new(|| fetch("opened", None, 5, false)),
+        Box::new(move || fetch("merged", Some(since), 2, false)),
+        Box::new(move || fetch("closed", Some(since), 1, false)),
+        Box::new(|| fetch("opened", None, 3, true)),
     ]);
+    let authored = pages.pop().unwrap();
     let closed = pages.pop().unwrap()?;
     let merged = pages.pop().unwrap()?;
     let opened = pages.pop().unwrap()?;
@@ -228,14 +245,19 @@ pub fn queue(done_days: i64) -> Result<QueueResult, String> {
     let open = build_all(&opened.1);
     let mut done = build_all(&merged.1);
     done.extend(build_all(&closed.1));
-    Ok(QueueResult { me, open, done })
+    // My own are a second ask: if it fails, the reviews above still show.
+    let (mine, mine_error) = match authored {
+        Ok(found) => (found.1.iter().map(|n| build(n, &me.username, &[])).collect(), None),
+        Err(e) => (vec![], Some(e)),
+    };
+    Ok(QueueResult { me, open, done, mine, mine_error })
 }
 
-fn fetch(state: &str, since: Option<Date>, pages: usize) -> Result<(Option<Person>, Vec<MrNode>), String> {
+fn fetch(state: &str, since: Option<Date>, pages: usize, mine: bool) -> Result<(Option<Person>, Vec<MrNode>), String> {
     let mut user = None;
     let mut nodes = Vec::new();
     let mut cursor: Option<String> = None;
-    let query = queue_query();
+    let query = queue_query(mine);
     for _ in 0..pages {
         let payload: QueuePayload = cli().graphql(
             &query,
@@ -248,7 +270,7 @@ fn fetch(state: &str, since: Option<Date>, pages: usize) -> Result<(Option<Perso
         )?;
         let Some(u) = payload.current_user else { break };
         user = Some(Person::new(&u.username, &u.name));
-        let conn = u.review_requested_merge_requests;
+        let conn = u.list;
         nodes.extend(conn.nodes);
         let info = conn.page_info.unwrap_or_default();
         match (info.has_next_page, info.end_cursor) {
@@ -384,6 +406,8 @@ fn build(node: &MrNode, me: &str, extra: &[ActivityNote]) -> MergeRequest {
         my_state: mine.map_or(ReviewState::Unknown, |r| r.state),
         reviewers,
         forge: Forge::Gitlab,
+        unresolved_threads: node.resolvable_discussions_count.map(|all| (all - node.resolved_discussions_count.unwrap_or(0)).max(0)),
+        failed_job: node.head_pipeline.as_ref().and_then(|p| p.jobs.as_ref()).and_then(|j| j.nodes.iter().find_map(|n| n.name.clone())),
     }
 }
 

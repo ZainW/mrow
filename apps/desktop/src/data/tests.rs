@@ -190,3 +190,244 @@ fn image_sources_resolve() {
     assert_eq!(ImageSource::resolve("/-/project/42/uploads/s3cr3t/a.png", base), upload("42", "s3cr3t", "a.png"));
     assert_eq!(ImageSource::resolve("https://example.com/a.png", base), Some(ImageSource::Web("https://example.com/a.png".into())));
 }
+
+mod mine {
+    use crate::data::forge::Forge;
+    use crate::data::mine::{Standing, below, review_reason, stacks, status};
+    use crate::data::models::*;
+    use chrono::{Duration, Utc};
+
+    fn request(iid: &str, title: &str, source: &str, target: &str) -> MergeRequest {
+        let now = Utc::now();
+        MergeRequest {
+            id: format!("id-{iid}"),
+            iid: iid.into(),
+            title: title.into(),
+            web_url: String::new(),
+            project_path: "group/project".into(),
+            project_name: "project".into(),
+            author: Person::new("me", "Me Myself"),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            state: "opened".into(),
+            draft: false,
+            source_branch: source.into(),
+            target_branch: target.into(),
+            merge_status: Some("not_approved".into()),
+            comment_count: 0,
+            description: String::new(),
+            reviewers: vec![],
+            approved_by: vec![],
+            additions: 0,
+            deletions: 0,
+            file_count: 0,
+            pipeline: Some(PipelineStatus::Success),
+            labels: vec![],
+            requested_at: now,
+            first_requested_at: now,
+            requested_by: None,
+            requested_at_is_guess: true,
+            my_state: ReviewState::Unknown,
+            forge: Forge::Gitlab,
+            unresolved_threads: Some(0),
+            failed_job: None,
+        }
+    }
+
+    fn reviewer(name: &str, state: ReviewState) -> Reviewer {
+        Reviewer { person: Person::new(&name.to_lowercase(), name), state, approved: state == ReviewState::Approved }
+    }
+
+    fn approved(mut m: MergeRequest) -> MergeRequest {
+        m.reviewers = vec![reviewer("Maya Lind", ReviewState::Approved)];
+        m.approved_by = vec!["maya".into()];
+        m.merge_status = Some("mergeable".into());
+        m
+    }
+
+    #[test]
+    fn whose_move_it_is() {
+        let plain = request("1", "One", "a", "main");
+        assert_eq!(status(&plain, None).step, "No reviewers yet");
+
+        let ready = approved(plain.clone());
+        let st = status(&ready, None);
+        assert_eq!((st.standing, st.step.as_str()), (Standing::Ready, "Approved by 1 · ready to merge"));
+
+        // Mergeable, but someone asked hasn't looked: their turn, not mine.
+        let mut asked = ready.clone();
+        asked.reviewers.push(reviewer("Tomás Varga", ReviewState::Unreviewed));
+        let st = status(&asked, None);
+        assert_eq!(st.standing, Standing::Waiting);
+        assert!(st.step.starts_with("Waiting on Tomás"), "{}", st.step);
+
+        let mut quiet = asked.clone();
+        quiet.updated_at = Utc::now() - Duration::days(4);
+        assert_eq!(status(&quiet, None).standing, Standing::Quiet);
+
+        let mut changes = asked.clone();
+        changes.reviewers[1].state = ReviewState::RequestedChanges;
+        changes.unresolved_threads = Some(2);
+        let st = status(&changes, None);
+        assert_eq!((st.standing, st.step.as_str()), (Standing::NeedsYou, "Tomás asked for changes · 2 threads open"));
+
+        let mut failed = ready.clone();
+        failed.pipeline = Some(PipelineStatus::Failed);
+        failed.failed_job = Some("lint".into());
+        assert_eq!(status(&failed, None).step, "Pipeline failed · lint");
+
+        let mut conflict = ready.clone();
+        conflict.merge_status = Some("conflict".into());
+        assert_eq!(status(&conflict, None).standing, Standing::NeedsYou);
+
+        let mut draft = failed.clone();
+        draft.draft = true;
+        assert_eq!(status(&draft, None).standing, Standing::Draft);
+    }
+
+    #[test]
+    fn a_ready_request_on_an_unmerged_one_is_held() {
+        let bottom = approved(request("1", "Paging 1: columns", "paging-1", "main"));
+        let top = approved(request("2", "Paging 2: endpoint", "paging-2", "paging-1"));
+        let all = [&bottom, &top];
+        assert!(below(&bottom, &all).is_none());
+        let st = status(&top, below(&top, &all));
+        assert_eq!((st.standing, st.step.as_str()), (Standing::Held, "Approved by 1 · held until !1 merges"));
+        assert!(st.standing.group() == Standing::Waiting && !st.standing.on_me());
+    }
+
+    #[test]
+    fn stacks_follow_branches_within_a_project() {
+        let a = request("10", "Paging 1: columns", "paging-1", "main");
+        let b = request("11", "Paging 2: endpoint", "paging-2", "paging-1");
+        let c = request("12", "Paging 3: client", "paging-3", "paging-2");
+        let alone = request("13", "Something else", "other", "main");
+        let mut elsewhere = request("14", "Paging 9", "paging-9", "paging-3");
+        elsewhere.project_path = "group/another".into();
+        let mut merged = request("15", "Paging 0", "paging-0", "paging-3");
+        merged.state = "merged".into();
+        let found = stacks(&[&c, &alone, &a, &elsewhere, &b, &merged]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].ids, ["id-10", "id-11", "id-12"]);
+        assert_eq!((found[0].key.as_str(), found[0].name.as_str()), ("id-10", "Paging"));
+    }
+
+    #[test]
+    fn a_stack_with_nothing_in_common_takes_its_branch_name() {
+        let a = request("1", "Add columns", "feature", "main");
+        let b = request("2", "Use them", "feature-2", "feature");
+        assert_eq!(stacks(&[&a, &b])[0].name, "feature");
+    }
+
+    #[test]
+    fn two_requests_targeting_each_other_are_no_stack() {
+        let a = request("1", "A", "x", "y");
+        let b = request("2", "B", "y", "x");
+        assert!(stacks(&[&a, &b]).is_empty());
+    }
+
+    #[test]
+    fn review_rows_say_who_asked_or_what_i_said() {
+        let mut m = request("1", "One", "a", "main");
+        m.author = Person::new("maya", "Maya Lind");
+        m.my_state = ReviewState::Unreviewed;
+        assert_eq!(review_reason(&m).as_deref(), Some("Maya opened this"));
+        m.requested_at_is_guess = false;
+        m.requested_by = Some(Person::new("sam", "Sam Achebe"));
+        assert_eq!(review_reason(&m).as_deref(), Some("Sam asked for your review"));
+        m.first_requested_at = m.requested_at - Duration::hours(5);
+        assert_eq!(review_reason(&m).as_deref(), Some("Sam asked again"));
+        m.my_state = ReviewState::Approved;
+        assert_eq!(review_reason(&m).as_deref(), Some("You approved"));
+        m.state = "merged".into();
+        assert_eq!(review_reason(&m), None);
+    }
+}
+
+mod mine_list {
+    use crate::data::forge::Forge;
+    use crate::data::mine::Standing;
+    use crate::data::prefs;
+    use crate::data::store::{MineLine, QueueMode, Rail, Store};
+
+    fn store() -> Store {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        store.forge = Forge::Gitlab;
+        store.mode = QueueMode::Mine;
+        store
+    }
+
+    /// Each line as a short word, to read the list's shape at a glance.
+    fn shape(store: &Store) -> Vec<String> {
+        store
+            .mine_lines()
+            .into_iter()
+            .map(|line| match line {
+                MineLine::Header(t) => format!("# {t}"),
+                MineLine::Item { item, rail: None, place: None, .. } => item.iid,
+                MineLine::Item { item, place: Some((at, of)), .. } => format!("{} ({at} of {of})", item.iid),
+                MineLine::Item { item, rail: Some(Rail { first, last }), .. } => {
+                    format!("{}{}{}", if first { "┌" } else { "│" }, item.iid, if last { "┘" } else { "" })
+                }
+                MineLine::StackHead { name, count, open, .. } => format!("{} {name} ({count})", if open { "v" } else { ">" }),
+                MineLine::Folded { text, rail, .. } => format!("{}{text}", if rail.last { "└ " } else { "│ " }),
+                MineLine::Whole { name, text, .. } => format!("> {name}: {text}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_stack_shows_what_is_on_me_and_folds_the_rest() {
+        let mut store = store();
+        assert_eq!(
+            shape(&store),
+            [
+                "# Your move",
+                "231",
+                "> Ledger paging (4)",
+                "┌240",
+                "└ 3 more · 1 held, 1 waiting, 1 draft",
+                "92",
+                "90",
+                "# Waiting on reviewers",
+                "307",
+                "> Exports rework: Stack of 2 · 1 waiting, 1 draft",
+                "# Drafts",
+                "233",
+            ]
+        );
+        assert_eq!(store.count(QueueMode::Mine), 4);
+
+        // The part that's open shows too, wherever it is in the stack.
+        let third = store.mine().iter().find(|m| m.iid == "242").unwrap().id.clone();
+        store.selected_id = Some(third);
+        assert_eq!(shape(&store)[2..7], ["> Ledger paging (4)", "┌240", "│ 1 more · 1 held", "│242", "└ 1 more · 1 draft"]);
+
+        // Right shows every part of the selected stack; Left folds it again.
+        store.unfold_stacks(true);
+        assert_eq!(shape(&store)[2..7], ["v Ledger paging (4)", "┌240", "│241", "│242", "│243┘"]);
+        assert!(shape(&store).iter().any(|l| l.starts_with("> Exports rework")), "only the selected stack opens");
+        store.unfold_stacks(false);
+        store.selected_id = None;
+        store.unfold_stacks(true);
+        let all = shape(&store);
+        let exports = all.iter().position(|l| l == "v Exports rework (2)").expect("with nothing selected, every stack opens");
+        assert_eq!(all[exports + 1..exports + 3], ["┌61", "│62┘"]);
+    }
+
+    #[test]
+    fn a_filter_makes_the_list_flat() {
+        let mut store = store();
+        store.mine_filter = Some(Standing::Waiting);
+        assert_eq!(shape(&store), ["# Waiting", "307", "241 (2 of 4)", "61 (1 of 2)", "242 (3 of 4)"]);
+        assert_eq!(store.mine_count(Standing::Waiting), 4);
+        store.mine_filter = None;
+        store.filter = "offset".into();
+        assert_eq!(shape(&store), ["# Matches", "243 (4 of 4)"]);
+    }
+}

@@ -18,7 +18,11 @@ use super::models::*;
 
 const ACTOR: &str = "login avatarUrl ... on User { name }";
 
-fn pull_fields() -> String {
+/// A pull request's fields. `mine` adds what only matters on my own: which threads are open
+/// and which check failed.
+fn pull_fields(mine: bool) -> String {
+    let checks = if mine { " contexts(first: 40) { nodes { ... on CheckRun { name conclusion } ... on StatusContext { context state } } }" } else { "" };
+    let threads = if mine { "reviewThreads(first: 100) { nodes { isResolved } }" } else { "" };
     format!(
         "id number title url createdAt updatedAt mergedAt closedAt state isDraft
     headRefName baseRefName mergeStateStatus totalCommentsCount body
@@ -30,7 +34,8 @@ fn pull_fields() -> String {
     }}
     latestReviews(first: 30) {{ nodes {{ state author {{ {ACTOR} }} }} }}
     labels(first: 20) {{ nodes {{ name color }} }}
-    commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }}
+    commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state{checks} }} }} }} }}
+    {threads}
     timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 50) {{
       nodes {{
         ... on ReviewRequestedEvent {{
@@ -43,7 +48,7 @@ fn pull_fields() -> String {
     )
 }
 
-fn search_query() -> String {
+fn search_query(mine: bool) -> String {
     format!(
         "query($q: String!, $after: String) {{
       viewer {{ login name avatarUrl }}
@@ -52,7 +57,7 @@ fn search_query() -> String {
         nodes {{ ... on PullRequest {{ {} }} }}
       }}
     }}",
-        pull_fields()
+        pull_fields(mine)
     )
 }
 
@@ -138,6 +143,37 @@ struct CommitInner {
 #[derive(Deserialize, Clone)]
 struct Rollup {
     state: String,
+    contexts: Option<Nodes<Option<Check>>>,
+}
+
+/// A check run (name, conclusion) or a commit status (context, state).
+#[derive(Deserialize, Clone)]
+struct Check {
+    name: Option<String>,
+    conclusion: Option<String>,
+    context: Option<String>,
+    state: Option<String>,
+}
+
+impl Check {
+    /// Its name, if it failed.
+    fn failed(&self) -> Option<&str> {
+        let run = matches!(self.conclusion.as_deref(), Some("FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED"));
+        let status = matches!(self.state.as_deref(), Some("FAILURE" | "ERROR"));
+        if run {
+            self.name.as_deref()
+        } else if status {
+            self.context.as_deref()
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ThreadNode {
+    is_resolved: bool,
 }
 
 #[derive(Deserialize, Clone)]
@@ -176,6 +212,7 @@ struct PullNode {
     labels: Option<Nodes<LabelNode>>,
     commits: Option<Nodes<CommitNode>>,
     timeline_items: Option<Nodes<Option<RequestEvent>>>,
+    review_threads: Option<Nodes<ThreadNode>>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -202,8 +239,9 @@ pub fn queue(done_days: i64) -> Result<QueueResult, String> {
         (format!("{common} is:closed review-requested:@me updated:>={day}"), 1),
     ];
     type Found = Result<(Option<Actor>, Vec<PullNode>), String>;
-    let jobs: Vec<Box<dyn FnOnce() -> Found + Send>> =
-        queries.into_iter().map(|(q, pages)| Box::new(move || search(&q, pages)) as Box<dyn FnOnce() -> Found + Send>).collect();
+    let mut jobs: Vec<Box<dyn FnOnce() -> Found + Send>> =
+        queries.into_iter().map(|(q, pages)| Box::new(move || search(&q, pages, false)) as Box<dyn FnOnce() -> Found + Send>).collect();
+    jobs.push(Box::new(move || search(&format!("{common} is:open author:@me"), 2, true)));
     let mut results = parallel(jobs).into_iter();
     let (asked, mine, done_a, done_b) = (results.next().unwrap()?, results.next().unwrap()?, results.next().unwrap()?, results.next().unwrap()?);
     let viewer = asked.0.clone().or(mine.0.clone()).ok_or("gh isn't signed in.")?;
@@ -213,14 +251,19 @@ pub fn queue(done_days: i64) -> Result<QueueResult, String> {
     let asked_ids: HashSet<String> = asked.1.iter().map(|n| n.id.clone()).collect();
     let open = unique(asked.1.into_iter().chain(mine.1)).iter().map(|n| build(n, &me.username, asked_ids.contains(&n.id))).collect();
     let done = unique(done_a.1.into_iter().chain(done_b.1)).iter().map(|n| build(n, &me.username, false)).collect();
-    Ok(QueueResult { me, open, done })
+    // My own are a second ask: if it fails, the reviews above still show.
+    let (mine, mine_error) = match results.next().unwrap() {
+        Ok(found) => (found.1.iter().map(|n| build(n, &me.username, false)).collect(), None),
+        Err(e) => (vec![], Some(e)),
+    };
+    Ok(QueueResult { me, open, done, mine, mine_error })
 }
 
-fn search(query: &str, pages: usize) -> Result<(Option<Actor>, Vec<PullNode>), String> {
+fn search(query: &str, pages: usize, mine: bool) -> Result<(Option<Actor>, Vec<PullNode>), String> {
     let mut viewer = None;
     let mut nodes = Vec::new();
     let mut cursor: Option<String> = None;
-    let q = search_query();
+    let q = search_query(mine);
     for _ in 0..pages {
         let payload: SearchPayload = cli().graphql(&q, &[("q", Some(query.to_string())), ("after", cursor.clone())], &[])?;
         viewer = payload.viewer;
@@ -329,7 +372,9 @@ fn build(node: &PullNode, me: &str, pending: bool) -> MergeRequest {
         "CLOSED" => "closed",
         _ => "opened",
     };
-    let rollup = node.commits.as_ref().and_then(|c| c.nodes.last()).and_then(|c| c.commit.status_check_rollup.as_ref()).map(|r| r.state.as_str());
+    let checks = node.commits.as_ref().and_then(|c| c.nodes.last()).and_then(|c| c.commit.status_check_rollup.as_ref());
+    let rollup = checks.map(|r| r.state.as_str());
+    let failed_job = checks.and_then(|r| r.contexts.as_ref()).and_then(|c| c.nodes.iter().flatten().find_map(Check::failed)).map(String::from);
     let pipeline = match rollup {
         Some("SUCCESS") => Some(PipelineStatus::Success),
         Some("FAILURE" | "ERROR") => Some(PipelineStatus::Failed),
@@ -382,6 +427,8 @@ fn build(node: &PullNode, me: &str, pending: bool) -> MergeRequest {
         requested_at_is_guess: requests.is_empty(),
         my_state,
         forge: Forge::Github,
+        unresolved_threads: node.review_threads.as_ref().map(|t| t.nodes.iter().filter(|n| !n.is_resolved).count() as i64),
+        failed_job,
     }
 }
 

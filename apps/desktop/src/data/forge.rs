@@ -151,4 +151,8 @@ pub struct QueueResult {
     pub me: Person,
     pub open: Vec<MergeRequest>,
     pub done: Vec<MergeRequest>,
+    /// The open ones I wrote.
+    pub mine: Vec<MergeRequest>,
+    /// Why `mine` is empty, when asking for it failed. The reviews still load.
+    pub mine_error: Option<String>,
 }

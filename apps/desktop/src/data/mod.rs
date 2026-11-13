@@ -10,6 +10,7 @@ pub mod github;
 pub mod gitlab;
 pub mod images;
 pub mod markup;
+pub mod mine;
 pub mod models;
 pub mod paths;
 pub mod prefs;
