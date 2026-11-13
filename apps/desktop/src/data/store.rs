@@ -590,10 +590,7 @@ impl Store {
     pub fn select(&mut self, id: Option<String>) {
         if id != self.selected_id {
             if let Some(id) = &id {
-                match self.last_seen.get(id) {
-                    Some(&at) => self.seen_before.insert(id.clone(), at),
-                    None => self.seen_before.remove(id),
-                };
+                self.start_visit(id);
             }
         }
         self.selected_id = id;
@@ -605,6 +602,15 @@ impl Store {
             self.set_forge(item.kind());
         }
         self.load_details_if_needed(&item);
+    }
+
+    /// Keeps when a merge request was last seen, before showing it marks it seen again: what
+    /// `is_fresh` measures against. Call it wherever the selection moves to another one.
+    fn start_visit(&mut self, id: &str) {
+        match self.last_seen.get(id) {
+            Some(&at) => self.seen_before.insert(id.to_string(), at),
+            None => self.seen_before.remove(id),
+        };
     }
 
     pub fn select_offset(&mut self, offset: i64) {
@@ -742,6 +748,14 @@ impl Store {
         }
     }
 
+    /// How many of `files` are marked viewed as they stand now.
+    pub fn viewed_count(&self, files: &[FileDiff], item: &MergeRequest) -> usize {
+        match self.viewed_files.get(&item.id) {
+            Some(marked) if !marked.is_empty() => files.iter().filter(|f| marked.get(&f.id()) == Some(&f.digest)).count(),
+            _ => 0,
+        }
+    }
+
     pub fn set_viewed(&mut self, on: bool, file: &FileDiff, item: &MergeRequest) {
         let files = self.viewed_files.entry(item.id.clone()).or_default();
         if on {
@@ -835,6 +849,10 @@ impl Store {
         if self.selected().is_none() {
             let forge = self.forge;
             let next = self.tab_items().into_iter().find(|m| m.kind() == forge).map(|m| m.id).or_else(|| self.visible_items().first().map(|m| m.id.clone()));
+            // The one a launch opens too: its replies since last time are new.
+            if let Some(id) = &next {
+                self.start_visit(id);
+            }
             self.selected_id = next;
         }
         // Changes and threads may have moved on; fetch them again when next shown.
