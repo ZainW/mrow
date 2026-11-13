@@ -16,7 +16,7 @@ more than a `Mrow/<version>` user agent (Settings → Updates turns that off).
 The latest release, for macOS (Apple silicon) or Linux (x86_64, arm64):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ZainW/mrow/main/apps/desktop/scripts/get.sh | bash
+curl -fsSL https://mrow.wania.app/install | bash
 ```
 
 Release builds update themselves: a new version downloads in the background, is checked against

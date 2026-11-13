@@ -7,7 +7,7 @@ flip between them. Tokens stay in the CLIs; Mrow never sees them.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ZainW/mrow/main/apps/desktop/scripts/get.sh | bash
+curl -fsSL https://mrow.wania.app/install | bash
 ```
 
 That installs the latest [release](https://github.com/ZainW/mrow/releases): `Mrow.app` into
