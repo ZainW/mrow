@@ -7,7 +7,8 @@ Start site, pnpm).
 
 - App (`apps/desktop`): `cargo build`, `cargo test`.
   - Install on macOS: `scripts/install.sh` builds `dist/Mrow.app` (bundle id `com.zain.mrow`) and
-    replaces `~/Applications/Mrow.app`.
+    replaces `~/Applications/Mrow.app`. `scripts/dmg.sh` wraps that bundle in the disk image
+    releases ship beside the archive (the archive is what the updater and `get.sh` fetch).
   - Linux: `scripts/package-linux.sh [--install]` on Linux makes `dist/mrow-linux-<arch>.tar.gz`;
     `scripts/docker-linux.sh` builds the same from macOS in Docker (`PLATFORM=linux/amd64` for
     x86_64). Headless renders on Linux need Mesa 24+ lavapipe (Ubuntu 24.04, not Debian bookworm).
@@ -30,7 +31,7 @@ Start site, pnpm).
 ## Releases and CI
 
 - Releases are manual only: `apps/desktop/scripts/release.sh [patch|minor|major|X.Y.Z]` runs
-  `.github/workflows/release.yml`, which builds macOS arm64 + Linux x86_64/arm64, then bumps
+  `.github/workflows/release.yml`, which builds macOS arm64 (archive and disk image) + Linux x86_64/arm64, then bumps
   the version, writes `CHANGELOG.md` (git-cliff, `cliff.toml`), tags `vX.Y.Z` and publishes the
   GitHub release with a signed `latest.json`. Commit messages are the changelog: use
   conventional commits (`feat:`, `fix:`, `perf:` appear; `(web)`-scoped and chores don't).

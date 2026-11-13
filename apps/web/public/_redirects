@@ -2,7 +2,8 @@
 # One-line install: curl -fsSL https://mrow.wania.app/install | bash
 /install https://raw.githubusercontent.com/ZainW/mrow/main/apps/desktop/scripts/get.sh 302
 /install.sh https://raw.githubusercontent.com/ZainW/mrow/main/apps/desktop/scripts/get.sh 302
-/download/macos https://github.com/ZainW/mrow/releases/latest/download/mrow-macos-aarch64.tar.gz 302
+/download/macos https://github.com/ZainW/mrow/releases/latest/download/mrow-macos-aarch64.dmg 302
+/download/macos-archive https://github.com/ZainW/mrow/releases/latest/download/mrow-macos-aarch64.tar.gz 302
 /download/linux-x86_64 https://github.com/ZainW/mrow/releases/latest/download/mrow-linux-x86_64.tar.gz 302
 /download/linux-aarch64 https://github.com/ZainW/mrow/releases/latest/download/mrow-linux-aarch64.tar.gz 302
 /releases https://github.com/ZainW/mrow/releases 302
