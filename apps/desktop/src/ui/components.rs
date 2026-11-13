@@ -104,13 +104,13 @@ impl ChromeButton {
             Chrome::Text | Chrome::Field => {
                 b = b.px(10.0).child(
                     text(self.title.clone())
-                        .font(ui(12.5, if field { 400.0 } else { MEDIUM }).features("'tnum' 1"))
+                        .font(ui(13.0, if field { 400.0 } else { MEDIUM }).features("'tnum' 1"))
                         .color(rest)
                         .group_color(hovered)
                         .single_line(),
                 );
                 if let Some(h) = &self.hint {
-                    b = b.child(el().grow(1.0).min_w(14.0)).child(text(h.clone()).font(mono(11.0, 400.0)).color(p.tertiary));
+                    b = b.child(el().grow(1.0).min_w(14.0)).child(text(h.clone()).font(mono(12.0, 400.0)).color(p.tertiary));
                 }
             }
         }
@@ -204,7 +204,7 @@ pub fn action_button(p: &Pal, key: impl Into<String>, glyph: Option<&'static Ico
     if let Some(i) = glyph {
         b = b.child(icon(i, 13.0).color(ink));
     }
-    b = b.child(text(title.to_string()).font(ui(12.5, SEMIBOLD)).color(ink).single_line());
+    b = b.child(text(title.to_string()).font(ui(13.0, SEMIBOLD)).color(ink).single_line());
     if enabled {
         let over = if prominent { p.paper.alpha(0.12) } else { p.hover };
         b.hover(over).press(over).press_scale(0.98)
@@ -219,7 +219,7 @@ pub fn chip(p: &Pal, glyph: Option<&'static Icon>, label: &str, tint: rune::Colo
     if let Some(i) = glyph {
         c = c.child(icon(i, 11.0).color(tint));
     }
-    let font = if is_mono { mono(11.0, 400.0) } else { ui(11.5, MEDIUM) };
+    let font = if is_mono { mono(12.0, 400.0) } else { ui(12.0, MEDIUM) };
     c.child(text(label.to_string()).font(font).color(tint).single_line())
 }
 
@@ -232,7 +232,7 @@ pub fn avatar(s: &App, p: &Pal, person: &Person, size: f32) -> El {
         .fill(p.accent_soft)
         .center()
         .help(person.name.clone())
-        .child(text(person.initials()).font(ui(size * 0.42, SEMIBOLD)).color(p.accent).single_line());
+        .child(text(person.initials()).font(ui((size * 0.42).round(), SEMIBOLD)).color(p.accent).single_line());
     let picture = avatar_url(person).and_then(|url| crate::ui::images::lookup(s)(&url, None)).filter(|i| i.error().is_none());
     let base = match picture {
         Some(image) => base.child(el().absolute(0.0, 0.0).size(size, size).radius(size / 2.0).pixels(image.pixels()).a11y_hidden()),
@@ -263,7 +263,7 @@ pub fn forge_mark(p: &Pal, forge: Forge, size: f32) -> El {
         .fill(fill)
         .center()
         .a11y_hidden()
-        .child(text(forge.monogram()).font(ui(size * 0.42, BOLD).tracking(-0.2)).color(ink).single_line())
+        .child(text(forge.monogram()).font(ui((size * 0.42).round(), BOLD).tracking(-0.2)).color(ink).single_line())
 }
 
 pub fn pipeline_color(p: &Pal, status: PipelineStatus) -> rune::Color {
@@ -380,7 +380,7 @@ pub fn message(p: &Pal, glyph: Option<&'static Icon>, lines: &[&str]) -> El {
         c = c.child(icon(i, 20.0).color(p.secondary));
     }
     for line in lines {
-        c = c.child(text(line.to_string()).font(ui(12.5, 400.0)).color(p.secondary).wrap().max_w(280.0));
+        c = c.child(text(line.to_string()).font(ui(13.0, 400.0)).color(p.secondary).wrap().max_w(280.0));
     }
     c
 }

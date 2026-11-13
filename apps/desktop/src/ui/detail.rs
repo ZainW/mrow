@@ -217,9 +217,9 @@ fn build_row(s: &App, page: &Page, i: usize) -> El {
         Row::Tabs => tab_bar(s, p, page),
         Row::Description => {
             let body = if item.description.trim().is_empty() {
-                text("No description.").font(serif(15.5, 400.0).italic()).color(p.tertiary)
+                text("No description.").font(serif(16.0, 400.0).italic()).color(p.tertiary)
             } else {
-                markdown::markdown(s, p, k, Doc { key: &item.id, source: &item.description, base: item.project_url(), size: 15.5, serif: true })
+                markdown::markdown(s, p, k, Doc { key: &item.id, source: &item.description, base: item.project_url(), size: 16.0, serif: true })
             };
             el().w_full().max_w(READING_WIDTH).pt(22.0).child(body)
         }
@@ -228,14 +228,14 @@ fn build_row(s: &App, page: &Page, i: usize) -> El {
             .gap(8.0)
             .center_y()
             .child(Spinner::new().size(14.0).build(k))
-            .child(text(format!("Loading {what}…")).font(ui(12.5, 400.0)).color(p.secondary)),
+            .child(text(format!("Loading {what}…")).font(ui(13.0, 400.0)).color(p.secondary)),
         Row::Failed(what, message) => row()
             .pt(22.0)
             .gap(6.0)
             .items_start()
             .child(icon(&I::WARNING, 13.0).color(p.red))
             .max_w(READING_WIDTH)
-            .child(text(format!("Couldn't load the {what}: {message}")).font(ui(12.5, 400.0)).color(p.red).wrap().grow(1.0).shrink().min_w(0.0)),
+            .child(text(format!("Couldn't load the {what}: {message}")).font(ui(13.0, 400.0)).color(p.red).wrap().grow(1.0).shrink().min_w(0.0)),
         Row::Empty(message) => el().pt(22.0).child(text(*message).font(ui(13.0, 400.0)).color(p.tertiary)),
         Row::FileList => file_list(s, p, page),
         Row::FileHeader(f) => file_header(s, p, page, *f),
@@ -272,8 +272,8 @@ fn header(s: &App, p: &Pal, item: &MergeRequest) -> El {
     let mut top = row()
         .gap(8.0)
         .center_y()
-        .child(text(item.project_path.clone()).font(mono(11.5, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0))
-        .child(text(format!("{}{}", item.kind().reference_mark(), item.iid)).font(mono(11.5, MEDIUM)).color(p.secondary).single_line());
+        .child(text(item.project_path.clone()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0))
+        .child(text(format!("{}{}", item.kind().reference_mark(), item.iid)).font(mono(12.0, MEDIUM)).color(p.secondary).single_line());
     if item.draft {
         top = top.child(chip(p, None, "Draft", p.secondary, None, false));
     }
@@ -364,9 +364,9 @@ fn chips(p: &Pal, item: &MergeRequest, mine: bool) -> El {
             .center_y()
             .radius(6.0)
             .fill(p.hover)
-            .child(text(format!("+{}", item.additions)).font(mono(11.0, 400.0)).color(p.green).single_line())
-            .child(text(format!("−{}", item.deletions)).font(mono(11.0, 400.0)).color(p.red).single_line())
-            .child(text(format!("· {} {files}", item.file_count)).font(mono(11.0, 400.0)).color(p.secondary).single_line()),
+            .child(text(format!("+{}", item.additions)).font(mono(12.0, 400.0)).color(p.green).single_line())
+            .child(text(format!("−{}", item.deletions)).font(mono(12.0, 400.0)).color(p.red).single_line())
+            .child(text(format!("· {} {files}", item.file_count)).font(mono(12.0, 400.0)).color(p.secondary).single_line()),
     );
     if let Some(pipe) = item.pipeline {
         r = r.child(
@@ -378,7 +378,7 @@ fn chips(p: &Pal, item: &MergeRequest, mine: bool) -> El {
                 .radius(6.0)
                 .fill(p.hover)
                 .child(pipeline_dot(p, pipe))
-                .child(text(format!("Pipeline {}", pipe.label().to_lowercase())).font(ui(11.5, MEDIUM)).color(p.secondary).single_line()),
+                .child(text(format!("Pipeline {}", pipe.label().to_lowercase())).font(ui(12.0, MEDIUM)).color(p.secondary).single_line()),
         );
     }
     // On my own, the next step says where the merge stands, stack and all.
@@ -397,7 +397,7 @@ fn chips(p: &Pal, item: &MergeRequest, mine: bool) -> El {
 
 fn reviewers(s: &App, p: &Pal, item: &MergeRequest) -> El {
     let me = s.store.me().map(|m| m.username.clone());
-    let mut r = row().gap(14.0).center_y().flex_wrap().child(text("Reviewers").font(ui(11.5, MEDIUM)).color(p.tertiary));
+    let mut r = row().gap(14.0).center_y().flex_wrap().child(text("Reviewers").font(ui(12.0, MEDIUM)).color(p.tertiary));
     for reviewer in &item.reviewers {
         let name = if Some(&reviewer.person.username) == me.as_ref() { "You".to_string() } else { reviewer.person.name.clone() };
         r = r.child(
@@ -506,7 +506,7 @@ fn file_list(s: &App, p: &Pal, page: &Page) -> El {
             .px(12.0)
             .gap(8.0)
             .center_y()
-            .child(text(format!("{viewed} of {} viewed", files.len())).font(ui(11.5, MEDIUM)).color(if done { p.green } else { p.secondary }))
+            .child(text(format!("{viewed} of {} viewed", files.len())).font(ui(12.0, MEDIUM)).color(if done { p.green } else { p.secondary }))
             .child(el().grow(1.0))
             .child(progress_bar(p, if files.is_empty() { 0.0 } else { viewed as f32 / files.len() as f32 }, 90.0)),
     );
@@ -541,7 +541,7 @@ fn file_list(s: &App, p: &Pal, page: &Page) -> El {
                 .child(el().w(14.0).center().child(icon(glyph, 12.0).color(tint)))
                 .child(
                     text(file.new_path.clone())
-                        .font(mono(11.5, 400.0))
+                        .font(mono(12.0, 400.0))
                         .color(if state == Viewed::Yes { p.tertiary } else { p.text })
                         .single_line()
                         .truncate_head()
@@ -563,10 +563,10 @@ fn file_list(s: &App, p: &Pal, page: &Page) -> El {
 fn counts(p: &Pal, file: &FileDiff) -> El {
     let mut r = row().gap(6.0);
     if file.added > 0 {
-        r = r.child(text(format!("+{}", file.added)).font(mono(11.0, MEDIUM)).color(p.green).single_line());
+        r = r.child(text(format!("+{}", file.added)).font(mono(12.0, MEDIUM)).color(p.green).single_line());
     }
     if file.removed > 0 {
-        r = r.child(text(format!("−{}", file.removed)).font(mono(11.0, MEDIUM)).color(p.red).single_line());
+        r = r.child(text(format!("−{}", file.removed)).font(mono(12.0, MEDIUM)).color(p.red).single_line());
     }
     r
 }
@@ -593,7 +593,7 @@ fn file_header(s: &App, p: &Pal, page: &Page, f: usize) -> El {
     if file.renamed_file && file.old_path != file.new_path {
         name = name
             .child(text(file.old_path.clone()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate_head().shrink().min_w(0.0))
-            .child(text("→").font(ui(10.0, 400.0)).color(p.tertiary));
+            .child(text("→").font(ui(12.0, 400.0)).color(p.tertiary));
     }
     name = name.child(
         text(file.new_path.clone())
@@ -622,7 +622,7 @@ fn file_header(s: &App, p: &Pal, page: &Page, f: usize) -> El {
                 .center_y()
                 .help(format!("{threads} comment thread{} on this file", if threads == 1 { "" } else { "s" }))
                 .child(icon(&I::BUBBLE_TEXT, 11.0).color(p.secondary))
-                .child(text(threads.to_string()).font(mono(11.0, MEDIUM)).color(p.secondary)),
+                .child(text(threads.to_string()).font(mono(12.0, MEDIUM)).color(p.secondary)),
         );
     }
     name = name.child(counts(p, file));
@@ -667,7 +667,7 @@ fn viewed_toggle(p: &Pal, page: &Page, f: usize, state: Viewed) -> El {
         .child(mark)
         .child(
             text(if state == Viewed::Changed { "Changed since viewed" } else { "Viewed" })
-                .font(ui(11.5, MEDIUM))
+                .font(ui(12.0, MEDIUM))
                 .color(if state == Viewed::Changed { p.amber } else { p.secondary })
                 .single_line(),
         )
@@ -803,7 +803,7 @@ pub fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Disc
                     .center_y()
                     .fill(p.well)
                     .child(icon(&I::DOC_ARROW, 11.0).color(p.secondary))
-                    .child(text(format!("{path}{at}")).font(mono(11.0, 400.0)).color(p.secondary).single_line().truncate_head().shrink().min_w(0.0))
+                    .child(text(format!("{path}{at}")).font(mono(12.0, 400.0)).color(p.secondary).single_line().truncate_head().shrink().min_w(0.0))
                     .child(el().grow(1.0));
                 if resolved {
                     head = head.child(chip(p, Some(&I::CHECK), "Resolved", p.green, None, false));
@@ -839,7 +839,7 @@ pub fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Disc
                 .child(text("Reply").font(ui(12.0, MEDIUM)).color(p.secondary))
                 .child(el().grow(1.0));
             if !shows_position && resolved {
-                reply = reply.child(text("Resolved").font(ui(11.5, 400.0)).color(p.secondary));
+                reply = reply.child(text("Resolved").font(ui(12.0, 400.0)).color(p.secondary));
             }
             let focus_key = draft_field_key(&key);
             c = c.child(reply.on_press_tx(move |s: &mut App, tx: &mut Tx| {
@@ -862,14 +862,14 @@ fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, note: &Note) -> El 
                 row()
                     .gap(6.0)
                     .center_y()
-                    .child(text(note.author.name.clone()).font(ui(12.5, SEMIBOLD)).color(p.text).single_line())
+                    .child(text(note.author.name.clone()).font(ui(13.0, SEMIBOLD)).color(p.text).single_line())
                     .child(text(relative(note.created_at)).font(ui(12.0, 400.0)).color(p.tertiary).single_line().help(long_date(note.created_at))),
             )
             .child(markdown::markdown(
                 s,
                 p,
                 k,
-                Doc { key: &format!("note-{}", note.id), source: &note.body, base: item.project_url(), size: 13.5, serif: false },
+                Doc { key: &format!("note-{}", note.id), source: &note.body, base: item.project_url(), size: 14.0, serif: false },
             )),
     )
 }
@@ -917,7 +917,7 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
         .radius(10.0)
         .padding(if compact { 8.0 } else { 12.0 });
     let mut buttons =
-        row().w_full().gap(8.0).center_y().child(text(crate::ui::components::keys("⌘↩ to post")).font(ui(11.5, 400.0)).color(p.tertiary)).child(el().grow(1.0));
+        row().w_full().gap(8.0).center_y().child(text(crate::ui::components::keys("⌘↩ to post")).font(ui(12.0, 400.0)).color(p.tertiary)).child(el().grow(1.0));
     if !matches!(key, DraftKey::Comment(_)) {
         let cancel_key = key.clone();
         buttons = buttons.child(action_button(p, "cancel", None, "Cancel", false, true).on_press(move |s: &mut App| cancel(s, &cancel_key)));
