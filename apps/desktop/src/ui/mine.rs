@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use rune::{El, GrowthSpec, PointerPress, Tx, col, el, icon, row, text};
 
-use crate::app::{App, DetailTab};
+use crate::app::{App, Confirm, DetailTab};
 use crate::data::mine::{self, Standing, Status};
 use crate::data::models::{MergeRequest, PipelineStatus, ReviewState};
 use crate::data::store::{MineLine, Rail, Store};
@@ -112,7 +112,7 @@ pub fn rows(s: &App, p: &Pal) -> Option<El> {
         move |_: &App, i| match &lines[i] {
             MineLine::Header(t) => crate::ui::sidebar::section_header(&pal, t),
             MineLine::Item { item, status, rail, place } => item_row(&pal, item, status, *rail, *place, flags[i].0, flags[i].1),
-            MineLine::StackHead { key, name, count, open } => stack_head(&pal, key, name, *count, *open),
+            MineLine::StackHead { key, name, count, open, merging } => stack_head(&pal, key, name, *count, *open, *merging),
             MineLine::Folded { key, text, rail } => folded(&pal, key, text, *rail),
             MineLine::Whole { key, name, text } => whole(&pal, key, name, text),
         },
@@ -236,7 +236,7 @@ fn chevron(p: &Pal, open: bool) -> El {
 }
 
 /// A stack's name above its rows; a press shows every part, or folds them again.
-fn stack_head(p: &Pal, key: &str, name: &str, count: usize, open: bool) -> El {
+fn stack_head(p: &Pal, key: &str, name: &str, count: usize, open: bool, merging: bool) -> El {
     let label = if open { "Fold the parts that aren't on you" } else { "Show every part" };
     el().key(format!("stack-{key}")).w_full().px(8.0).pt(4.0).child(
         row()
@@ -256,7 +256,12 @@ fn stack_head(p: &Pal, key: &str, name: &str, count: usize, open: bool) -> El {
             .help(label)
             .child(el().size(10.0, 10.0).center().child(chevron(p, open)))
             .child(text(name.to_string()).font(ui(11.5, SEMIBOLD)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
-            .child(text(format!("stack of {count}")).font(ui(11.5, 400.0)).color(p.tertiary).single_line())
+            .child(
+                text(if merging { format!("stack of {count} · merging") } else { format!("stack of {count}") })
+                    .font(ui(11.5, 400.0))
+                    .color(if merging { p.accent } else { p.tertiary })
+                    .single_line(),
+            )
             .on_press_tx(toggle(key)),
     )
 }
@@ -340,45 +345,127 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
     let why = text(mine::explain(item, &status, below, above)).font(ui(13.0, 400.0).lines(1.45)).color(p.secondary).wrap();
     let card =
         col().key("next-step").w_full().max_w(READING_WIDTH).gap(8.0).padding(14.0).radius(10.0).fill(p.well).border(1.0, p.line).child(headline).child(why);
-    let forge = item.kind().name();
-    let url = item.web_url.clone();
-    let open_at = |key: &'static str, title: String, prominent: bool, url: String| {
-        action_button(p, key, Some(&I::ARROW_UP_RIGHT), &title, prominent, true).on_press_tx(move |_: &mut App, tx: &mut Tx| {
-            let _ = tx.open_url(&url);
+    let idle = store.busy.is_none();
+    let id = item.id.clone();
+    // A button that does something to this merge request, looked up fresh when pressed.
+    let act = move |b: El, run: fn(&mut App, &MergeRequest)| {
+        let id = id.clone();
+        b.on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            tx.instant();
+            if s.store.busy.is_none()
+                && let Some(item) = s.store.item(&id).cloned()
+            {
+                run(s, &item);
+            }
         })
     };
-    // The primary button already opens the request when it's ready or a draft.
-    let opens_it = matches!(status.standing, Standing::Ready | Standing::Draft);
-    let button = match status.standing {
-        Standing::Ready => Some(open_at("merge", format!("Merge in {forge}"), true, url)),
-        Standing::Held => below.map(|b| {
-            let id = b.id.clone();
-            action_button(p, "go-below", None, &format!("Go to {}", b.reference()), false, true).on_press_tx(move |s: &mut App, tx: &mut Tx| {
-                tx.instant();
-                s.store.select(Some(id.clone()));
-            })
-        }),
-        Standing::NeedsYou if item.pipeline == Some(PipelineStatus::Failed) => {
-            let page = if item.kind() == crate::data::forge::Forge::Gitlab { "pipelines" } else { "checks" };
-            Some(open_at("pipeline", "Open the Pipeline".into(), true, format!("{url}/{page}")))
-        }
-        Standing::NeedsYou if item.unresolved_threads.unwrap_or(0) > 0 => {
-            Some(action_button(p, "threads", Some(&I::BUBBLE_TEXT), "Go to the Threads", true, true).on_press_tx(|s: &mut App, tx: &mut Tx| {
-                tx.instant();
-                s.set_tab(DetailTab::Discussion);
-            }))
-        }
-        Standing::Draft => Some(open_at("ready", format!("Mark Ready in {forge}"), false, url)),
-        _ => None,
-    };
+    let note = |line: String| text(line).font(ui(13.0, 400.0).lines(1.45)).color(p.text).wrap().w_full();
     let mut actions = row().pt(4.0).gap(8.0).center_y().flex_wrap();
-    if let Some(b) = button {
-        actions = actions.child(b);
-    }
-    for (i, link) in crate::ui::detail::link_buttons(p, item).into_iter().enumerate() {
-        if i > 0 || !opens_it {
+    let confirm = s.confirm.as_ref().filter(|(id, _)| id == &item.id).map(|(_, kind)| *kind);
+    let mut card = card;
+    if store.walk_of(&item.id).is_some() {
+        // Its stack is merging: say so, and offer the way out. Nothing else can be started.
+        card = card.child(note("Merging the stack: each part merges as soon as it's ready. Keep Mrow open until it's done.".into()));
+        actions = actions.child(act(action_button(p, "stop-walk", Some(&I::CLOSE), "Stop", false, true), |s, item| s.store.stop_walk(&item.id)));
+    } else if let (Some(kind), Standing::Ready) = (confirm, status.standing) {
+        // Merging can't be taken back, so it takes a second press.
+        let (question, title): (String, &str) = match (kind, above) {
+            (Confirm::Stack, Some(a)) => (
+                format!(
+                    "Merge {} into {} now, then {} and each part above it once it's approved and green? It stops at the first part that isn't.",
+                    item.reference(),
+                    item.target_branch,
+                    a.reference()
+                ),
+                "Merge the Stack",
+            ),
+            _ => (format!("Merge {} into {}?", item.reference(), item.target_branch), "Merge"),
+        };
+        card = card.child(note(question));
+        actions = actions
+            .child(act(
+                action_button(p, "confirm-merge", Some(&I::MERGE), title, true, idle),
+                match kind {
+                    Confirm::Stack => |s, item| {
+                        s.confirm = None;
+                        s.store.merge_stack(item);
+                    },
+                    Confirm::Merge => |s, item| {
+                        s.confirm = None;
+                        s.store.merge(item);
+                    },
+                },
+            ))
+            .child(action_button(p, "cancel-merge", None, "Cancel", false, true).on_press_tx(|s: &mut App, tx: &mut Tx| {
+                tx.instant();
+                s.confirm = None;
+            }));
+    } else {
+        let ask = |b: El, kind: Confirm| {
+            let id = item.id.clone();
+            b.on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                tx.instant();
+                s.confirm = Some((id.clone(), kind));
+            })
+        };
+        match status.standing {
+            Standing::Ready => {
+                actions = actions.child(ask(action_button(p, "merge", Some(&I::MERGE), "Merge", true, idle), Confirm::Merge));
+                if above.is_some_and(|a| store.is_mine(a)) {
+                    actions = actions.child(ask(action_button(p, "merge-stack", None, "Merge the Stack…", false, idle), Confirm::Stack));
+                }
+            }
+            Standing::Held => {
+                if let Some(b) = below {
+                    let id = b.id.clone();
+                    actions = actions.child(action_button(p, "go-below", None, &format!("Go to {}", b.reference()), false, true).on_press_tx(
+                        move |s: &mut App, tx: &mut Tx| {
+                            tx.instant();
+                            s.store.select(Some(id.clone()));
+                        },
+                    ));
+                }
+            }
+            Standing::NeedsYou if item.pipeline == Some(PipelineStatus::Failed) => {
+                let page = if item.kind() == crate::data::forge::Forge::Gitlab { "pipelines" } else { "checks" };
+                let url = format!("{}/{page}", item.web_url);
+                actions = actions.child(action_button(p, "pipeline", Some(&I::ARROW_UP_RIGHT), "Open the Pipeline", true, true).on_press_tx(
+                    move |_: &mut App, tx: &mut Tx| {
+                        let _ = tx.open_url(&url);
+                    },
+                ));
+            }
+            Standing::NeedsYou if item.unresolved_threads.unwrap_or(0) > 0 => {
+                actions = actions.child(action_button(p, "threads", Some(&I::BUBBLE_TEXT), "Go to the Threads", true, true).on_press_tx(
+                    |s: &mut App, tx: &mut Tx| {
+                        tx.instant();
+                        s.set_tab(DetailTab::Discussion);
+                    },
+                ));
+            }
+            Standing::Waiting | Standing::Quiet if item.auto_merge => {
+                actions = actions
+                    .child(act(action_button(p, "auto-merge-off", None, "Turn Auto-Merge Off", false, idle), |s, item| s.store.set_auto_merge(item, false)));
+            }
+            Standing::Waiting | Standing::Quiet => {
+                actions = actions.child(
+                    act(action_button(p, "auto-merge", Some(&I::MERGE), "Merge When Ready", false, idle), |s, item| s.store.set_auto_merge(item, true))
+                        .help(format!("{} merges it by itself once everything passes", item.kind().name())),
+                );
+            }
+            Standing::Draft => {
+                actions = actions.child(act(action_button(p, "ready", Some(&I::CHECK), "Mark Ready", false, idle), |s, item| s.store.mark_ready(item)));
+            }
+            Standing::NeedsYou => {}
+        }
+        for link in crate::ui::detail::link_buttons(p, item) {
             actions = actions.child(link);
         }
+    }
+    if let Some(busy) = &store.busy {
+        actions = actions
+            .child(rune_kit::Spinner::new().size(14.0).build(&p.kit()).ml(4.0))
+            .child(text(busy.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line());
     }
     card.child(actions)
 }

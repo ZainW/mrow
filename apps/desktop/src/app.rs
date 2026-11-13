@@ -11,6 +11,15 @@ use crate::data::models::{Discussion, FileDiff, MergeRequest};
 use crate::data::prefs;
 use crate::data::store::{Loadable, Store};
 
+/// A merge the next step asks about before doing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Confirm {
+    /// This merge request alone.
+    Merge,
+    /// This one now, then each part stacked on it once it's ready.
+    Stack,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum DetailTab {
     #[default]
@@ -97,6 +106,10 @@ pub struct App {
     /// Drafted comments being posted, by the store's ticket.
     proposal_tickets: HashMap<u64, String>,
     pub updater: crate::data::update::Updater,
+    /// A merge waiting on a second press, by merge request: merging can't be taken back.
+    pub confirm: Option<(String, Confirm)>,
+    /// When the queue is next refreshed for a stack that's being merged, on the app clock.
+    pub walk_refresh: f64,
 }
 
 /// Where a comment the agent drafted stands. Nothing posts until the user clicks Post.
@@ -177,6 +190,8 @@ impl Default for App {
             proposal_states: p.ask_posted.iter().map(|k| (k.clone(), ProposalState::Posted)).collect(),
             proposal_tickets: HashMap::new(),
             updater: Default::default(),
+            confirm: None,
+            walk_refresh: 0.0,
         }
     }
 }

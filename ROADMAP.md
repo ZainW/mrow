@@ -10,18 +10,26 @@ they stack, and one place that says what changed.
 
 Built so far: the Mine list with its sections, status marks and filters; the next step and
 "Before it merges" on a request of yours; stacks among your own requests, folded to what's on
-you; a reason line on review rows. Everything is read-only: the buttons open the forge.
+you; a reason line on review rows; merging (with a second press to confirm), "Merge When Ready"
+(the forge's own auto-merge), marking a draft ready, and merging a stack from the bottom up.
+
+Merging a stack: the bottom merges, then each part above it is moved onto the branch the stack
+lands on and merged once it's approved and green. It stops at the first part that needs a
+person, when a step fails, or after 45 minutes of waiting on one part. It runs only while Mrow
+is open and isn't remembered across launches.
 
 Still to build, in this order:
 
-1. The actions: merge, merge when ready, re-request a review, nudge, mark a draft ready.
+1. Re-requesting a review after a push. (A nudge for quiet reviewers is parked: what it should
+   do isn't settled.)
 2. The inbox behind the bell, and unread state that ignores your own pushes.
 3. Notifications for your own requests, per-event settings, and Linux.
 4. Stacks in the review lists, including parts you weren't asked to review (they aren't
    fetched today, so a stack only shows the parts Mrow already knows).
 5. Reason lines that need more than the queue has: "pushed 3 commits and asked again".
 
-The GitLab side of Mine is written but hasn't been run against a GitLab host yet.
+The GitLab side of Mine is written but hasn't been run against a GitLab host yet, and none of
+the merge actions have been run against a real request on either forge.
 
 ### Mine
 

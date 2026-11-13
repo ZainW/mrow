@@ -25,7 +25,7 @@ const MR_FIELDS: &str = "
 
 /// What only matters on my own merge requests: how many threads are open, and which job failed.
 const MINE_FIELDS: &str = "
-    resolvableDiscussionsCount resolvedDiscussionsCount
+    resolvableDiscussionsCount resolvedDiscussionsCount autoMergeEnabled
     headPipeline { jobs(statuses: FAILED, first: 3) { nodes { name } } }";
 
 /// The queue's query: the merge requests I'm asked to review, or (`mine`) the ones I wrote.
@@ -161,6 +161,7 @@ struct MrNode {
     notes: Connection<ActivityNote>,
     resolvable_discussions_count: Option<i64>,
     resolved_discussions_count: Option<i64>,
+    auto_merge_enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -406,6 +407,8 @@ fn build(node: &MrNode, me: &str, extra: &[ActivityNote]) -> MergeRequest {
         my_state: mine.map_or(ReviewState::Unknown, |r| r.state),
         reviewers,
         forge: Forge::Gitlab,
+        auto_merge: node.auto_merge_enabled.unwrap_or(false),
+        merge_method: None,
         unresolved_threads: node.resolvable_discussions_count.map(|all| (all - node.resolved_discussions_count.unwrap_or(0)).max(0)),
         failed_job: node.head_pipeline.as_ref().and_then(|p| p.jobs.as_ref()).and_then(|j| j.nodes.iter().find_map(|n| n.name.clone())),
     }
@@ -549,6 +552,44 @@ pub fn approve(item: &MergeRequest) -> Result<(), String> {
 
 pub fn unapprove(item: &MergeRequest) -> Result<(), String> {
     cli().send(&format!("{}/unapprove", base(item)), "POST", &json!({})).map(drop)
+}
+
+/// Merges it with the merge request's own settings (squash, removing the source branch).
+pub fn merge(item: &MergeRequest) -> Result<(), String> {
+    cli().send(&format!("{}/merge", base(item)), "PUT", &json!({})).map(drop)
+}
+
+/// Turns auto-merge on or off: GitLab merges it once its checks pass. Both spellings of the
+/// option are sent; GitLab 17.11 renamed it and ignores the one it doesn't know.
+pub fn set_auto_merge(item: &MergeRequest, on: bool) -> Result<(), String> {
+    if on {
+        cli().send(&format!("{}/merge", base(item)), "PUT", &json!({ "auto_merge": true, "merge_when_pipeline_succeeds": true })).map(drop)
+    } else {
+        cli().send(&format!("{}/cancel_merge_when_pipeline_succeeds", base(item)), "POST", &json!({})).map(drop)
+    }
+}
+
+pub fn mark_ready(item: &MergeRequest) -> Result<(), String> {
+    let query = "mutation($path: ID!, $iid: String!) { mergeRequestSetDraft(input: { projectPath: $path, iid: $iid, draft: false }) { errors } }";
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Payload {
+        merge_request_set_draft: Option<Outcome>,
+    }
+    #[derive(Deserialize)]
+    struct Outcome {
+        errors: Vec<String>,
+    }
+    let payload: Payload = cli().graphql(query, &[("path", Some(item.project_path.clone())), ("iid", Some(item.iid.clone()))], &[])?;
+    match payload.merge_request_set_draft.map(|o| o.errors) {
+        Some(errors) if !errors.is_empty() => Err(errors.join("\n")),
+        _ => Ok(()),
+    }
+}
+
+/// Points it at another branch: what a stacked merge request needs once the one below it merged.
+pub fn retarget(item: &MergeRequest, branch: &str) -> Result<(), String> {
+    cli().send(&base(item), "PUT", &json!({ "target_branch": branch })).map(drop)
 }
 
 pub fn comment(item: &MergeRequest, body: &str) -> Result<(), String> {

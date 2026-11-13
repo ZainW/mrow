@@ -233,6 +233,8 @@ mod mine {
             forge: Forge::Gitlab,
             unresolved_threads: Some(0),
             failed_job: None,
+            auto_merge: false,
+            merge_method: None,
         }
     }
 
@@ -296,6 +298,43 @@ mod mine {
         let st = status(&top, below(&top, &all));
         assert_eq!((st.standing, st.step.as_str()), (Standing::Held, "Approved by 1 · held until !1 merges"));
         assert!(st.standing.group() == Standing::Waiting && !st.standing.on_me());
+    }
+
+    #[test]
+    fn merging_a_stack_goes_one_ready_part_at_a_time() {
+        use crate::data::mine::{WalkStep, walk_step};
+        let bottom = approved(request("1", "Paging 1", "paging-1", "main"));
+        let mut next = approved(request("2", "Paging 2", "paging-2", "paging-1"));
+        assert_eq!(walk_step(None, "main", &[]), WalkStep::Done);
+        // The part below is still open (its merge is on the way): nothing to do yet.
+        assert_eq!(walk_step(Some(&next), "main", &[&bottom, &next]), WalkStep::Wait);
+        // It merged, and this part still points at its branch.
+        assert_eq!(walk_step(Some(&next), "main", &[&next]), WalkStep::Retarget("main".into()));
+        next.target_branch = "main".into();
+        assert_eq!(walk_step(Some(&next), "main", &[&next]), WalkStep::Merge);
+        // The pipeline runs again after the move; nobody is asked anything.
+        next.merge_status = Some("ci_still_running".into());
+        next.pipeline = Some(PipelineStatus::Running);
+        assert_eq!(walk_step(Some(&next), "main", &[&next]), WalkStep::Wait);
+        // Anything that needs a person ends it.
+        next.pipeline = Some(PipelineStatus::Failed);
+        assert_eq!(walk_step(Some(&next), "main", &[&next]), WalkStep::Stop("Pipeline failed".into()));
+        next.pipeline = Some(PipelineStatus::Success);
+        next.reviewers.push(reviewer("Sam Achebe", ReviewState::Unreviewed));
+        assert!(matches!(walk_step(Some(&next), "main", &[&next]), WalkStep::Stop(why) if why.starts_with("Waiting on Sam")));
+        next.reviewers.pop();
+        next.draft = true;
+        assert!(matches!(walk_step(Some(&next), "main", &[&next]), WalkStep::Stop(_)));
+    }
+
+    #[test]
+    fn auto_merge_shows_in_the_step() {
+        let mut m = request("1", "One", "a", "main");
+        m.reviewers = vec![reviewer("Tomás Varga", ReviewState::Unreviewed)];
+        m.auto_merge = true;
+        let st = status(&m, None);
+        assert_eq!(st.standing, Standing::Waiting);
+        assert!(st.step.starts_with("Auto-merge on · waiting on Tomás"), "{}", st.step);
     }
 
     #[test]
@@ -374,7 +413,9 @@ mod mine_list {
                 MineLine::Item { item, rail: Some(Rail { first, last }), .. } => {
                     format!("{}{}{}", if first { "┌" } else { "│" }, item.iid, if last { "┘" } else { "" })
                 }
-                MineLine::StackHead { name, count, open, .. } => format!("{} {name} ({count})", if open { "v" } else { ">" }),
+                MineLine::StackHead { name, count, open, merging, .. } => {
+                    format!("{} {name} ({count}){}", if open { "v" } else { ">" }, if merging { " merging" } else { "" })
+                }
                 MineLine::Folded { text, rail, .. } => format!("{}{text}", if rail.last { "└ " } else { "│ " }),
                 MineLine::Whole { name, text, .. } => format!("> {name}: {text}"),
             })
@@ -418,6 +459,63 @@ mod mine_list {
         let all = shape(&store);
         let exports = all.iter().position(|l| l == "v Exports rework (2)").expect("with nothing selected, every stack opens");
         assert_eq!(all[exports + 1..exports + 3], ["┌61", "│62┘"]);
+    }
+
+    #[test]
+    fn merging_a_stack_starts_at_a_ready_bottom_and_stops_where_someone_is_needed() {
+        let mut store = store();
+        let id = |store: &Store, iid: &str| store.mine().iter().find(|m| m.iid == iid).unwrap().clone();
+
+        // Not from the middle, and not a request that isn't ready.
+        store.merge_stack(&id(&store, "241"));
+        store.merge_stack(&id(&store, "61"));
+        assert!(!store.walking());
+
+        store.merge_stack(&id(&store, "240"));
+        let walk = store.walk_of(&id(&store, "243").id).expect("every part of the stack is in the walk");
+        assert_eq!((walk.ids.len(), walk.target.as_str()), (4, "main"));
+        assert!(shape(&store).contains(&"> Ledger paging (4) merging".to_string()));
+
+        // The bottom merged (the walk asked for it); the second now sits on main, ready.
+        fn gitlab(store: &mut Store) -> &mut crate::data::store::Account {
+            store.accounts.get_mut(&Forge::Gitlab).unwrap()
+        }
+        gitlab(&mut store).mine.retain(|m| m.iid != "240");
+        gitlab(&mut store).mine.iter_mut().find(|m| m.iid == "241").unwrap().target_branch = "main".into();
+        store.advance_walks();
+        assert!(store.walking());
+        // That merged too; the third sits on main and waits on a reviewer, so it ends there.
+        gitlab(&mut store).mine.retain(|m| m.iid != "241");
+        gitlab(&mut store).mine.iter_mut().find(|m| m.iid == "242").unwrap().target_branch = "main".into();
+        store.advance_walks();
+        assert!(!store.walking());
+        assert!(store.toast.as_deref().is_some_and(|t| t.starts_with("Stopped merging the stack at !242: Waiting on Samuel")), "{:?}", store.toast);
+    }
+
+    #[test]
+    fn a_part_that_leaves_without_the_walk_merging_it_ends_the_walk() {
+        let mut store = store();
+        let bottom = store.mine().iter().find(|m| m.iid == "240").unwrap().clone();
+        store.merge_stack(&bottom);
+        // The second part was closed: the third still carries its commits, so nothing more merges.
+        store.accounts.get_mut(&Forge::Gitlab).unwrap().mine.retain(|m| m.iid != "240" && m.iid != "241");
+        store.advance_walks();
+        assert!(!store.walking());
+        assert_eq!(store.toast.as_deref(), Some("Stopped merging the stack: a part was closed or merged somewhere else"));
+    }
+
+    #[test]
+    fn a_walk_whose_only_part_merged_is_done() {
+        let mut store = store();
+        let bottom = store.mine().iter().find(|m| m.iid == "240").unwrap().clone();
+        store.accounts.get_mut(&Forge::Gitlab).unwrap().mine.retain(|m| !m.title.starts_with("Ledger paging") || m.iid == "240" || m.iid == "241");
+        store.accounts.get_mut(&Forge::Gitlab).unwrap().mine.iter_mut().find(|m| m.iid == "241").unwrap().draft = true;
+        store.merge_stack(&bottom);
+        store.accounts.get_mut(&Forge::Gitlab).unwrap().mine.retain(|m| m.iid != "240");
+        store.accounts.get_mut(&Forge::Gitlab).unwrap().mine.iter_mut().find(|m| m.iid == "241").unwrap().target_branch = "main".into();
+        store.advance_walks();
+        assert!(!store.walking());
+        assert!(store.toast.as_deref().is_some_and(|t| t.starts_with("Stopped merging the stack at !241: Draft")), "{:?}", store.toast);
     }
 
     #[test]

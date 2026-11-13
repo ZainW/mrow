@@ -115,6 +115,19 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         s.copied = None;
         changed = true;
     }
+    // A stack being merged moves when the forge does: look often while one is.
+    if s.store.walking() && !s.store.offline {
+        if clock >= s.walk_refresh {
+            if s.walk_refresh > 0.0 {
+                s.store.refresh();
+                changed = true;
+            }
+            s.walk_refresh = clock + 20.0;
+        }
+        tx.wake_at(s.walk_refresh);
+    } else {
+        s.walk_refresh = 0.0;
+    }
     // The queue refreshes on its own every few minutes.
     let minutes = prefs::read(|p| p.refresh_minutes);
     if minutes > 0 && !s.store.offline {
@@ -279,6 +292,23 @@ fn scene_mine_open(s: &mut App) {
     s.store.select(bottom);
 }
 
+/// The bottom of a stack, asked whether to merge the whole stack.
+fn scene_mine_confirm(s: &mut App) {
+    scene_mine_open(s);
+    if let Some(id) = s.store.selected_id.clone() {
+        s.confirm = Some((id, app::Confirm::Stack));
+    }
+}
+
+/// A stack partway through merging.
+fn scene_mine_merging(s: &mut App) {
+    scene_mine_open(s);
+    if let Some(bottom) = s.store.selected().cloned() {
+        s.store.merge_stack(&bottom);
+    }
+    s.store.busy = Some("Merging !240…".into());
+}
+
 fn scene_mine_work(s: &mut App) {
     scene_mine(s);
     let changes = s.store.mine().iter().find(|m| m.iid == "90").map(|m| m.id.clone());
@@ -333,6 +363,8 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("mine", scene_mine),
     ("mine-stack", scene_mine_stack),
     ("mine-open", scene_mine_open),
+    ("mine-confirm", scene_mine_confirm),
+    ("mine-merging", scene_mine_merging),
     ("mine-work", scene_mine_work),
     ("mine-waiting", scene_mine_waiting),
     ("github", scene_github),
