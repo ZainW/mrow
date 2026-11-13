@@ -100,12 +100,15 @@ fn account_switcher(store: &Store, p: &Pal) -> El {
 }
 
 fn mode_bar(store: &Store, p: &Pal) -> El {
-    let mut r = row().key("modes").gap(2.0).center_y();
+    // Four titles and their counts fit the default width on one line; a narrower sidebar or
+    // longer counts wrap them onto a second instead of clipping the last.
+    let mut r = row().key("modes").w_full().gap(2.0).center_y().flex_wrap();
     for (index, mode) in QueueMode::ALL.into_iter().enumerate() {
         let count = store.count(mode);
-        let title = if count > 0 && mode != QueueMode::Done { format!("{}  {count}", mode.title()) } else { mode.title().to_string() };
+        let title = if count > 0 && mode != QueueMode::Done { format!("{} {count}", mode.title()) } else { mode.title().to_string() };
         let b = ChromeButton::new(format!("mode-{index}"), title)
             .style(Chrome::Text)
+            .pad(7.0)
             .on(store.mode == mode)
             .build(p)
             .help(crate::ui::components::keys(&format!("{}  ⌘{}", mode.title(), index + 1)))
@@ -465,20 +468,12 @@ fn empty_state(s: &App, p: &Pal) -> El {
 
 fn footer(s: &App, p: &Pal, dark: bool) -> El {
     let store = &s.store;
-    let mut r = row()
-        .key("footer")
-        .padding(8.0)
-        .gap(4.0)
-        .center_y()
-        .child(
-            ChromeButton::new("settings", "Settings")
-                .icon(&I::GEAR, 13.0)
-                .style(Chrome::Text)
-                .hint(crate::ui::components::keys("⌘,"))
-                .build(p)
-                .on_press_tx(actions::show_settings),
-        )
-        .child(el().grow(1.0));
+    let mut settings = ChromeButton::new("settings", "Settings").icon(&I::GEAR, 13.0).style(Chrome::Text);
+    // Dragged narrow, the key gives way to when the queue last updated.
+    if s.sidebar_width >= 280.0 {
+        settings = settings.hint(crate::ui::components::keys("⌘,"));
+    }
+    let mut r = row().key("footer").padding(8.0).gap(4.0).center_y().child(settings.build(p).on_press_tx(actions::show_settings)).child(el().grow(1.0));
     if let Some(ready) = s.updater.ready() {
         r = r.child(update_button(p, &ready.version));
     } else if let Some(last) = store.last_refreshed() {

@@ -31,6 +31,7 @@ pub struct ChromeButton {
     enabled: bool,
     spinning: bool,
     width: Option<f32>,
+    pad: f32,
 }
 
 impl ChromeButton {
@@ -46,6 +47,7 @@ impl ChromeButton {
             enabled: true,
             spinning: false,
             width: None,
+            pad: 10.0,
         }
     }
     pub fn icon(mut self, i: &'static Icon, size: f32) -> Self {
@@ -77,6 +79,11 @@ impl ChromeButton {
         self.width = Some(w);
         self
     }
+    /// The space either side of a text button's title; 10 unless several sit in a tight row.
+    pub fn pad(mut self, pad: f32) -> Self {
+        self.pad = pad;
+        self
+    }
 
     pub fn build(self, p: &Pal) -> El {
         let field = self.style == Chrome::Field;
@@ -102,7 +109,7 @@ impl ChromeButton {
                 b = b.w(28.0);
             }
             Chrome::Text | Chrome::Field => {
-                b = b.px(10.0).child(
+                b = b.px(self.pad).child(
                     text(self.title.clone())
                         .font(ui(13.0, if field { 400.0 } else { MEDIUM }).features("'tnum' 1"))
                         .color(rest)
