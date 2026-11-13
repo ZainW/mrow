@@ -6,6 +6,7 @@ use rune_kit::{Checkbox, Kit, SegmentedControl, TextInput};
 
 use crate::app::App;
 use crate::data::forge::Forge;
+use crate::data::inbox::{self, Kind, Level};
 use crate::data::prefs::{self, Appearance, Prefs};
 use crate::data::update::{self, Phase};
 use crate::ui::actions;
@@ -42,7 +43,7 @@ pub fn sheet(s: &App, p: &Pal, k: &Kit) -> Vec<El> {
     for forge in Forge::ALL {
         sections = sections.child(account(s, p, k, &prefs, forge));
     }
-    sections = sections.child(queue(p, k, &prefs)).child(appearance(p, k, &prefs)).child(updates(s, p, k, &prefs));
+    sections = sections.child(queue(p, k, &prefs)).child(notifications(p, k, &prefs)).child(appearance(p, k, &prefs)).child(updates(s, p, k, &prefs));
     let body = body.child(sections).modal_tx(true, |s: &mut App, tx: &mut Tx| close(s, tx));
     vec![
         el().key("settings-scrim").absolute(0.0, 0.0).w_full().h_full().fill(crate::ui::theme::shade(0.25)).a11y_hidden(),
@@ -209,9 +210,29 @@ fn queue(p: &Pal, k: &Kit, prefs: &Prefs) -> El {
             line(p, "Done looks back", stepper),
             line(p, "Sort", picker(p, "sort-order", SORT, if prefs.oldest_first { "oldest" } else { "newest" }, |p, id| p.oldest_first = id == "oldest")),
             line(p, "", check(k, "Show drafts in To review", prefs.show_drafts, |p| p.show_drafts = !p.show_drafts, false)),
-            line(p, "", check(k, "Notify me about new review requests", prefs.notify, |p| p.notify = !p.notify, false)),
         ],
     )
+}
+
+/// The master switch for banners, then each kind of event: a banner and the inbox, the inbox
+/// only, or nothing.
+fn notifications(p: &Pal, k: &Kit, prefs: &Prefs) -> El {
+    let mut rows = vec![line(p, "", check(k, "Show notifications", prefs.notify, |p| p.notify = !p.notify, false))];
+    let labels: Vec<&str> = Level::ALL.iter().map(|l| l.name()).collect();
+    for kind in Kind::ALL {
+        let current = Level::ALL.iter().position(|l| *l == inbox::level(&prefs.inbox_levels, kind));
+        let control = SegmentedControl::new(&labels, current)
+            .label(kind.label())
+            .fit()
+            .on_pick(move |_: &mut App, index: usize, _: &mut Tx| {
+                prefs::update(|p| {
+                    p.inbox_levels.insert(kind, Level::ALL[index]);
+                });
+            })
+            .build(k);
+        rows.push(line(p, kind.label(), el().key(format!("level-{kind:?}")).child(control)));
+    }
+    section(p, "Notifications", rows)
 }
 
 fn step(p: &Pal, key: &'static str, label: &'static str, enabled: bool, by: i64) -> El {

@@ -1695,6 +1695,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "zbus 5.19.0",
 ]
 
 [[package]]

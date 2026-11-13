@@ -2,6 +2,7 @@
 //! they stack. Everything here is worked out from the shared models, so it holds for both forges.
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
 use super::models::{Date, MergeRequest, PipelineStatus, ReviewState};
 
@@ -9,7 +10,7 @@ use super::models::{Date, MergeRequest, PipelineStatus, ReviewState};
 const QUIET_DAYS: i64 = 3;
 
 /// Where one of my merge requests stands, from my side.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Standing {
     /// Nothing blocks the merge.
     Ready,

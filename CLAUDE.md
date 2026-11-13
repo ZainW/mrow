@@ -12,7 +12,8 @@ Start site, pnpm).
     `scripts/docker-linux.sh` builds the same from macOS in Docker (`PLATFORM=linux/amd64` for
     x86_64). Headless renders on Linux need Mesa 24+ lavapipe (Ubuntu 24.04, not Debian bookworm).
   - Live read-only check: `target/debug/mrow --queue github` (or `gitlab`). Cursor agent check:
-    `target/debug/mrow --ask-models [question]`.
+    `target/debug/mrow --ask-models [question]`. `target/debug/mrow --banner` posts one fictional
+    notification and waits 15 seconds for a click.
   - Fictional scenes to PNG: `target/debug/mrow --scene <name> --size 1240x820 --snap <png>` (scenes
     include `to-review`, `changes`, `discussion`, `big-diff`, `ask`, `ask-chat`, `mine`, `mine-stack`). Headless runs stay
     offline; set `MROW_ONLINE_IMAGES=1` to fetch avatars and pictures. Write these to a scratch
@@ -49,7 +50,7 @@ Start site, pnpm).
   forge-agnostic: use `kind.name()`, `.noun()` and `.reference_mark()` instead of hard-coding
   "GitLab", "merge request" or "!".
 - Platform differences live in `src/data/paths.rs` (folders, tool lookup) and `src/platform.rs`
-  (Dock badge, appearance). Commands and their keys are one table, `COMMANDS` in
+  (Dock badge, appearance, notifications: rune-notify on macOS, D-Bus through `zbus` on Linux). Commands and their keys are one table, `COMMANDS` in
   `src/ui/actions.rs`: the macOS menu bar on macOS, `on_key` elsewhere. Write shortcut hints with
   Mac glyphs through `components::keys`, which relabels them off macOS.
 - `src/data/mine.rs` works out where each of my own merge requests stands (`Standing`), its

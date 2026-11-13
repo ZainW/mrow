@@ -25,7 +25,8 @@ enum Line {
 pub fn sidebar(s: &App, p: &Pal, k: &Kit, dark: bool) -> El {
     let store = &s.store;
     let mut c = col().key("sidebar").w(s.sidebar_width).h_full().min_h(0.0).fill(p.chrome);
-    c = c.child(el().px(8.0).pt(2.0).pb(6.0).child(account_switcher(store, p)));
+    let top = row().key("account-bar").w_full().gap(2.0).center_y().child(account_switcher(store, p)).child(crate::ui::inbox::bell(s, p));
+    c = c.child(el().px(8.0).pt(2.0).pb(6.0).child(top));
     c = c.child(mode_bar(store, p).px(8.0));
     let oldest = prefs::read(|p| p.oldest_first);
     let mut filter_row = row().key("filter-row").gap(2.0).pl(10.0).pr(6.0).pt(10.0).center_y().child(filter_box(s, p, k));
@@ -67,7 +68,9 @@ fn account_switcher(store: &Store, p: &Pal) -> El {
     let others: usize = store.forges().into_iter().filter(|f| *f != forge).map(|f| store.waiting_count(f)).sum();
     let mut r = row()
         .key("account")
-        .w_full()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
         .role("button")
         .label(format!("Account: {}", forge.name()))
         .h(38.0)

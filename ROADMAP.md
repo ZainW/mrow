@@ -13,6 +13,15 @@ Built so far: the Mine list with its sections, status marks and filters; the nex
 you; a reason line on review rows; merging (with a second press to confirm), "Merge When Ready"
 (the forge's own auto-merge), marking a draft ready, and merging a stack from the bottom up.
 
+The inbox behind the bell: a review asked of you or asked again, and on your own requests an
+approval, changes asked for, a failed pipeline, new threads, ready to merge (a held part too,
+once the one below merges), and merged or closed. It is worked out by comparing each refresh
+with the one before, so it only knows what the queue shows, and it can't tell a merge from a
+close unless the Done list or a lagging search says which. One row per event, kept 14 days (100
+at most); opening one goes to its request, and each can be marked done. Unread dots on Mine
+come from it, so your own pushes don't light them. Notifications come from the same events, one
+banner per request, with a Notify, Inbox or Off setting for each kind.
+
 Merging a stack: the bottom merges, then each part above it is moved onto the branch the stack
 lands on and merged once it's approved and green. It stops at the first part that needs a
 person, when a step fails, or after 45 minutes of waiting on one part. It runs only while Mrow
@@ -22,12 +31,14 @@ Still to build, in this order:
 
 1. Re-requesting a review after a push. (A nudge for quiet reviewers is parked: what it should
    do isn't settled.)
-2. The inbox behind the bell, and unread state that ignores your own pushes.
-3. Notifications for your own requests, per-event settings, and Linux.
+2. Inbox events the queue can't show: a reply in your thread and a mention. Opening an event
+   on the thing that changed (the thread, the job), snoozing, and one row per request.
+3. Actions on the banner (Open threads, Merge, Open job), and a waiting count on Linux.
 4. Stacks in the review lists, including parts you weren't asked to review (they aren't
    fetched today, so a stack only shows the parts Mrow already knows).
 5. Reason lines that need more than the queue has: "pushed 3 commits and asked again".
 
+Banners on Linux have been posted to a real daemon, but a click on one hasn't been tried.
 The GitLab side of Mine is written but hasn't been run against a GitLab host yet, and none of
 the merge actions have been run against a real request on either forge.
 
@@ -98,7 +109,8 @@ line ("Ines pushed 3 commits and asked again"), including reviews.
 - Silent: pipelines passing or running, comments in threads you are not in.
 - Per-event settings (notify, inbox only, off), one banner for several updates to the same
   request, and actions on the banner (Open threads, Merge, Open job).
-- Linux: notifications and a waiting count, which are macOS-only today.
+- Linux: banners go to the desktop's notification daemon over D-Bus (rune-notify has no Linux
+  side). A waiting count is still macOS-only.
 
 ## Later
 

@@ -58,9 +58,12 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     }
     if let Some(id) = platform::take_clicked() {
         tx.instant();
-        s.store.set_mode(QueueMode::ToReview);
-        s.store.select(Some(id));
-        rune_notify::bring_to_front();
+        match s.store.open_request(&id) {
+            Some(url) => {
+                let _ = tx.open_url(&url);
+            }
+            None => rune_notify::bring_to_front(),
+        }
         changed = true;
     }
     let (landed, effects) = s.store.poll(clock);
@@ -167,6 +170,8 @@ fn fixture(s: &mut App) {
     s.store.tabs = vec![];
     let first = s.store.visible_items().first().map(|m| m.id.clone());
     s.store.select(first);
+    // After the selection, which would deal with what's new on it.
+    s.store.inbox = fixtures::events();
 }
 
 fn scene_to_review(s: &mut App) {
@@ -322,6 +327,23 @@ fn scene_mine_waiting(s: &mut App) {
     s.store.select(first);
 }
 
+fn scene_inbox(s: &mut App) {
+    fixture(s);
+    s.inbox_open = true;
+}
+
+/// Mine, its rows dotted by what's new in the inbox.
+fn scene_inbox_mine(s: &mut App) {
+    scene_mine(s);
+    s.store.inbox = fixtures::events();
+}
+
+fn scene_inbox_empty(s: &mut App) {
+    fixture(s);
+    s.store.inbox.clear();
+    s.inbox_open = true;
+}
+
 fn scene_github(s: &mut App) {
     fixture(s);
     s.store.switch_forge(Forge::Github);
@@ -367,6 +389,9 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("mine-merging", scene_mine_merging),
     ("mine-work", scene_mine_work),
     ("mine-waiting", scene_mine_waiting),
+    ("inbox", scene_inbox),
+    ("inbox-mine", scene_inbox_mine),
+    ("inbox-empty", scene_inbox_empty),
     ("github", scene_github),
     ("empty", scene_empty),
     ("no-sidebar", scene_no_sidebar),
@@ -457,6 +482,22 @@ fn dump_queue(name: &str) -> i32 {
     0
 }
 
+/// `--banner`: posts one fictional banner and waits 15 seconds for a click on it, to check the
+/// desktop's notifications end to end.
+fn banner_check() {
+    use data::inbox::Notice;
+    #[cfg(target_os = "linux")]
+    platform::watch_banners(|token| println!("clicked, activation token: {}", if token.is_empty() { "none" } else { "given" }));
+    platform::notify(&[Notice {
+        request: "example".into(),
+        title: "Approved by Maya".into(),
+        body: "Ledger: page the export by cursor · harbor/ledger".into(),
+    }]);
+    println!("posted; click it within 15 seconds to check the click");
+    std::thread::sleep(std::time::Duration::from_secs(15));
+    println!("clicked request: {:?}", platform::take_clicked());
+}
+
 /// `--ask-models [question] [--agent cursor|claude|opencode|pi]`: a live check of an agent client
 /// that shares nothing: it opens a chat in an empty folder, lists the models and learns the
 /// chosen model's effort levels, then asks the question if there is one.
@@ -543,6 +584,9 @@ fn main() {
     if args.iter().any(|a| a == "--update") {
         std::process::exit(data::update::run_cli());
     }
+    if args.iter().any(|a| a == "--banner") {
+        return banner_check();
+    }
     if let Some(i) = args.iter().position(|a| a == "--queue") {
         let name = args.get(i + 1).cloned().unwrap_or_default();
         std::process::exit(dump_queue(&name));
@@ -598,6 +642,11 @@ fn main() {
         });
     for item in ui::actions::menu_items() {
         app = app.menu_item(item);
+    }
+    #[cfg(target_os = "linux")]
+    if !headless && !rune::is_headless() {
+        let handle = app.handle();
+        platform::watch_banners(move |token| handle.activate(token));
     }
     app.run();
 }

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::forge::Forge;
+use super::inbox;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -50,7 +51,15 @@ pub struct Prefs {
     pub refresh_minutes: i64,
     pub show_drafts: bool,
     pub oldest_first: bool,
+    /// Banners at all: the master switch over `inbox_levels`.
     pub notify: bool,
+    /// Per kind of event: a banner and the inbox, the inbox only, or off. Missing kinds take
+    /// their default.
+    pub inbox_levels: BTreeMap<inbox::Kind, inbox::Level>,
+    /// The inbox, newest first.
+    pub inbox: Vec<inbox::Event>,
+    /// What the last refresh saw, to tell what changed since. None before the first.
+    pub inbox_snapshot: Option<inbox::Snapshot>,
     /// Check for, download and stage new versions in the background (release builds only).
     pub auto_update: bool,
     pub sidebar_width: f64,
@@ -77,7 +86,8 @@ pub struct Prefs {
     pub tabs: Vec<String>,
     /// Files marked viewed: merge request → file → the diff's digest when marked.
     pub viewed_files: BTreeMap<String, BTreeMap<String, i64>>,
-    /// "id@seconds" for each request already seen, so only new requests notify.
+    /// "id@seconds" for each review request already notified about, from before the inbox: read
+    /// once to seed `inbox_snapshot`.
     pub known_requests: BTreeSet<String>,
     pub known_requests_initialized: bool,
     /// Ask: project path → local clone.
@@ -109,6 +119,9 @@ impl Default for Prefs {
             show_drafts: true,
             oldest_first: false,
             notify: true,
+            inbox_levels: BTreeMap::new(),
+            inbox: Vec::new(),
+            inbox_snapshot: None,
             auto_update: true,
             sidebar_width: 340.0,
             ask_width: 400.0,
