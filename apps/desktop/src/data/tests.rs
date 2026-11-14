@@ -1004,3 +1004,73 @@ mod context {
         assert!(diff::text_lines("").is_empty());
     }
 }
+
+mod ahead {
+    use chrono::{Duration, Utc};
+
+    use crate::data::forge::Forge;
+    use crate::data::prefs;
+    use crate::data::store::{Loadable, QueueMode, Store, stale_ahead};
+
+    fn store() -> Store {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        store.forge = Forge::Gitlab;
+        store.mode = QueueMode::ToReview;
+        store
+    }
+
+    fn ids(store: &Store) -> Vec<String> {
+        store.ahead().into_iter().map(|m| m.id).collect()
+    }
+
+    #[test]
+    fn the_next_request_loads_ahead_then_the_one_before() {
+        let mut store = store();
+        let list: Vec<String> = store.visible_items().into_iter().map(|m| m.id).collect();
+        assert!(list.len() >= 3);
+        // The first is loaded (the fixture has its changes); nothing comes before it.
+        store.select(Some(list[0].clone()));
+        assert_eq!(ids(&store), [list[1].clone()]);
+
+        // From the second: the third, and not the first, which is in already.
+        store.select(Some(list[1].clone()));
+        assert!(ids(&store).is_empty(), "nothing loads ahead until the selection's own details are in");
+        store.diffs.insert(list[1].clone(), Loadable::Loaded(Default::default()));
+        store.discussions.insert(list[1].clone(), Loadable::Failed("offline".into()));
+        assert_eq!(ids(&store), [list[2].clone()]);
+        store.diffs.remove(&list[0]);
+        assert_eq!(ids(&store), [list[2].clone()], "its threads are in, so it isn't asked for again");
+        store.discussions.remove(&list[0]);
+        assert_eq!(ids(&store), [list[2].clone(), list[0].clone()], "the next first, then the one before");
+
+        // One that's loading isn't asked for again, and two on their way are the most.
+        store.diffs.insert(list[2].clone(), Loadable::Loading);
+        assert_eq!(ids(&store), [list[0].clone()]);
+        for id in ["elsewhere-1", "elsewhere-2"] {
+            store.fetched_ahead.insert(id.into(), Utc::now());
+            store.diffs.insert(id.into(), Loadable::Loading);
+        }
+        assert!(ids(&store).is_empty());
+    }
+
+    #[test]
+    fn with_nothing_selected_the_first_loads_ahead() {
+        let mut store = store();
+        let first = store.visible_items()[0].id.clone();
+        store.selected_id = None;
+        assert!(ids(&store).is_empty(), "the first is loaded already");
+        store.diffs.remove(&first);
+        store.discussions.remove(&first);
+        assert_eq!(ids(&store), [first]);
+    }
+
+    #[test]
+    fn threads_loaded_ahead_go_stale_after_two_minutes() {
+        let now = Utc::now();
+        assert!(!stale_ahead(now - Duration::seconds(90), now));
+        assert!(stale_ahead(now - Duration::minutes(3), now));
+    }
+}
