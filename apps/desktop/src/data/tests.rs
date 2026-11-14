@@ -932,3 +932,113 @@ fn github_pending_review_comments_land_in_place_and_threads_keep_their_node() {
 fn verdicts_name_githubs_events() {
     assert_eq!(Verdict::ALL.map(Verdict::event), ["COMMENT", "REQUEST_CHANGES", "APPROVE"]);
 }
+
+#[test]
+fn github_addresses_each_kind_of_comment_by_its_thread() {
+    let reviews = r#"[{"id":300,"body":"Ship it.","user":{"login":"me"},"state":"APPROVED","submitted_at":"2026-01-03T00:00:00Z"}]"#;
+    let issue = r#"[{"id":40,"body":"Thanks!","user":{"login":"me"},"created_at":"2026-01-01T00:00:00Z"}]"#;
+    let threads = super::github::discussions_from_json(issue, GH_LINES, reviews, Default::default(), None).expect("comments decode");
+    let (accounts, ..) = crate::fixtures::load();
+    let item = accounts[&Forge::Github].open[0].clone();
+    let repo = format!("repos/{}", item.project_path);
+    let find = |id: &str| threads.iter().find(|t| t.id == id).unwrap();
+    let endpoint = |thread: &Discussion| super::github::note_endpoint(&item, thread, &thread.notes[0]).unwrap();
+
+    assert_eq!(endpoint(find("ic-40")), (format!("{repo}/issues/comments/40"), "PATCH"));
+    assert_eq!(endpoint(find("rc-10")), (format!("{repo}/pulls/comments/10"), "PATCH"));
+    assert_eq!(endpoint(find("rv-300")), (format!("{repo}/pulls/{}/reviews/300", item.iid), "PUT"));
+
+    let summary = find("rv-300");
+    assert!(!Forge::Github.deletes_note(summary), "a review's summary can only be edited");
+    assert!(Forge::Github.deletes_note(find("ic-40")) && Forge::Github.deletes_note(find("rc-10")));
+    let (verdict, written) = Forge::Github.written(summary, &summary.notes[0]);
+    assert_eq!((verdict.as_str(), written.as_str()), ("**Approved**\n\n", "Ship it."), "the editor holds what I wrote, not the verdict");
+}
+
+mod my_comments {
+    use std::rc::Rc;
+
+    use crate::data::models::{Discussion, MergeRequest};
+    use crate::data::prefs;
+    use crate::data::store::{Loadable, Store};
+
+    fn store() -> (Store, MergeRequest) {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        let item = store.visible_items()[0].clone();
+        (store, item)
+    }
+
+    fn threads(store: &Store, id: &str) -> Vec<Discussion> {
+        store.discussions[id].value().unwrap().as_ref().clone()
+    }
+
+    fn ids(store: &Store, id: &str) -> Vec<String> {
+        threads(store, id).into_iter().map(|t| t.id).collect()
+    }
+
+    fn body(store: &Store, id: &str, thread: &str, note: i64) -> Option<String> {
+        threads(store, id).into_iter().find(|t| t.id == thread)?.notes.into_iter().find(|n| n.id == note).map(|n| n.body)
+    }
+
+    /// Lands the forge's answer for `ticket`, which comes back from another thread.
+    fn land(store: &mut Store, ticket: u64) -> bool {
+        for _ in 0..400 {
+            store.poll(0.0);
+            if let Some(ok) = store.finished.remove(&ticket) {
+                return ok;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("no answer for ticket {ticket}");
+    }
+
+    #[test]
+    fn only_my_posted_comments_are_mine_to_change() {
+        let (store, item) = store();
+        let t1 = threads(&store, &item.id).into_iter().find(|t| t.id == "t1").unwrap();
+        let mine: Vec<i64> = t1.notes.iter().filter(|n| store.wrote(&item, n)).map(|n| n.id).collect();
+        assert_eq!(mine, [7], "not someone else's, and not a pending draft");
+    }
+
+    #[test]
+    fn an_edit_shows_at_once_and_goes_back_if_the_forge_refuses() {
+        let (mut store, item) = store();
+        let was = body(&store, &item.id, "t1", 7).unwrap();
+        let ticket = store.change_note_answered(&item, "t1", 7, Some("Fixed a typo.".into()), Err("no".into()));
+        assert_eq!(body(&store, &item.id, "t1", 7).as_deref(), Some("Fixed a typo."), "shown before the forge answers");
+        assert!(!land(&mut store, ticket));
+        assert_eq!(body(&store, &item.id, "t1", 7), Some(was));
+        assert!(store.toast.as_deref().is_some_and(|t| t.starts_with("Couldn’t save")));
+
+        let ticket = store.change_note_answered(&item, "t1", 7, Some("Fixed a typo.".into()), Ok(()));
+        assert!(land(&mut store, ticket));
+        assert_eq!(body(&store, &item.id, "t1", 7).as_deref(), Some("Fixed a typo."));
+    }
+
+    #[test]
+    fn deleting_the_only_comment_takes_its_thread_and_a_refusal_puts_it_back() {
+        let (mut store, item) = store();
+        let mut all = threads(&store, &item.id);
+        let mine = all[0].notes.iter().find(|n| n.id == 7).unwrap().clone();
+        // A comment of mine on its own.
+        all.insert(1, Discussion { id: "t9".into(), individual_note: true, notes: vec![crate::data::models::Note { id: 8, ..mine }], node_id: None });
+        store.discussions.insert(item.id.clone(), Loadable::Loaded(Rc::new(all)));
+        let before = ids(&store, &item.id);
+
+        let ticket = store.change_note_answered(&item, "t9", 8, None, Err("no".into()));
+        assert!(!ids(&store, &item.id).contains(&"t9".to_string()), "its thread goes with it");
+        assert!(!land(&mut store, ticket));
+        assert_eq!(ids(&store, &item.id), before, "back in its place");
+
+        // In a thread with others, only the comment goes.
+        let count = threads(&store, &item.id)[0].notes.len();
+        let ticket = store.change_note_answered(&item, "t1", 7, None, Ok(()));
+        assert!(land(&mut store, ticket));
+        let t1 = threads(&store, &item.id).into_iter().find(|t| t.id == "t1").unwrap();
+        assert!(!t1.notes.iter().any(|n| n.id == 7));
+        assert_eq!(t1.notes.len(), count - 1);
+    }
+}

@@ -618,8 +618,8 @@ fn threads_of(
             continue;
         }
         let verdict = match review.state.as_str() {
-            "APPROVED" => "**Approved**\n\n",
-            "CHANGES_REQUESTED" => "**Requested changes**\n\n",
+            "APPROVED" => APPROVED,
+            "CHANGES_REQUESTED" => CHANGES_REQUESTED,
             _ => "",
         };
         threads.push(Discussion {
@@ -909,4 +909,55 @@ pub fn submit_review(item: &MergeRequest, verdict: Verdict, body: &str) -> Resul
             cli().send(&format!("{}/reviews", base(item)), "POST", &review).map(drop)
         }
     }
+}
+
+// MARK: My comments
+//
+// A comment's kind is in its thread's id, as `threads_of` names them: `ic-` a conversation
+// comment, `rc-` a thread of comments on lines, `rv-` a review's summary. Each kind is its own
+// REST resource, addressed by the database id every note already carries.
+
+/// What `threads_of` puts in front of a review's summary to say its verdict.
+const APPROVED: &str = "**Approved**\n\n";
+const CHANGES_REQUESTED: &str = "**Requested changes**\n\n";
+
+/// Where a posted comment lives, and the method that edits it.
+pub fn note_endpoint(item: &MergeRequest, thread: &Discussion, note: &Note) -> Result<(String, &'static str), String> {
+    let repo = format!("repos/{}", item.project_path);
+    match thread.id.split('-').next().unwrap_or_default() {
+        "ic" => Ok((format!("{repo}/issues/comments/{}", note.id), "PATCH")),
+        "rc" => Ok((format!("{repo}/pulls/comments/{}", note.id), "PATCH")),
+        "rv" => Ok((format!("{}/reviews/{}", base(item), note.id), "PUT")),
+        _ => Err("GitHub didn't say what kind of comment this is. Refresh, then try again.".into()),
+    }
+}
+
+pub fn edit_note(item: &MergeRequest, thread: &Discussion, note: &Note, body: &str) -> Result<(), String> {
+    let (path, method) = note_endpoint(item, thread, note)?;
+    cli().send(&path, method, &json!({ "body": body })).map(drop)
+}
+
+pub fn delete_note(item: &MergeRequest, thread: &Discussion, note: &Note) -> Result<(), String> {
+    if !deletes_note(thread) {
+        return Err("GitHub can't delete a review's summary. Edit it instead.".into());
+    }
+    let (path, _) = note_endpoint(item, thread, note)?;
+    cli().api(&["-X".into(), "DELETE".into(), path], None).map(drop)
+}
+
+/// A review's summary stays: GitHub only lets it be edited.
+pub fn deletes_note(thread: &Discussion) -> bool {
+    !thread.id.starts_with("rv-")
+}
+
+/// The verdict in front of a review's summary, and the summary I wrote.
+pub fn written(thread: &Discussion, note: &Note) -> (String, String) {
+    if thread.id.starts_with("rv-") {
+        for verdict in [APPROVED, CHANGES_REQUESTED] {
+            if let Some(rest) = note.body.strip_prefix(verdict) {
+                return (verdict.to_string(), rest.to_string());
+            }
+        }
+    }
+    (String::new(), note.body.clone())
 }

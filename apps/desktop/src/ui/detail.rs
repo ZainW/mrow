@@ -1425,7 +1425,7 @@ fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussi
         if index > 0 {
             c = c.child(el().w_full().pl(46.0).child(rule(p)));
         }
-        c = c.child(note_view(s, p, k, item, note));
+        c = c.child(note_view(s, p, k, item, thread, note));
     }
     // A thread of my pending comments alone has nothing to reply to or resolve yet.
     let started = notes.iter().any(|n| !n.pending);
@@ -1484,7 +1484,7 @@ fn resolve_button(p: &Pal, item: &MergeRequest, thread: &Discussion, resolved: b
         .on_press(move |s: &mut App| s.store.set_resolved(&it, &th, !resolved))
 }
 
-fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, note: &Note) -> El {
+fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussion, note: &Note) -> El {
     let mut meta = row().w_full().gap(6.0).center_y().child(text(note.author.name.clone()).font(ui(13.0, SEMIBOLD)).color(p.text).single_line());
     meta = if note.pending {
         meta.child(pending_mark(p))
@@ -1502,19 +1502,87 @@ fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, note: &Note) -> El 
                 .child(text("New").font(ui(12.0, SEMIBOLD)).color(p.accent).single_line()),
         );
     }
-    let edit = DraftKey::Edit(item.id.clone(), note.id);
-    let editing = note.pending && s.editing.as_ref() == Some(&edit);
+    let edit = if note.pending { DraftKey::Edit(item.id.clone(), note.id) } else { DraftKey::Revise(item.id.clone(), thread.id.clone(), note.id) };
+    let mine = s.store.wrote(item, note);
+    let editing = (note.pending || mine) && s.editing.as_ref() == Some(&edit);
+    let confirming = mine && s.confirm_delete.as_ref().is_some_and(|(id, th, n)| id == &item.id && th == &thread.id && *n == note.id);
     if note.pending && item.is_open() && !editing {
         meta = meta.child(el().grow(1.0)).child(draft_buttons(s, p, item, note));
+    } else if mine && !editing && !confirming {
+        meta = meta.child(el().grow(1.0)).child(note_buttons(s, p, item, thread, note));
     }
     let body = if editing {
         composer(s, p, k, edit, "Edit your comment…", "Save", true)
     } else {
         markdown::markdown(s, p, k, Doc { key: &format!("note-{}", note.id), source: &note.body, base: item.project_url(), size: 14.0, serif: false })
     };
-    let r = row().w_full().padding(14.0).gap(10.0).items_start().child(avatar(s, p, &note.author, 22.0));
-    let r = r.child(col().gap(6.0).grow(1.0).shrink().min_w(0.0).child(meta).child(body));
-    if note.pending { r.fill(p.accent.alpha(0.05)) } else { r }
+    let mut content = col().gap(6.0).grow(1.0).shrink().min_w(0.0).child(meta).child(body);
+    if confirming {
+        content = content.child(delete_confirmation(s, p, item, thread, note));
+    }
+    let r = row().w_full().padding(14.0).gap(10.0).items_start().child(avatar(s, p, &note.author, 22.0)).child(content);
+    if note.pending {
+        r.fill(p.accent.alpha(0.05))
+    } else if mine {
+        // Edit and Delete show while the pointer is over the comment, or Tab reaches them.
+        r.hover_group().hover_motion(rune::Anim::INSTANT, rune::Anim::INSTANT)
+    } else {
+        r
+    }
+}
+
+/// Edit and Delete on a posted comment of mine, shown on hover. A GitHub review's summary can
+/// only be edited.
+fn note_buttons(s: &App, p: &Pal, item: &MergeRequest, thread: &Discussion, note: &Note) -> El {
+    let idle = s.store.busy.is_none();
+    let (id, th, n) = (item.id.clone(), thread.id.clone(), note.id);
+    let edit = ChromeButton::new(format!("edit-{n}"), "Edit").icon(&I::PENCIL_SQUARE, 13.0).enabled(idle).build(p).on_press_tx({
+        let (id, th) = (id.clone(), th.clone());
+        move |s: &mut App, tx: &mut Tx| {
+            tx.instant();
+            s.edit_posted(&id, &th, n);
+            tx.focus(draft_field_key(&DraftKey::Revise(id.clone(), th.clone(), n)), false);
+        }
+    });
+    let mut buttons = row().gap(2.0).mt(-6.0).mb(-6.0).group_opacity(0.0, 1.0).child(edit);
+    if item.kind().deletes_note(thread) {
+        let delete =
+            ChromeButton::new(format!("delete-{n}"), "Delete").icon(&I::TRASH, 13.0).enabled(idle).build(p).on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                // Deleting can't be taken back, so it asks first, as merging does.
+                tx.instant();
+                s.confirm_delete = Some((id.clone(), th.clone(), n));
+                tx.focus(format!("{}/delete", confirm_delete_key(n)), false);
+            });
+        buttons = buttons.child(delete);
+    }
+    buttons
+}
+
+fn confirm_delete_key(note: i64) -> String {
+    format!("confirm-delete-{note}")
+}
+
+/// The second press that deletes a posted comment, under its text.
+fn delete_confirmation(s: &App, p: &Pal, item: &MergeRequest, thread: &Discussion, note: &Note) -> El {
+    let idle = s.store.busy.is_none();
+    let (id, th, n) = (item.id.clone(), thread.id.clone(), note.id);
+    let only = thread.notes.iter().filter(|n| !n.system).count() == 1 && !thread.individual_note;
+    let question = if only { "Delete this comment and its thread? This can’t be undone." } else { "Delete this comment? This can’t be undone." };
+    let cancel = action_button(p, "cancel", None, "Cancel", false, true).on_press_tx(|s: &mut App, tx: &mut Tx| {
+        tx.instant();
+        s.confirm_delete = None;
+    });
+    let delete = action_button(p, "delete", Some(&I::TRASH), "Delete", true, idle);
+    let delete = if idle { delete.fill(p.red) } else { delete };
+    row()
+        .key(confirm_delete_key(n))
+        .w_full()
+        .mt(4.0)
+        .gap(8.0)
+        .center_y()
+        .child(text(question).font(ui(12.0, 400.0)).color(p.secondary).wrap().grow(1.0).shrink().min_w(0.0))
+        .child(cancel)
+        .child(delete.on_press(move |s: &mut App| s.delete_posted(&id, &th, n)))
 }
 
 /// "Pending": a comment held in my review, which nobody else sees until it's submitted.
@@ -1560,6 +1628,7 @@ fn composer_key(key: &DraftKey) -> String {
         DraftKey::Line(id, file, line) => format!("line-{id}-{}-{line}", crate::data::models::fnv1a(file)),
         DraftKey::Edit(id, note) => format!("edit-{id}-{note}"),
         DraftKey::Summary(id) => format!("summary-{id}"),
+        DraftKey::Revise(id, thread, note) => format!("revise-{id}-{thread}-{note}"),
     }
 }
 
@@ -1610,7 +1679,7 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
         .radius(10.0)
         .padding(if compact { 8.0 } else { 12.0 });
     let hint = match &key {
-        DraftKey::Edit(..) => "⌘↩ to save",
+        DraftKey::Edit(..) | DraftKey::Revise(..) => "⌘↩ to save",
         _ if reviewing => "⌘↩ to add to your review",
         _ => "⌘↩ to post",
     };
@@ -1634,7 +1703,7 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
             .child(action_button(p, "hold", None, "Start a Review", false, can_post).on_press(hold))
             .child(action_button(p, "post", Some(&I::BUBBLE_TEXT), submit, true, can_post).on_press(post)),
         _ => {
-            let glyph = (!matches!(key, DraftKey::Edit(..))).then_some(&I::BUBBLE_TEXT);
+            let glyph = (!matches!(key, DraftKey::Edit(..) | DraftKey::Revise(..))).then_some(&I::BUBBLE_TEXT);
             buttons.child(action_button(p, "post", glyph, submit, true, can_post).on_press(post))
         }
     };
@@ -1644,7 +1713,7 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
 fn cancel(s: &mut App, key: &DraftKey) {
     match key {
         DraftKey::Comment(_) | DraftKey::Summary(_) => {}
-        DraftKey::Edit(..) => {
+        DraftKey::Edit(..) | DraftKey::Revise(..) => {
             s.drafts.remove(key);
             if s.editing.as_ref() == Some(key) {
                 s.editing = None;

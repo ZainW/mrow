@@ -33,13 +33,20 @@ pub enum DraftKey {
     Edit(String, i64),
     /// The summary of the review I'm submitting.
     Summary(String),
+    /// A posted comment of mine being edited: (merge request, thread, note id).
+    Revise(String, String, i64),
 }
 
 impl DraftKey {
     /// The merge request it's written on.
     pub fn item(&self) -> &str {
         match self {
-            DraftKey::Comment(id) | DraftKey::Reply(id, _) | DraftKey::Line(id, ..) | DraftKey::Edit(id, _) | DraftKey::Summary(id) => id,
+            DraftKey::Comment(id)
+            | DraftKey::Reply(id, _)
+            | DraftKey::Line(id, ..)
+            | DraftKey::Edit(id, _)
+            | DraftKey::Summary(id)
+            | DraftKey::Revise(id, ..) => id,
         }
     }
 }
@@ -69,6 +76,9 @@ pub struct App {
     pub replying: HashSet<String>,
     /// The pending comment open for editing, as a `DraftKey::Edit`.
     pub editing: Option<DraftKey>,
+    /// A posted comment of mine waiting on a second press to delete: (merge request, thread,
+    /// note id). Deleting can't be taken back.
+    pub confirm_delete: Option<(String, String, i64)>,
     /// The merge request whose review panel is open, under the bar's review button.
     pub review_panel: Option<String>,
     /// What was posted and is waiting on its ticket, so the draft clears only when it lands.
@@ -174,6 +184,7 @@ impl Default for App {
             line_comment: None,
             replying: HashSet::new(),
             editing: None,
+            confirm_delete: None,
             review_panel: None,
             posting: HashMap::new(),
             copied: None,
@@ -292,6 +303,16 @@ impl App {
             }
             // Sent with its verdict, by `submit_review`.
             DraftKey::Summary(_) => return,
+            DraftKey::Revise(id, thread, note) => {
+                let Some(item) = self.store.item(id).cloned() else { return };
+                // Shown at once: the box closes now, and opens again with the text if it fails.
+                self.editing = None;
+                if self.posted_note(id, thread, *note).is_some_and(|(_, written)| written == body) {
+                    self.drafts.remove(&key);
+                    return;
+                }
+                self.store.edit_note(&item, thread, *note, body)
+            }
         };
         self.posting.insert(ticket, key);
     }
@@ -307,6 +328,31 @@ impl App {
         let key = DraftKey::Edit(id.to_string(), note.id);
         self.drafts.insert(key.clone(), TextEdit::new(note.body.clone()));
         self.editing = Some(key);
+    }
+
+    /// A posted comment on `id`, as last loaded: the note, and the text I wrote in it.
+    pub fn posted_note(&self, id: &str, thread: &str, note: i64) -> Option<(Note, String)> {
+        let item = self.store.item(id)?;
+        let threads = self.store.discussions.get(id).and_then(|l| l.value())?;
+        let thread = threads.iter().find(|t| t.id == thread)?;
+        let note = thread.notes.iter().find(|n| !n.pending && n.id == note)?;
+        Some((note.clone(), item.kind().written(thread, note).1))
+    }
+
+    /// Opens a posted comment of mine for editing, what I wrote in the box.
+    pub fn edit_posted(&mut self, id: &str, thread: &str, note: i64) {
+        let Some((_, written)) = self.posted_note(id, thread, note) else { return };
+        let key = DraftKey::Revise(id.to_string(), thread.to_string(), note);
+        self.drafts.insert(key.clone(), TextEdit::new(written));
+        self.confirm_delete = None;
+        self.editing = Some(key);
+    }
+
+    /// Deletes a posted comment of mine, after its confirmation.
+    pub fn delete_posted(&mut self, id: &str, thread: &str, note: i64) {
+        self.confirm_delete = None;
+        let Some(item) = self.store.item(id).cloned() else { return };
+        self.store.delete_note(&item, thread, note);
     }
 
     /// Submits my review of `id` with `verdict` and the summary written in the panel. The panel
@@ -402,6 +448,10 @@ impl App {
             let ok = self.store.finished.remove(ticket).unwrap_or(false);
             let Some(key) = self.posting.remove(ticket) else { continue };
             if !ok {
+                // An edit closed its box at once; it opens again with the text, to try again.
+                if matches!(key, DraftKey::Revise(..)) && self.editing.is_none() {
+                    self.editing = Some(key);
+                }
                 continue;
             }
             self.drafts.remove(&key);
@@ -424,7 +474,7 @@ impl App {
                         self.review_panel = None;
                     }
                 }
-                DraftKey::Comment(_) => {}
+                DraftKey::Comment(_) | DraftKey::Revise(..) => {}
             }
         }
         !done.is_empty() || !landed.is_empty()

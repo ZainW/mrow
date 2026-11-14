@@ -232,6 +232,20 @@ fn scene_edit_draft(s: &mut App) {
     }
 }
 
+/// A posted comment of mine open for editing, in the conversation.
+fn scene_edit_comment(s: &mut App) {
+    scene_discussion(s);
+    let Some(id) = s.store.selected_id.clone() else { return };
+    s.edit_posted(&id, "t1", 7);
+}
+
+/// A posted comment of mine asking to be deleted, after the first press.
+fn scene_delete_comment(s: &mut App) {
+    scene_discussion(s);
+    let Some(id) = s.store.selected_id.clone() else { return };
+    s.confirm_delete = Some((id, "t1".into(), 7));
+}
+
 fn scene_tabs(s: &mut App) {
     fixture(s);
     let ids: Vec<String> = s.store.visible_items().iter().take(2).map(|m| m.id.clone()).collect();
@@ -430,6 +444,8 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("thread-line", scene_thread_line),
     ("submit-review", scene_submit_review),
     ("edit-draft", scene_edit_draft),
+    ("edit-comment", scene_edit_comment),
+    ("delete-comment", scene_delete_comment),
     ("tabs", scene_tabs),
     ("line-comment", scene_line_comment),
     ("reviewed", scene_reviewed),

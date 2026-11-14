@@ -227,6 +227,40 @@ impl Forge {
             Forge::Github => github::submit_review(item, verdict, body),
         }
     }
+
+    // My posted comments, edited or deleted in place.
+
+    /// Replaces the text of a comment of mine. `body` is what I wrote: see `written`.
+    pub fn edit_note(self, item: &MergeRequest, thread: &Discussion, note: &Note, body: &str) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::edit_note(item, note, body),
+            Forge::Github => github::edit_note(item, thread, note, body),
+        }
+    }
+
+    pub fn delete_note(self, item: &MergeRequest, thread: &Discussion, note: &Note) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::delete_note(item, note),
+            Forge::Github => github::delete_note(item, thread, note),
+        }
+    }
+
+    /// Whether a comment of mine can be deleted. A GitHub review's summary can only be edited.
+    pub fn deletes_note(self, thread: &Discussion) -> bool {
+        match self {
+            Forge::Gitlab => true,
+            Forge::Github => github::deletes_note(thread),
+        }
+    }
+
+    /// A note's text split into what the app put in front of it (a GitHub review's verdict)
+    /// and what I wrote, which is what its editor holds.
+    pub fn written(self, thread: &Discussion, note: &Note) -> (String, String) {
+        match self {
+            Forge::Gitlab => (String::new(), note.body.clone()),
+            Forge::Github => github::written(thread, note),
+        }
+    }
 }
 
 /// One forge's review queue, as fetched.

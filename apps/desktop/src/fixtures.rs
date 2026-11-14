@@ -622,8 +622,8 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
     );
     let on_line = at("src/export/job.rs", 28);
     let mut threads = HashMap::new();
-    // Open and resolved threads, with Robin's review under way: a reply held in the first
-    // thread, a new one on a line, and one on the whole change.
+    // Open and resolved threads, with Robin's review under way: a reply posted and one held in
+    // the first thread, a new one on a line, and one on the whole change.
     threads.insert(
         first.id.clone(),
         vec![
@@ -639,6 +639,8 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
                         1,
                         Some(on_line.clone()),
                     ),
+                    // Robin's own, posted: theirs to edit or delete.
+                    note(7, ("robin", "Robin Okafor"), "Fair, I'd missed that it's buffered.", 1, Some(on_line.clone())),
                     draft(21, "A one-line comment there would settle it for the next reader too.", Some(on_line)),
                 ],
                 node_id: None,

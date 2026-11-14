@@ -359,6 +359,11 @@ pub fn on_key(s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
             s.review_panel = None;
             true
         }
+        rune::Key::Escape if s.confirm_delete.is_some() => {
+            tx.instant();
+            s.confirm_delete = None;
+            true
+        }
         rune::Key::Escape if s.confirm.is_some() => {
             s.confirm = None;
             true

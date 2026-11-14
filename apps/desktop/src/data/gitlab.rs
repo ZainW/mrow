@@ -714,3 +714,15 @@ pub fn submit_review(item: &MergeRequest, verdict: Verdict, body: &str) -> Resul
         }
     }
 }
+
+// MARK: My comments
+//
+// A note is addressed by its own id under the merge request, in a thread or not.
+
+pub fn edit_note(item: &MergeRequest, note: &Note, body: &str) -> Result<(), String> {
+    cli().send(&format!("{}/notes/{}", base(item), note.id), "PUT", &json!({ "body": body })).map(drop)
+}
+
+pub fn delete_note(item: &MergeRequest, note: &Note) -> Result<(), String> {
+    cli().api(&["-X".into(), "DELETE".into(), format!("{}/notes/{}", base(item), note.id)], None).map(drop)
+}

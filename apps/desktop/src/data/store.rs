@@ -177,6 +177,16 @@ pub enum Msg {
         reload: Option<MergeRequest>,
         ticket: Option<u64>,
     },
+    /// A comment of mine was edited or deleted, already shown so; `was` is its thread before,
+    /// `at` its place in the list, to put back if the forge said no.
+    NoteChanged {
+        id: String,
+        was: Discussion,
+        at: usize,
+        deleted: bool,
+        ticket: u64,
+        result: Result<(), String>,
+    },
 }
 
 pub struct Store {
@@ -1144,6 +1154,102 @@ impl Store {
         self.perform("Submitting your review…", done, true, Some(item.clone()), move || it.kind().submit_review(&it, verdict, &body))
     }
 
+    // MARK: My comments
+
+    /// Whether I wrote a posted, non-system note, so I can edit or delete it.
+    pub fn wrote(&self, item: &MergeRequest, note: &Note) -> bool {
+        let me = self.accounts.get(&item.forge).and_then(|a| a.me.as_ref());
+        !note.system && !note.pending && me.is_some_and(|me| me.username == note.author.username)
+    }
+
+    /// Replaces the text of a comment of mine with `body` (what I wrote, without the verdict a
+    /// review's summary shows). It shows so at once, and goes back if the forge refuses. The
+    /// ticket's result lands in `finished`.
+    pub fn edit_note(&mut self, item: &MergeRequest, thread: &str, note: i64, body: String) -> u64 {
+        let it = item.clone();
+        let edit = body.clone();
+        self.change_note(item, thread, note, Some(body), move |th, n| it.kind().edit_note(&it, th, n, &edit))
+    }
+
+    /// Deletes a comment of mine, and its thread with it when it was the only one.
+    pub fn delete_note(&mut self, item: &MergeRequest, thread: &str, note: i64) -> u64 {
+        let it = item.clone();
+        self.change_note(item, thread, note, None, move |th, n| it.kind().delete_note(&it, th, n))
+    }
+
+    /// Shows the edit (`Some`) or deletion (`None`) at once and runs `work` on the thread and
+    /// note as they stood. Snapshots and benchmarks show it without asking the forge.
+    fn change_note(
+        &mut self,
+        item: &MergeRequest,
+        thread: &str,
+        note: i64,
+        body: Option<String>,
+        work: impl FnOnce(&Discussion, &Note) -> Result<(), String> + Send + 'static,
+    ) -> u64 {
+        let ticket = self.ticket();
+        let deleted = body.is_none();
+        let Some((was, at, before)) = self.show_note_change(item, thread, note, body) else {
+            self.finished.insert(ticket, false);
+            return ticket;
+        };
+        if self.offline {
+            self.finished.insert(ticket, true);
+            return ticket;
+        }
+        let id = item.id.clone();
+        self.bg.spawn(move || {
+            let result = work(&was, &before);
+            Msg::NoteChanged { id, was, at, deleted, ticket, result }
+        });
+        ticket
+    }
+
+    /// Puts an edit or deletion into the loaded threads: the thread as it was, its place, and
+    /// the note as it was. None when the note isn't there.
+    fn show_note_change(&mut self, item: &MergeRequest, thread: &str, note: i64, body: Option<String>) -> Option<(Discussion, usize, Note)> {
+        let Some(Loadable::Loaded(threads)) = self.discussions.get(&item.id) else { return None };
+        let at = threads.iter().position(|t| t.id == thread)?;
+        let was = threads[at].clone();
+        let index = was.notes.iter().position(|n| n.id == note && !n.pending)?;
+        let before = was.notes[index].clone();
+        let mut threads = threads.as_ref().clone();
+        match body {
+            Some(body) => {
+                let (verdict, _) = item.kind().written(&was, &before);
+                threads[at].notes[index].body = format!("{verdict}{body}");
+            }
+            None => {
+                threads[at].notes.remove(index);
+                if threads[at].notes.iter().all(|n| n.system) {
+                    threads.remove(at);
+                }
+            }
+        }
+        self.discussions.insert(item.id.clone(), Loadable::Loaded(Rc::new(threads)));
+        Some((was, at, before))
+    }
+
+    /// Puts a thread back as it was before an edit or deletion the forge refused.
+    fn restore_thread(&mut self, id: &str, was: Discussion, at: usize) {
+        let Some(Loadable::Loaded(threads)) = self.discussions.get(id) else { return };
+        let mut threads = threads.as_ref().clone();
+        match threads.iter().position(|t| t.id == was.id) {
+            Some(i) => threads[i] = was,
+            None => threads.insert(at.min(threads.len()), was),
+        }
+        self.discussions.insert(id.to_string(), Loadable::Loaded(Rc::new(threads)));
+    }
+
+    /// `change_note` with the forge's answer given, for the self-tests.
+    #[cfg(test)]
+    pub fn change_note_answered(&mut self, item: &MergeRequest, thread: &str, note: i64, body: Option<String>, answer: Result<(), String>) -> u64 {
+        self.offline = false;
+        let ticket = self.change_note(item, thread, note, body, move |_, _| answer);
+        self.offline = true;
+        ticket
+    }
+
     fn ticket(&mut self) -> u64 {
         self.next_ticket += 1;
         self.next_ticket
@@ -1244,6 +1350,21 @@ impl Store {
                     }
                     if let Some(t) = ticket {
                         self.finished.insert(t, ok);
+                    }
+                }
+                Msg::NoteChanged { id, was, at, deleted, ticket, result } => {
+                    self.finished.insert(ticket, result.is_ok());
+                    match result {
+                        Ok(()) => self.show(if deleted { "Deleted your comment" } else { "Saved your comment" }),
+                        Err(e) => {
+                            self.restore_thread(&id, was, at);
+                            let verb = if deleted { "delete" } else { "save" };
+                            self.show(&format!("Couldn’t {verb} your comment: {e}"));
+                        }
+                    }
+                    // Either way, the forge has the last word.
+                    if let Some(item) = self.item(&id).cloned() {
+                        self.load_discussions(&item);
                     }
                 }
             }
