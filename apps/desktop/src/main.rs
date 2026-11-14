@@ -22,6 +22,7 @@ use data::ask;
 use data::forge::Forge;
 use data::prefs;
 use data::store::{QueueMode, Viewed};
+use ui::detail::{Jump, Tab};
 
 /// Set for headless runs (snapshots, trees, scripts), which use fixtures and stay offline.
 static HEADLESS: AtomicBool = AtomicBool::new(false);
@@ -71,8 +72,8 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     changed |= s.settle_posts();
     changed |= s.images.poll();
     changed |= fold_viewed(s);
-    if let Some(part) = s.pending_jump.take() {
-        ui::detail::jump(s, tx, part);
+    if let Some(jump) = s.pending_jump.take() {
+        ui::detail::go(s, tx, jump);
         changed = true;
     }
     if s.ask_visible {
@@ -188,12 +189,29 @@ fn scene_to_review(s: &mut App) {
 
 fn scene_changes(s: &mut App) {
     fixture(s);
-    s.pending_jump = Some(ui::detail::Part::Changes);
+    s.pending_jump = Some(Jump::Tab(Tab::Changes));
 }
 
 fn scene_discussion(s: &mut App) {
     fixture(s);
-    s.pending_jump = Some(ui::detail::Part::Conversation);
+    s.pending_jump = Some(Jump::Tab(Tab::Conversation));
+}
+
+/// From the overview to the first file not viewed yet, as its "Start with" button goes: the
+/// first file is viewed, so it lands on the second.
+fn scene_start_file(s: &mut App) {
+    fixture(s);
+    let Some(item) = s.store.selected().cloned() else { return };
+    if let Some(file) = s.store.diffs.get(&item.id).and_then(|l| l.value()).map(|f| f[0].clone()) {
+        s.store.set_viewed(true, &file, &item);
+    }
+    s.pending_jump = Some(Jump::File(ui::detail::first_unviewed(s, &item)));
+}
+
+/// From the conversation to the line its thread on a line was left on, in the changes.
+fn scene_thread_line(s: &mut App) {
+    scene_discussion(s);
+    s.pending_jump = Some(Jump::Line("t1".into()));
 }
 
 fn scene_tabs(s: &mut App) {
@@ -390,6 +408,8 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("to-review", scene_to_review),
     ("changes", scene_changes),
     ("discussion", scene_discussion),
+    ("start-file", scene_start_file),
+    ("thread-line", scene_thread_line),
     ("tabs", scene_tabs),
     ("line-comment", scene_line_comment),
     ("reviewed", scene_reviewed),

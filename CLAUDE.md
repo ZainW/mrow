@@ -16,7 +16,8 @@ Start site, pnpm).
     `target/debug/mrow --ask-models [question]`. `target/debug/mrow --banner` posts one fictional
     notification and waits 15 seconds for a click.
   - Fictional scenes to PNG: `target/debug/mrow --scene <name> --size 1240x820 --snap <png>` (scenes
-    include `to-review`, `changes`, `discussion`, `big-diff`, `ask`, `ask-chat`, `mine`, `mine-stack`). Headless runs stay
+    include `to-review`, `changes`, `discussion` (a review's three tabs), `start-file` and `thread-line`
+    (jumps into the Changes tab), `big-diff`, `ask`, `ask-chat`, `mine`, `mine-stack`). Headless runs stay
     offline; set `MROW_ONLINE_IMAGES=1` to fetch avatars and pictures. Write these to a scratch
     dir, never into the repo.
   - Frame timings: `cargo build --profile perf --features profile`, then run with

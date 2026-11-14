@@ -32,6 +32,8 @@ pub struct ChromeButton {
     spinning: bool,
     width: Option<f32>,
     pad: f32,
+    count: Option<usize>,
+    dot: bool,
 }
 
 impl ChromeButton {
@@ -48,6 +50,8 @@ impl ChromeButton {
             spinning: false,
             width: None,
             pad: 10.0,
+            count: None,
+            dot: false,
         }
     }
     pub fn icon(mut self, i: &'static Icon, size: f32) -> Self {
@@ -77,6 +81,16 @@ impl ChromeButton {
     }
     pub fn width(mut self, w: f32) -> Self {
         self.width = Some(w);
+        self
+    }
+    /// A number after a text button's title, dimmer than it: how many things it shows.
+    pub fn count(mut self, n: usize) -> Self {
+        self.count = Some(n);
+        self
+    }
+    /// An accent dot at a text button's end: something new behind it.
+    pub fn dot(mut self, on: bool) -> Self {
+        self.dot = on;
         self
     }
     /// The space either side of a text button's title; 10 unless several sit in a tight row.
@@ -116,6 +130,12 @@ impl ChromeButton {
                         .group_color(hovered)
                         .single_line(),
                 );
+                if let Some(n) = self.count {
+                    b = b.child(text(n.to_string()).font(ui(13.0, MEDIUM).features("'tnum' 1")).color(p.tertiary).single_line());
+                }
+                if self.dot {
+                    b = b.child(el().size(5.0, 5.0).radius(2.5).fill(p.accent));
+                }
                 if let Some(h) = &self.hint {
                     b = b.child(el().grow(1.0).min_w(14.0)).child(text(h.clone()).font(mono(12.0, 400.0)).color(p.tertiary));
                 }
@@ -218,6 +238,25 @@ pub fn action_button(p: &Pal, key: impl Into<String>, glyph: Option<&'static Ico
     } else {
         b.disabled(true)
     }
+}
+
+/// [`action_button`]'s plain look with its icon alone, for a tight row: its title is its label
+/// and its tip.
+pub fn action_icon_button(p: &Pal, key: impl Into<String>, glyph: &'static Icon, title: &str) -> El {
+    row()
+        .key(key.into())
+        .role("button")
+        .label(title.to_string())
+        .help(title.to_string())
+        .size(30.0, 30.0)
+        .center()
+        .radius(8.0)
+        .fill(p.elevated)
+        .border(1.0, p.line)
+        .child(icon(glyph, 13.0).color(p.text))
+        .hover(p.hover)
+        .press(p.hover)
+        .press_scale(0.98)
 }
 
 /// A small rounded tag: branches, labels, states.

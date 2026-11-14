@@ -6,7 +6,7 @@ use rune::{MenuItem, Tx};
 use crate::app::App;
 use crate::data::prefs;
 use crate::data::store::QueueMode;
-use crate::ui::detail::Part;
+use crate::ui::detail::{Jump, Tab};
 
 pub fn refresh(s: &mut App, _: &mut Tx) {
     s.store.refresh();
@@ -159,15 +159,15 @@ fn account(s: &mut App, tx: &mut Tx, index: usize) {
     }
 }
 
-fn go(s: &mut App, tx: &mut Tx, part: Part) {
-    crate::ui::detail::jump(s, tx, part);
+fn detail_tab(s: &mut App, tx: &mut Tx, tab: Tab) {
+    crate::ui::detail::go(s, tx, Jump::Tab(tab));
 }
 
-fn next_section(s: &mut App, tx: &mut Tx) {
+fn next_file(s: &mut App, tx: &mut Tx) {
     crate::ui::detail::step(s, tx, 1);
 }
 
-fn previous_section(s: &mut App, tx: &mut Tx) {
+fn previous_file(s: &mut App, tx: &mut Tx) {
     crate::ui::detail::step(s, tx, -1);
 }
 
@@ -247,13 +247,13 @@ const COMMANDS: &[Command] = &[
     Command { other: Some("alt+1"), ..cmd(V, "account-0", "Account 1", Some("ctrl+1"), |s, tx| account(s, tx, 0)) },
     Command { other: Some("alt+2"), ..cmd(V, "account-1", "Account 2", Some("ctrl+2"), |s, tx| account(s, tx, 1)) },
     sep("View"),
-    cmd(V, "go-top", "Overview", Some("cmd+alt+1"), |s, tx| go(s, tx, Part::Ask)),
-    cmd(V, "go-changes", "Changes", Some("cmd+alt+2"), |s, tx| go(s, tx, Part::Changes)),
-    cmd(V, "go-conversation", "Conversation", Some("cmd+alt+3"), |s, tx| go(s, tx, Part::Conversation)),
+    cmd(V, "go-top", "Overview", Some("cmd+alt+1"), |s, tx| detail_tab(s, tx, Tab::Overview)),
+    cmd(V, "go-changes", "Changes", Some("cmd+alt+2"), |s, tx| detail_tab(s, tx, Tab::Changes)),
+    cmd(V, "go-conversation", "Conversation", Some("cmd+alt+3"), |s, tx| detail_tab(s, tx, Tab::Conversation)),
     // J and K, matched in `on_key` on every platform: a menu key equivalent would take the letter
     // from text fields.
-    cmd(V, "next-section", "Next Section", None, next_section),
-    cmd(V, "previous-section", "Previous Section", None, previous_section),
+    cmd(V, "next-section", "Next File", None, next_file),
+    cmd(V, "previous-section", "Previous File", None, previous_file),
     sep("View"),
     cmd(V, "sidebar", "Toggle Sidebar", Some("cmd+ctrl+s"), toggle_sidebar),
     cmd(V, "ask", "Ask an Agent", Some("cmd+l"), toggle_ask),
@@ -310,13 +310,13 @@ fn chords() -> &'static [(rune::Chord, fn(&mut App, &mut Tx))] {
     })
 }
 
-/// J and K step through the page's parts. Plain letters: Rune offers them to a focused text
+/// J and K step through the changes file by file. Plain letters: Rune offers them to a focused text
 /// field first and to `on_key` only when no field takes them, so they never steal typing.
 const NEXT_SECTION: rune::Chord = rune::Chord::new(rune::ChordKey::Char('j'));
 const PREVIOUS_SECTION: rune::Chord = rune::Chord::new(rune::ChordKey::Char('k'));
 
 /// Keys the menu bar doesn't carry: ⌃Tab between tabs, Escape out of the settings sheet, J and
-/// K between the page's parts, and off macOS every command's keys.
+/// K between the changed files, and off macOS every command's keys.
 pub fn on_key(s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
     match &ev.key {
         rune::Key::Tab if ev.mods.ctrl => {

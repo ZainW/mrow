@@ -38,10 +38,12 @@ pub struct App {
     /// The inbox's popover, under the bell.
     pub inbox_open: bool,
     pub filter: TextEdit,
-    /// Which part of each merge request's page is being read, for the contents rail and J/K.
+    /// The tab each merge request was last left on, for this session.
+    pub detail_tabs: HashMap<String, crate::ui::detail::Tab>,
+    /// Where the reader is in each merge request's changes, for J and K.
     pub spies: HashMap<String, crate::ui::detail::Spy>,
-    /// A place to scroll the page to on the next frame, for callers without a `Tx` (scenes).
-    pub pending_jump: Option<crate::ui::detail::Part>,
+    /// A tab, or a place on one, to go to on the next frame, for callers without a `Tx` (scenes).
+    pub pending_jump: Option<crate::ui::detail::Jump>,
     pub sidebar_width: f32,
     /// The width when a resize drag started.
     pub drag_from: f32,
@@ -145,6 +147,7 @@ impl Default for App {
             settings_open: false,
             inbox_open: false,
             filter: TextEdit::new(""),
+            detail_tabs: HashMap::new(),
             spies: HashMap::new(),
             pending_jump: None,
             sidebar_width: p.sidebar_width as f32,
@@ -183,6 +186,11 @@ impl Default for App {
 }
 
 impl App {
+    /// The tab the merge request `id` shows.
+    pub fn tab(&self, id: &str) -> crate::ui::detail::Tab {
+        self.detail_tabs.get(id).copied().unwrap_or_default()
+    }
+
     pub fn draft(&self, key: &DraftKey) -> Option<&TextEdit> {
         self.drafts.get(key)
     }
