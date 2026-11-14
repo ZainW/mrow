@@ -14,9 +14,15 @@ roughly by value.
 - **On main, not released**: a review in three tabs (Overview, Changes, Conversation) under a
   fixed bar holding Approve and "Open in <forge>", with ⌥⌘1/2/3 between tabs and J and K file by
   file. The site deploys from main and after every release.
-- **In this branch**: finishing a review in the app. Threads resolve and reopen; comments can be
-  held in a pending review on the forge (edited, deleted, shown in place) and submitted with
-  Comment, Request Changes or Approve and a summary (⇧⌘R).
+- **On main, not released**: finishing a review in the app. Threads resolve and reopen; comments
+  can be held in a pending review on the forge (edited, deleted, shown in place) and submitted
+  with Comment, Request Changes or Approve and a summary (⇧⌘R).
+- **In this branch**: fewer trips to the forge. A request's pipeline jobs (checks on GitHub) on
+  its Overview, grouped by stage, each retried on its own or run when manual, with its log
+  inline; the unchanged lines around a diff's hunks, twenty at a time or all; editing and
+  deleting my own posted comments; on my own requests, adding, removing and asking reviewers
+  again, rebasing (updating the branch on GitHub), closing and reopening, and editing the title
+  and description; and the next request's changes and threads loaded ahead.
 
 Loose ends from these:
 
@@ -26,6 +32,11 @@ Loose ends from these:
   review, so there the summary stands in. Replies still post at once.
 - The tabs haven't been run on macOS (menu bar included), against live forge data, or through
   the frame-time benchmark.
+- None of this branch's forge calls have been run live. GitLab reviewer changes use
+  `mergeRequestSetReviewers` with `operationMode`; after a rebase, a `merge_error` left over
+  from an earlier merge could read as the rebase failing. GitHub only re-runs Actions jobs,
+  names a check's stage after its app, can't take a comment on a line outside the diff, and
+  merges the base in rather than rebasing. A closed request leaves Mine at the next refresh.
 
 ## In progress: your own requests, stacks, an inbox, notifications
 
