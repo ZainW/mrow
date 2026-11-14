@@ -49,6 +49,10 @@ const LINE_ROOM: f32 = 96.0;
 /// closer together, Revoke for Revoke Approval, and the busy spinner without its line (which
 /// becomes its tip).
 const BAR_ROOM: f32 = 760.0;
+/// The narrowest card whose bar still fits that: the tabs, the busy spinner, the forge's icon and
+/// Approve written out. A narrower one (the Ask panel open in a small window) leaves the way out
+/// to the window's toolbar and shows Approve as its icon.
+const TIGHT_ROOM: f32 = 480.0;
 
 /// The tabs of a merge request's card, in the bar's order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -60,13 +64,22 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 3] = [Tab::Overview, Tab::Changes, Tab::Conversation];
+    pub const ALL: [Tab; 3] = [Tab::Overview, Tab::Changes, Tab::Conversation];
 
-    fn title(self) -> &'static str {
+    pub fn title(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
             Tab::Changes => "Changes",
             Tab::Conversation => "Conversation",
+        }
+    }
+
+    /// The keys that open the tab, in the Mac's glyphs: those of its command in `actions`.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Tab::Overview => "⌥⌘1",
+            Tab::Changes => "⌥⌘2",
+            Tab::Conversation => "⌥⌘3",
         }
     }
 
@@ -188,19 +201,38 @@ struct Page {
     talk: bool,
     threads: Rc<Vec<Discussion>>,
     placed: Rc<Placed>,
+    /// A thread has a note written since I last looked.
+    fresh: bool,
     look: Rc<Look>,
     /// I opened it: its overview ends with what's left before it merges, and nobody approves it.
     mine: bool,
 }
 
-/// Whether a card `[x, y, w, h]` is too narrow for the bar's buttons written out.
-pub fn narrow([_, _, w, _]: [f32; 4]) -> bool {
-    w < BAR_ROOM
+/// How much room a card's bar has for its buttons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Room {
+    /// Icons alone, and no way out to the forge: the window's toolbar has one.
+    Tight,
+    /// The forge's icon, Revoke for Revoke Approval.
+    Narrow,
+    /// Everything written out.
+    #[default]
+    Wide,
 }
 
-/// The card of `item`: the bar, and the open tab's page under it, the bar tightened on a
-/// `narrow` card.
-pub fn detail(s: &App, p: &Pal, _k: &Kit, item: &MergeRequest, narrow: bool) -> El {
+/// The room in the bar of a card `[x, y, w, h]`.
+pub fn room([_, _, w, _]: [f32; 4]) -> Room {
+    if w < TIGHT_ROOM {
+        Room::Tight
+    } else if w < BAR_ROOM {
+        Room::Narrow
+    } else {
+        Room::Wide
+    }
+}
+
+/// The card of `item`: the bar, drawn for the `room` it has, and the open tab's page under it.
+pub fn detail(s: &App, p: &Pal, _k: &Kit, item: &MergeRequest, room: Room) -> El {
     let look = look(p.dark);
     let store = &s.store;
     let diffs = store.diffs.get(&item.id);
@@ -208,31 +240,31 @@ pub fn detail(s: &App, p: &Pal, _k: &Kit, item: &MergeRequest, narrow: bool) -> 
     let files: Rc<Vec<FileDiff>> = diffs.and_then(Loadable::value).cloned().unwrap_or_default();
     let threads: Rc<Vec<Discussion>> = talk.and_then(Loadable::value).cloned().unwrap_or_default();
     let head = store.diff_refs.get(&item.id).map(|r| r.head_sha.clone());
-    let changes = changes_rows(s, item, diffs, talk, head);
+    let lists = page_rows(s, item, diffs, talk, head);
     let mine = store.is_mine(item);
-    let conversation = Rc::new(conversation_rows(talk, threads.len()));
     let page = Rc::new(Page {
         item: item.clone(),
         files,
         changes: matches!(diffs, Some(Loadable::Loaded(_))),
         talk: matches!(talk, Some(Loadable::Loaded(_))),
         threads,
-        placed: changes.placed.clone(),
+        placed: lists.placed.clone(),
+        fresh: lists.fresh,
         look,
         mine,
     });
     let open = s.tab(&item.id);
-    let keyed = |rows: &Rc<Vec<Row>>| Rc::new(rows.iter().map(|r| r.key(&page.files, &page.threads)).collect::<Vec<_>>());
     let overview = Rc::new(vec![Row::Header, Row::Description, Row::Standing]);
+    let overview_keys = Rc::new(overview.iter().map(|r| r.key(&page.files, &page.threads)).collect::<Vec<_>>());
     let pages = col()
         .key("pages")
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .child(tab_page(s, &page, Tab::Overview, (keyed(&overview), overview, None), open))
-        .child(tab_page(s, &page, Tab::Changes, (changes.keys, changes.rows, Some(changes.version)), open))
-        .child(tab_page(s, &page, Tab::Conversation, (keyed(&conversation), conversation, None), open));
-    col().key("review").w_full().h_full().min_h(0.0).child(bar(s, &page, open, narrow)).child(pages)
+        .child(tab_page(s, &page, Tab::Overview, (overview_keys, overview, None), open))
+        .child(tab_page(s, &page, Tab::Changes, (lists.keys, lists.rows, Some(lists.version)), open))
+        .child(tab_page(s, &page, Tab::Conversation, (lists.talk_keys, lists.talk_rows, Some(lists.version)), open));
+    col().key("review").w_full().h_full().min_h(0.0).child(bar(s, &page, open, room)).child(pages)
 }
 
 /// A tab's rows, their keys, and for a long list the version those keys go with.
@@ -279,10 +311,22 @@ fn tab_page(s: &App, page: &Rc<Page>, tab: Tab, (keys, rows, version): Rows, ope
 }
 
 /// The bar over the page: the tabs, then what's under way, the way out to the forge and Approve.
-fn bar(s: &App, page: &Page, open: Tab, narrow: bool) -> El {
+fn bar(s: &App, page: &Page, open: Tab, room: Room) -> El {
     let p = &page.look.p;
     let item = &page.item;
-    let mut tabs = row().key("tabs").role("tablist").label(format!("Parts of the {}", item.kind().noun())).focus_group().gap(2.0).center_y();
+    let narrow = room < Room::Wide;
+    // The tabs give way before the buttons do: on a sliver of a card they're cut short (their
+    // keys still switch them) and Approve stays in reach.
+    let mut tabs = row()
+        .key("tabs")
+        .role("tablist")
+        .label(format!("Parts of the {}", item.kind().noun()))
+        .focus_group()
+        .gap(2.0)
+        .center_y()
+        .shrink()
+        .min_w(0.0)
+        .clip_rounded(0.0);
     for (index, tab) in Tab::ALL.into_iter().enumerate() {
         let count = match tab {
             Tab::Overview => 0,
@@ -290,7 +334,7 @@ fn bar(s: &App, page: &Page, open: Tab, narrow: bool) -> El {
             Tab::Changes => item.file_count.max(0) as usize,
             Tab::Conversation => page.threads.len(),
         };
-        let fresh = tab == Tab::Conversation && page.threads.iter().any(|t| s.store.has_fresh(item, t));
+        let fresh = tab == Tab::Conversation && page.fresh;
         let mut label = tab.title().to_string();
         let mut button =
             ChromeButton::new(format!("tab-{index}"), tab.title()).style(Chrome::Text).on(tab == open).dot(fresh).pad(if narrow { 6.0 } else { 10.0 });
@@ -307,7 +351,7 @@ fn bar(s: &App, page: &Page, open: Tab, narrow: bool) -> El {
                 .role("tab")
                 .label(label)
                 .focus_selected(tab == open)
-                .help(keys(&format!("{}  ⌥⌘{}", tab.title(), index + 1)))
+                .help(keys(&format!("{}  {}", tab.title(), tab.hint())))
                 .on_press_tx(move |s: &mut App, tx: &mut Tx| go(s, tx, Jump::Tab(tab))),
         );
     }
@@ -318,9 +362,11 @@ fn bar(s: &App, page: &Page, open: Tab, narrow: bool) -> El {
             r = r.child(text(busy.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line().truncate().shrink().min_w(0.0));
         }
     }
-    r = r.child(forge_button(p, item, narrow));
+    if room > Room::Tight {
+        r = r.child(forge_button(p, item, narrow));
+    }
     if approves(item, page.mine) {
-        r = r.child(approval_button(s, p, item, narrow));
+        r = r.child(approval_button(s, p, item, room));
     }
     col().w_full().child(r).child(rule(p))
 }
@@ -335,30 +381,32 @@ fn approves(item: &MergeRequest, mine: bool) -> bool {
 fn forge_button(p: &Pal, item: &MergeRequest, narrow: bool) -> El {
     let title = format!("Open in {}", item.kind().name());
     let button = if narrow {
-        action_icon_button(p, "open-forge", &I::ARROW_UP_RIGHT, &title)
+        action_icon_button(p, "open-forge", &I::ARROW_UP_RIGHT, &title, false, true)
     } else {
         action_button(p, "open-forge", Some(&I::ARROW_UP_RIGHT), &title, false, true)
     };
-    let url = item.web_url.clone();
-    button.on_press_tx(move |_: &mut App, tx: &mut Tx| {
-        let _ = tx.open_url(&url);
-    })
+    button.on_press_tx(actions::open_in_browser)
 }
 
-/// The Changes tab's rows and their keys, and where its threads go.
+/// The rows of the Changes tab and of the Conversation tab with their keys, where the threads
+/// go, and whether one has something new.
 #[derive(Clone)]
-struct ChangesRows {
+struct PageRows {
     rows: Rc<Vec<Row>>,
     keys: Rc<Vec<String>>,
+    talk_rows: Rc<Vec<Row>>,
+    talk_keys: Rc<Vec<String>>,
     placed: Rc<Placed>,
+    fresh: bool,
     /// Counts the times the rows were worked out, so the list re-reads its keys only then.
     version: u64,
 }
 
-/// What the Changes tab's rows are made of. Changes and threads compare by pointer: the store
-/// shares them.
+/// What those rows are made of. Changes and threads compare by pointer: the store shares them.
 struct Inputs {
     item: String,
+    /// When I last looked at it before this visit, which decides what's new.
+    seen: Option<f64>,
     diffs: Option<Loadable<Rc<Vec<FileDiff>>>>,
     talk: Option<Loadable<Rc<Vec<Discussion>>>>,
     head: Option<String>,
@@ -376,24 +424,29 @@ impl Inputs {
                 _ => false,
             }
         }
-        self.item == other.item && same(&self.diffs, &other.diffs) && same(&self.talk, &other.talk) && self.head == other.head && self.folds == other.folds
+        self.item == other.item
+            && self.seen == other.seen
+            && same(&self.diffs, &other.diffs)
+            && same(&self.talk, &other.talk)
+            && self.head == other.head
+            && self.folds == other.folds
     }
 }
 
 thread_local! {
-    /// The last Changes tab's rows, kept while what they're made of stays the same: a big diff
-    /// has tens of thousands of rows, too many to list again every frame, or on every switch of tab.
-    static CHANGES_ROWS: RefCell<Option<(Inputs, ChangesRows)>> = const { RefCell::new(None) };
+    /// The last card's rows, kept while what they're made of stays the same: a big diff has tens
+    /// of thousands of rows, too many to list again every frame, or on every switch of tab.
+    static PAGE_ROWS: RefCell<Option<(Inputs, PageRows)>> = const { RefCell::new(None) };
     static VERSION: Cell<u64> = const { Cell::new(0) };
 }
 
-fn changes_rows(
+fn page_rows(
     s: &App,
     item: &MergeRequest,
     diffs: Option<&Loadable<Rc<Vec<FileDiff>>>>,
     talk: Option<&Loadable<Rc<Vec<Discussion>>>>,
     head: Option<String>,
-) -> ChangesRows {
+) -> PageRows {
     let files: &[FileDiff] = diffs.and_then(Loadable::value).map_or(&[], |f| f.as_slice());
     // This runs for every file each time the view does: nothing folded costs nothing, and
     // otherwise one key per file serves both lookups.
@@ -414,8 +467,8 @@ fn changes_rows(
             })
             .collect()
     };
-    let inputs = Inputs { item: item.id.clone(), diffs: diffs.cloned(), talk: talk.cloned(), head, folds };
-    let cached = CHANGES_ROWS.with(|c| c.borrow().as_ref().and_then(|(was, rows)| was.same(&inputs).then(|| rows.clone())));
+    let inputs = Inputs { item: item.id.clone(), seen: s.store.seen_before.get(&item.id).copied(), diffs: diffs.cloned(), talk: talk.cloned(), head, folds };
+    let cached = PAGE_ROWS.with(|c| c.borrow().as_ref().and_then(|(was, rows)| was.same(&inputs).then(|| rows.clone())));
     if let Some(rows) = cached {
         return rows;
     }
@@ -449,12 +502,23 @@ fn changes_rows(
         _ => rows.push(Row::Loading),
     }
     let keys = rows.iter().map(|r| r.key(files, threads)).collect();
+    let talk_rows = conversation_rows(talk, threads.len());
+    let talk_keys = talk_rows.iter().map(|r| r.key(files, threads)).collect();
+    let fresh = inputs.seen.is_some() && threads.iter().any(|t| s.store.has_fresh(item, t));
     let version = VERSION.with(|v| {
         v.set(v.get() + 1);
         v.get()
     });
-    let made = ChangesRows { rows: Rc::new(rows), keys: Rc::new(keys), placed: Rc::new(placed), version };
-    CHANGES_ROWS.with(|c| *c.borrow_mut() = Some((inputs, made.clone())));
+    let made = PageRows {
+        rows: Rc::new(rows),
+        keys: Rc::new(keys),
+        talk_rows: Rc::new(talk_rows),
+        talk_keys: Rc::new(talk_keys),
+        placed: Rc::new(placed),
+        fresh,
+        version,
+    };
+    PAGE_ROWS.with(|c| *c.borrow_mut() = Some((inputs, made.clone())));
     made
 }
 
@@ -576,6 +640,7 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
             };
             el().w_full().max_w(READING_WIDTH).pt(30.0).child(body)
         }
+        Row::Standing if !item.is_open() => how_it_ended(p, item),
         Row::Standing if page.mine => before_it_merges(s, p, item),
         Row::Standing => standing(s, p, page),
         Row::Loading => row()
@@ -588,7 +653,7 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
             .items_start()
             .child(icon(&I::WARNING, 13.0).color(p.red))
             .max_w(READING_WIDTH)
-            .child(text(format!("Couldn't load the {what}: {message}")).font(ui(13.0, 400.0)).color(p.red).wrap().grow(1.0).shrink().min_w(0.0)),
+            .child(text(format!("Couldn’t load the {what}: {message}")).font(ui(13.0, 400.0)).color(p.red).wrap().grow(1.0).shrink().min_w(0.0)),
         Row::Empty(message) => el().child(text(*message).font(ui(13.0, 400.0)).color(p.tertiary)),
         Row::FileList => file_list(s, p, page),
         Row::FileHeader(f) => file_header(s, p, page, *f),
@@ -668,15 +733,19 @@ fn standing(s: &App, p: &Pal, page: &Page) -> El {
     )
 }
 
-/// The end of the overview of a request of my own: what stands between it and its merge, or how
-/// it ended.
+/// The end of the overview of an open request of my own: what stands between it and its merge.
 fn before_it_merges(s: &App, p: &Pal, item: &MergeRequest) -> El {
-    let c = col().w_full().gap(14.0);
-    if item.is_open() {
-        return c.child(heading(p, "Before it merges")).child(crate::ui::mine::checklist(s, p, item));
-    }
+    col().w_full().gap(14.0).child(heading(p, "Before it merges")).child(crate::ui::mine::checklist(s, p, item))
+}
+
+/// The end of the overview of a request that's merged or closed, mine or not: there's nothing
+/// left to review or to do.
+fn how_it_ended(p: &Pal, item: &MergeRequest) -> El {
     let end = if item.state == "merged" { "was merged" } else { "was closed without merging" };
-    c.child(heading(p, "How it ended"))
+    col()
+        .w_full()
+        .gap(14.0)
+        .child(heading(p, "How it ended"))
         .child(text(format!("This {} {end}.", item.kind().noun())).font(serif(16.0, 400.0).lines(1.6)).color(p.text).wrap().selectable(true))
 }
 
@@ -699,16 +768,16 @@ fn is_open(thread: &Discussion) -> bool {
     resolved(thread) == Some(false)
 }
 
-/// Approve, or Revoke Approval once approved: Revoke when `short`, named in full in its label
-/// and tip.
-fn approval_button(s: &App, p: &Pal, item: &MergeRequest, short: bool) -> El {
+/// Approve, or Revoke Approval once approved, as the `room` allows: written out, then Revoke
+/// for short, then their icons alone, named in full in their labels and tips.
+fn approval_button(s: &App, p: &Pal, item: &MergeRequest, room: Room) -> El {
     let idle = s.store.busy.is_none();
     if i_approved(s, item) {
         let it = item.clone();
-        let revoke = if short {
-            action_button(p, "revoke", Some(&I::UNDO), "Revoke", false, idle).label("Revoke Approval").help("Revoke Approval")
-        } else {
-            action_button(p, "revoke", Some(&I::UNDO), "Revoke Approval", false, idle)
+        let revoke = match room {
+            Room::Wide => action_button(p, "revoke", Some(&I::UNDO), "Revoke Approval", false, idle),
+            Room::Narrow => action_button(p, "revoke", Some(&I::UNDO), "Revoke", false, idle).label("Revoke Approval").help("Revoke Approval"),
+            Room::Tight => action_icon_button(p, "revoke", &I::UNDO, "Revoke Approval", false, idle),
         };
         revoke.on_press(move |s: &mut App| {
             if s.store.busy.is_none() {
@@ -716,7 +785,11 @@ fn approval_button(s: &App, p: &Pal, item: &MergeRequest, short: bool) -> El {
             }
         })
     } else {
-        action_button(p, "approve", Some(&I::CHECK), "Approve", true, idle).help(keys("Approve  ⇧⌘A")).on_press_tx(actions::approve)
+        let approve = match room {
+            Room::Tight => action_icon_button(p, "approve", &I::CHECK, "Approve", true, idle),
+            _ => action_button(p, "approve", Some(&I::CHECK), "Approve", true, idle),
+        };
+        approve.help(keys("Approve  ⇧⌘A")).on_press_tx(actions::approve)
     }
 }
 
@@ -1403,6 +1476,14 @@ mod tests {
         assert_eq!(placed.at[placed.on(0, lines[0])[0]], Some((0, lines[0])), "a jump to its line finds the row it's under");
         // The fixture's positions name no commit, so they hold for any head.
         assert_eq!(Placed::new(threads, Some("abc"), &files).at, placed.at);
+    }
+
+    #[test]
+    fn the_bar_tightens_as_the_card_narrows() {
+        assert_eq!(room([0.0, 0.0, 900.0, 600.0]), Room::Wide);
+        assert_eq!(room([0.0, 0.0, 600.0, 600.0]), Room::Narrow);
+        // The Ask panel open beside the default sidebar in an 1100pt window.
+        assert_eq!(room([0.0, 0.0, 384.0, 600.0]), Room::Tight);
     }
 
     #[test]

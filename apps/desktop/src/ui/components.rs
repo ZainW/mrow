@@ -209,8 +209,9 @@ fn off_mac(mac: &str) -> String {
     out
 }
 
-/// A rounded button with an icon and title; `prominent` fills it with the accent.
-pub fn action_button(p: &Pal, key: impl Into<String>, glyph: Option<&'static Icon>, title: &str, prominent: bool, enabled: bool) -> El {
+/// What [`action_button`] and [`action_icon_button`] share: the rounded box named `title`, filled
+/// with the accent when `prominent`, and the ink for what goes in it.
+fn action_box(p: &Pal, key: String, title: &str, prominent: bool, enabled: bool) -> (El, rune::Color) {
     // A disabled primary button goes neutral rather than a dimmed accent, which reads as muddy.
     let prominent = prominent && enabled;
     let ink = if prominent {
@@ -220,43 +221,32 @@ pub fn action_button(p: &Pal, key: impl Into<String>, glyph: Option<&'static Ico
     } else {
         p.tertiary
     };
-    let mut b = row().key(key.into()).role("button").label(title.to_string()).h(30.0).px(12.0).gap(6.0).center_y().radius(8.0).fill(if prominent {
-        p.accent
-    } else {
-        p.elevated
-    });
+    let mut b = row().key(key).role("button").label(title.to_string()).h(30.0).center_y().radius(8.0).fill(if prominent { p.accent } else { p.elevated });
     if !prominent {
         b = b.border(1.0, p.line);
     }
-    if let Some(i) = glyph {
-        b = b.child(icon(i, 13.0).color(ink));
-    }
-    b = b.child(text(title.to_string()).font(ui(13.0, SEMIBOLD)).color(ink).single_line());
     if enabled {
         let over = if prominent { p.paper.alpha(0.12) } else { p.hover };
-        b.hover(over).press(over).press_scale(0.98)
+        (b.hover(over).press(over).press_scale(0.98), ink)
     } else {
-        b.disabled(true)
+        (b.disabled(true), ink)
     }
 }
 
-/// [`action_button`]'s plain look with its icon alone, for a tight row: its title is its label
-/// and its tip.
-pub fn action_icon_button(p: &Pal, key: impl Into<String>, glyph: &'static Icon, title: &str) -> El {
-    row()
-        .key(key.into())
-        .role("button")
-        .label(title.to_string())
-        .help(title.to_string())
-        .size(30.0, 30.0)
-        .center()
-        .radius(8.0)
-        .fill(p.elevated)
-        .border(1.0, p.line)
-        .child(icon(glyph, 13.0).color(p.text))
-        .hover(p.hover)
-        .press(p.hover)
-        .press_scale(0.98)
+/// A rounded button with an icon and title; `prominent` fills it with the accent.
+pub fn action_button(p: &Pal, key: impl Into<String>, glyph: Option<&'static Icon>, title: &str, prominent: bool, enabled: bool) -> El {
+    let (mut b, ink) = action_box(p, key.into(), title, prominent, enabled);
+    b = b.px(12.0).gap(6.0);
+    if let Some(i) = glyph {
+        b = b.child(icon(i, 13.0).color(ink));
+    }
+    b.child(text(title.to_string()).font(ui(13.0, SEMIBOLD)).color(ink).single_line())
+}
+
+/// [`action_button`] with its icon alone, for a tight row: its title is its label and its tip.
+pub fn action_icon_button(p: &Pal, key: impl Into<String>, glyph: &'static Icon, title: &str, prominent: bool, enabled: bool) -> El {
+    let (b, ink) = action_box(p, key.into(), title, prominent, enabled);
+    b.w(30.0).center().help(title.to_string()).child(icon(glyph, 13.0).color(ink))
 }
 
 /// A small rounded tag: branches, labels, states.

@@ -208,9 +208,9 @@ fn scene_start_file(s: &mut App) {
     s.pending_jump = Some(Jump::File(ui::detail::first_unviewed(s, &item)));
 }
 
-/// From the conversation to the line its thread on a line was left on, in the changes.
+/// The changes at the line a thread was left on, where its header in the conversation jumps to.
 fn scene_thread_line(s: &mut App) {
-    scene_discussion(s);
+    fixture(s);
     s.pending_jump = Some(Jump::Line("t1".into()));
 }
 

@@ -248,7 +248,7 @@ fn card(s: &App, p: &Pal, k: &Kit, cx: &Cx<App>) -> El {
     let inner = match s.store.selected() {
         // The card's width decides whether the bar's buttons are written out; it changes on a
         // resize, not a scroll.
-        Some(item) => detail::detail(s, p, k, item, cx.layout_with("card-wrap/card", detail::narrow).unwrap_or(false)),
+        Some(item) => detail::detail(s, p, k, item, cx.layout_with("card-wrap/card", detail::room).unwrap_or_default()),
         None => placeholder(s, p),
     };
     col()
