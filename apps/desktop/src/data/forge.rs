@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::cli::Cli;
-use super::models::{DiffRefs, Discussion, FileDiff, MergeRequest, Note, Person, Verdict};
+use super::models::{DiffRefs, Discussion, FileDiff, Job, JobLog, LOG_LINES, MergeRequest, Note, Person, Verdict};
 use super::{github, gitlab};
 use crate::data::diff::DiffLine;
 
@@ -226,6 +226,41 @@ impl Forge {
             Forge::Gitlab => gitlab::submit_review(item, verdict, body),
             Forge::Github => github::submit_review(item, verdict, body),
         }
+    }
+
+    // The pipeline: its jobs (GitLab) or the head commit's checks (GitHub).
+
+    /// "pipeline", "checks": what the forge calls the jobs that run on a request.
+    pub fn jobs_noun(self) -> &'static str {
+        match self {
+            Forge::Gitlab => "pipeline",
+            Forge::Github => "checks",
+        }
+    }
+
+    /// The latest pipeline's jobs, or the head commit's check runs, in the order they run.
+    pub fn jobs(self, item: &MergeRequest) -> Result<Vec<Job>, String> {
+        match self {
+            Forge::Gitlab => gitlab::jobs(item),
+            Forge::Github => github::jobs(item),
+        }
+    }
+
+    /// Starts a job again: a retry once it's done, a run when it's manual.
+    pub fn retry_job(self, item: &MergeRequest, job: &Job) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::retry_job(item, job),
+            Forge::Github => github::retry_job(item, job),
+        }
+    }
+
+    /// The end of a job's log.
+    pub fn job_log(self, item: &MergeRequest, job: &Job) -> Result<JobLog, String> {
+        let raw = match self {
+            Forge::Gitlab => gitlab::job_log(item, job)?,
+            Forge::Github => github::job_log(item, job)?,
+        };
+        Ok(JobLog::tail(&raw, LOG_LINES))
     }
 }
 

@@ -360,3 +360,163 @@ impl Verdict {
         }
     }
 }
+
+/// One job of a merge request's latest pipeline, or one check run on a pull request's head
+/// commit. Its status reads like a pipeline's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Job {
+    pub id: i64,
+    pub name: String,
+    /// GitLab's stage; on GitHub, the app that ran the check ("GitHub Actions").
+    pub stage: String,
+    pub status: PipelineStatus,
+    pub web_url: String,
+    pub started_at: Option<Date>,
+    pub finished_at: Option<Date>,
+    /// It may fail without failing the pipeline.
+    pub allow_failure: bool,
+    /// The forge can start it again from here: a retry once it's done, a run when it's manual.
+    pub retryable: bool,
+    /// Its log can be read here (GitHub keeps only Actions' logs).
+    pub has_log: bool,
+}
+
+impl PipelineStatus {
+    /// A GitLab job's REST status ("failed", "waiting_for_resource"…).
+    pub fn from_gitlab_job(raw: &str) -> Self {
+        Self::from_gitlab(&raw.to_uppercase()).unwrap_or(Self::Pending)
+    }
+
+    /// A GitHub check run's `status` and, once completed, its `conclusion`.
+    pub fn from_check_run(status: &str, conclusion: Option<&str>) -> Self {
+        match (status, conclusion) {
+            ("completed", Some("success")) => Self::Success,
+            ("completed", Some("cancelled")) => Self::Canceled,
+            ("completed", Some("skipped" | "neutral" | "stale")) => Self::Skipped,
+            ("completed", _) => Self::Failed,
+            ("in_progress", _) => Self::Running,
+            _ => Self::Pending,
+        }
+    }
+}
+
+impl Job {
+    /// Still going, or waiting its turn.
+    pub fn active(&self) -> bool {
+        matches!(self.status, PipelineStatus::Running | PipelineStatus::Pending)
+    }
+
+    /// Failed, and not one that's allowed to.
+    pub fn failed_hard(&self) -> bool {
+        self.status == PipelineStatus::Failed && !self.allow_failure
+    }
+
+    pub fn offers_retry(&self) -> bool {
+        self.retryable && matches!(self.status, PipelineStatus::Failed | PipelineStatus::Canceled)
+    }
+
+    pub fn offers_run(&self) -> bool {
+        self.retryable && self.status == PipelineStatus::Manual
+    }
+
+    /// How long it ran, or has been running by `now`.
+    pub fn seconds(&self, now: Date) -> Option<i64> {
+        let start = self.started_at?;
+        Some((self.finished_at.unwrap_or(now) - start).num_seconds().max(0))
+    }
+}
+
+/// "38s", "4m 12s", "1h 5m".
+pub fn duration_label(seconds: i64) -> String {
+    match seconds {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m {}s", s / 60, s % 60),
+        s => format!("{}h {}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// Groups jobs by stage, keeping the order each stage first comes up in.
+pub fn by_stage(mut jobs: Vec<Job>) -> Vec<Job> {
+    let mut stages: Vec<String> = Vec::new();
+    for job in &jobs {
+        if !stages.contains(&job.stage) {
+            stages.push(job.stage.clone());
+        }
+    }
+    jobs.sort_by_key(|j| stages.iter().position(|s| *s == j.stage));
+    jobs
+}
+
+/// The end of a job's log, made readable: colours and cursor codes gone, each line as a terminal
+/// would have left it after carriage returns, GitHub's timestamps off the front.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JobLog {
+    pub text: String,
+    /// Lines before these were left out.
+    pub cut: bool,
+}
+
+/// How many lines of a log show inline.
+pub const LOG_LINES: usize = 200;
+
+impl JobLog {
+    pub fn tail(raw: &[u8], lines: usize) -> JobLog {
+        let raw = String::from_utf8_lossy(raw);
+        let clean = strip_ansi(&raw);
+        let mut all: Vec<&str> = clean
+            .split('\n')
+            .filter_map(|line| {
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                // What a carriage return wrote over is gone on a terminal too (GitLab's section
+                // markers sit in front of one).
+                let line = line.rsplit('\r').next().unwrap_or(line);
+                // A section's end marker stands alone on its line.
+                (!line.starts_with("section_end:") && !line.starts_with("section_start:")).then(|| strip_timestamp(line))
+            })
+            .collect();
+        while all.last().is_some_and(|l| l.trim().is_empty()) {
+            all.pop();
+        }
+        let cut = all.len() > lines;
+        let start = all.len().saturating_sub(lines);
+        JobLog { text: all[start..].join("\n"), cut }
+    }
+}
+
+/// Drops ANSI escape sequences: CSI (colours, erasing), OSC (titles, links) and the two-byte rest.
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// GitHub starts each line of an Actions log with when it was written.
+fn strip_timestamp(line: &str) -> &str {
+    match line.split_once(' ') {
+        Some((stamp, rest)) if stamp.len() >= 20 && stamp.ends_with('Z') && chrono::DateTime::parse_from_rfc3339(stamp).is_ok() => rest,
+        _ => line,
+    }
+}

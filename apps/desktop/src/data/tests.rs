@@ -932,3 +932,104 @@ fn github_pending_review_comments_land_in_place_and_threads_keep_their_node() {
 fn verdicts_name_githubs_events() {
     assert_eq!(Verdict::ALL.map(Verdict::event), ["COMMENT", "REQUEST_CHANGES", "APPROVE"]);
 }
+
+/// GitLab lists a pipeline's jobs newest first.
+const GITLAB_JOBS: &str = r#"[
+  {"id":307,"name":"deploy:staging","stage":"deploy","status":"manual","web_url":"https://gitlab.example.com/acme/web/-/jobs/307",
+   "started_at":null,"finished_at":null,"allow_failure":false},
+  {"id":305,"name":"test:e2e","stage":"test","status":"failed","web_url":"https://gitlab.example.com/acme/web/-/jobs/305",
+   "started_at":"2026-01-01T10:02:00Z","finished_at":"2026-01-01T10:03:10Z","allow_failure":true},
+  {"id":304,"name":"test:unit","stage":"test","status":"running","web_url":"https://gitlab.example.com/acme/web/-/jobs/304",
+   "started_at":"2026-01-01T10:02:00Z","finished_at":null,"allow_failure":false},
+  {"id":306,"name":"compile","stage":"build","status":"failed","web_url":"https://gitlab.example.com/acme/web/-/jobs/306",
+   "started_at":"2026-01-01T10:05:00Z","finished_at":"2026-01-01T10:09:47Z","allow_failure":false},
+  {"id":301,"name":"lint","stage":"build","status":"success","web_url":"https://gitlab.example.com/acme/web/-/jobs/301",
+   "started_at":"2026-01-01T10:00:00Z","finished_at":"2026-01-01T10:00:41Z","allow_failure":false},
+  {"id":303,"name":"test:docs","stage":"test","status":"waiting_for_resource","web_url":"https://gitlab.example.com/acme/web/-/jobs/303",
+   "started_at":null,"finished_at":null}
+]"#;
+
+#[test]
+fn gitlab_jobs_map_by_stage_in_running_order() {
+    let jobs = super::gitlab::jobs_from_json(GITLAB_JOBS).expect("jobs decode");
+    let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+    // Stages as they first come up (oldest job first), a retried build job staying in its stage.
+    assert_eq!(names, ["lint", "compile", "test:docs", "test:unit", "test:e2e", "deploy:staging"]);
+    let job = |name: &str| jobs.iter().find(|j| j.name == name).unwrap();
+    assert_eq!(job("compile").status, PipelineStatus::Failed);
+    assert!(job("compile").failed_hard() && job("compile").offers_retry());
+    assert_eq!(job("compile").seconds(Utc::now()), Some(287));
+    assert!(!job("test:e2e").failed_hard(), "allowed to fail");
+    assert_eq!(job("test:unit").status, PipelineStatus::Running);
+    assert!(job("test:unit").active() && !job("test:unit").offers_retry());
+    assert_eq!(job("test:docs").status, PipelineStatus::Pending);
+    assert!(!job("test:docs").has_log);
+    assert_eq!(job("deploy:staging").status, PipelineStatus::Manual);
+    assert!(job("deploy:staging").offers_run() && !job("deploy:staging").has_log);
+    assert_eq!(job("lint").web_url, "https://gitlab.example.com/acme/web/-/jobs/301");
+}
+
+const CHECK_RUNS: &str = r#"{"total_count":4,"check_runs":[
+  {"id":9002,"name":"test (ubuntu)","status":"completed","conclusion":"failure",
+   "html_url":"https://github.com/acme/web/actions/runs/1/job/9002","details_url":"https://github.com/acme/web/actions/runs/1/job/9002",
+   "started_at":"2026-01-01T10:01:00Z","completed_at":"2026-01-01T10:04:30Z","app":{"slug":"github-actions","name":"GitHub Actions"}},
+  {"id":9001,"name":"build","status":"completed","conclusion":"success","html_url":"https://github.com/acme/web/actions/runs/1/job/9001",
+   "started_at":"2026-01-01T10:00:00Z","completed_at":"2026-01-01T10:00:50Z","app":{"slug":"github-actions","name":"GitHub Actions"}},
+  {"id":9003,"name":"lint","status":"in_progress","conclusion":null,"html_url":"https://github.com/acme/web/actions/runs/1/job/9003",
+   "started_at":"2026-01-01T10:02:00Z","completed_at":null,"app":{"slug":"github-actions","name":"GitHub Actions"}},
+  {"id":77,"name":"coverage","status":"completed","conclusion":"timed_out","html_url":null,"details_url":"https://ci.example.com/build/77",
+   "started_at":"2026-01-01T10:00:30Z","completed_at":"2026-01-01T10:30:30Z","app":{"slug":"example-ci","name":"Example CI"}}
+]}"#;
+
+#[test]
+fn github_check_runs_map_onto_jobs() {
+    let jobs = super::github::jobs_from_json(CHECK_RUNS).expect("check runs decode");
+    let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(names, ["build", "test (ubuntu)", "lint", "coverage"], "grouped by app, in the order they started");
+    let job = |name: &str| jobs.iter().find(|j| j.name == name).unwrap();
+    let test = job("test (ubuntu)");
+    assert_eq!((test.id, test.status, test.stage.as_str()), (9002, PipelineStatus::Failed, "GitHub Actions"));
+    assert!(test.offers_retry() && test.has_log, "an Actions job re-runs and has its log here");
+    assert_eq!(job("lint").status, PipelineStatus::Running);
+    assert!(!job("lint").retryable, "not until it's done");
+    let other = job("coverage");
+    assert_eq!(other.status, PipelineStatus::Failed, "timed out reads as failed");
+    assert!(!other.retryable && !other.has_log, "another app's check only links out");
+    assert_eq!(other.web_url, "https://ci.example.com/build/77");
+    assert_eq!(PipelineStatus::from_check_run("completed", Some("cancelled")), PipelineStatus::Canceled);
+    assert_eq!(PipelineStatus::from_check_run("completed", Some("neutral")), PipelineStatus::Skipped);
+    assert_eq!(PipelineStatus::from_check_run("queued", None), PipelineStatus::Pending);
+}
+
+#[test]
+fn ansi_codes_come_out_of_logs() {
+    assert_eq!(strip_ansi("\u{1b}[1m\u{1b}[32mok\u{1b}[0m done"), "ok done");
+    assert_eq!(strip_ansi("\u{1b}]0;title\u{7}after"), "after");
+    assert_eq!(strip_ansi("\u{1b}]8;;https://x\u{1b}\\link\u{1b}]8;;\u{1b}\\"), "link");
+    assert_eq!(strip_ansi("plain → text"), "plain → text");
+}
+
+#[test]
+fn a_log_keeps_its_last_lines_as_a_terminal_shows_them() {
+    let gitlab = "\u{1b}[0Ksection_start:1:step_script\r\u{1b}[0K\u{1b}[36;1mRunning the script\u{1b}[0;m\r\n\
+                  50%\r100%\r\n\
+                  \u{1b}[31mFAILED\u{1b}[0m\n\
+                  \u{1b}[0Ksection_end:2:step_script\r\u{1b}[0K\n\n\n";
+    let log = JobLog::tail(gitlab.as_bytes(), 10);
+    assert_eq!(log.text, "Running the script\n100%\nFAILED");
+    assert!(!log.cut);
+    let github = "2026-01-01T10:00:00.1234567Z ##[group]Run cargo test\n2026-01-01T10:00:01.0000000Z test a ... ok\nno stamp here";
+    assert_eq!(JobLog::tail(github.as_bytes(), 10).text, "##[group]Run cargo test\ntest a ... ok\nno stamp here");
+    let long: String = (1..=500).map(|n| format!("line {n}\n")).collect();
+    let tail = JobLog::tail(long.as_bytes(), LOG_LINES);
+    assert!(tail.cut);
+    assert_eq!(tail.text.lines().count(), LOG_LINES);
+    assert!(tail.text.starts_with("line 301\n") && tail.text.ends_with("line 500"));
+}
+
+#[test]
+fn durations_read_short() {
+    assert_eq!(duration_label(38), "38s");
+    assert_eq!(duration_label(252), "4m 12s");
+    assert_eq!(duration_label(3900), "1h 5m");
+}

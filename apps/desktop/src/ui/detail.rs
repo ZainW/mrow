@@ -161,6 +161,8 @@ enum Row {
     Footer(usize),
     Thread(usize),
     Composer,
+    /// The pipeline's jobs (GitHub's checks), on the overview.
+    Pipeline,
 }
 
 impl Row {
@@ -188,6 +190,7 @@ impl Row {
             Row::Footer(f) => format!("footer:{}", files[*f].id()),
             Row::Thread(t) => format!("thread:{}", threads[*t].id),
             Row::Composer => "composer".into(),
+            Row::Pipeline => "pipeline".into(),
         }
     }
 }
@@ -254,7 +257,11 @@ pub fn detail(s: &App, p: &Pal, _k: &Kit, item: &MergeRequest, room: Room) -> El
         mine,
     });
     let open = s.tab(&item.id);
-    let overview = Rc::new(vec![Row::Header, Row::Description, Row::Standing]);
+    let mut overview = vec![Row::Header, Row::Description, Row::Standing];
+    if crate::ui::pipeline::shows(s, item) {
+        overview.push(Row::Pipeline);
+    }
+    let overview = Rc::new(overview);
     let overview_keys = Rc::new(overview.iter().map(|r| r.key(&page.files, &page.threads)).collect::<Vec<_>>());
     let pages = col()
         .key("pages")
@@ -813,6 +820,7 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
             "Comment",
             false,
         )),
+        Row::Pipeline => crate::ui::pipeline::section(s, p, k, item),
     };
     frame(tab, rows.len(), i, content)
 }
