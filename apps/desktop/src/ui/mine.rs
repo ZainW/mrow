@@ -184,6 +184,9 @@ fn item_row(p: &Pal, item: &MergeRequest, status: &Status, rail: Option<Rail>, p
                 .child(text(format!("{at} of {of}")).font(ui(11.0, MEDIUM).features("'tnum' 1")).color(p.secondary).single_line()),
         );
     }
+    if let Some(again) = crate::ui::manage::ask_again_chip(p, item, status) {
+        meta = meta.child(again);
+    }
     meta = meta.child(standing_mark(p, status.standing, 12.0, p.chrome));
     let body = col().gap(4.0).grow(1.0).shrink().min_w(0.0).child(title_row).child(step).child(meta);
     // On a rail the dot is the stack's node: a ring, filled when there's something unread.
@@ -363,7 +366,12 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
     let mut actions = Vec::new();
     let confirm = s.confirm.as_ref().filter(|(id, _)| id == &item.id).map(|(_, kind)| *kind);
     let mut card = card;
-    if store.walk_of(&item.id).is_some() {
+    if confirm == Some(Confirm::Close) {
+        // Closing is undone only by reopening, so it takes a second press, as merging does.
+        let (question, answers) = crate::ui::manage::close_confirm(s, p, item);
+        card = card.child(note(question));
+        actions.extend(answers);
+    } else if store.walk_of(&item.id).is_some() {
         // Its stack is merging: say so, and offer the way out. Nothing else can be started.
         card = card.child(note("Merging the stack: each part merges as soon as it's ready. Keep Mrow open until it's done.".into()));
         actions.push(act(action_button(p, "stop-walk", Some(&I::CLOSE), "Stop", false, true), |s, item| s.store.stop_walk(&item.id)));
@@ -389,7 +397,7 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
                     s.confirm = None;
                     s.store.merge_stack(item);
                 },
-                Confirm::Merge => |s, item| {
+                Confirm::Merge | Confirm::Close => |s, item| {
                     s.confirm = None;
                     s.store.merge_here(item);
                 },
@@ -407,6 +415,7 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
                 s.confirm = Some((id.clone(), kind));
             })
         };
+        actions.extend(crate::ui::manage::next_step_actions(s, p, item, status.standing));
         match status.standing {
             Standing::Ready => {
                 actions.push(ask(action_button(p, "merge", Some(&I::MERGE), "Merge", true, idle), Confirm::Merge));

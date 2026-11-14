@@ -72,10 +72,11 @@ pub fn row(s: &mut App, id: &str, at: PointerPress, tx: &mut Tx) {
     let only = s.store.author_filter.as_deref() == Some(item.author.username.as_str());
     menu = menu.item(PopupItem::new("author", if only { "Show Everyone's".to_string() } else { format!("Show Only from {}", item.author.name) })).separator();
     menu = copy_items(menu);
+    menu = crate::ui::manage::row_menu(s, menu, item);
     let id = id.to_string();
     tx.popup_menu(menu, PopupAnchor::Point(at.x, at.y), move |s: &mut App, picked, tx| {
         let Some(picked) = picked else { return };
-        if run_copy(s, tx, &id, picked) {
+        if run_copy(s, tx, &id, picked) || crate::ui::manage::run_pick(s, tx, &id, picked) {
             return;
         }
         let Some(item) = s.store.item(&id).cloned() else { return };

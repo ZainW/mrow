@@ -714,3 +714,117 @@ pub fn submit_review(item: &MergeRequest, verdict: Verdict, body: &str) -> Resul
         }
     }
 }
+
+// MARK: Managing my own
+
+/// A project member, as `/members/all` lists them.
+#[derive(Deserialize)]
+struct RestMember {
+    username: String,
+    name: String,
+    avatar_url: Option<String>,
+    /// "active", "blocked", "awaiting"…; only active people can review.
+    state: Option<String>,
+}
+
+/// Escapes text for a query string.
+fn escape(text: &str) -> String {
+    text.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// Everyone who's a member of the project, directly or through its groups, matching `query`.
+pub fn find_people(item: &MergeRequest, query: &str) -> Result<Vec<Person>, String> {
+    let path = format!("projects/{}/members/all?per_page=100&query={}", item.project_id(), escape(query.trim()));
+    people_from_json(&cli().api(&[path], None)?)
+}
+
+/// A `/members/all` response, active members only, each once.
+pub fn people_from_json(raw: &[u8]) -> Result<Vec<Person>, String> {
+    let members: Vec<RestMember> = serde_json::from_slice(raw).map_err(|e| format!("GitLab sent something unexpected: {e}"))?;
+    let mut seen = std::collections::HashSet::new();
+    Ok(members
+        .into_iter()
+        .filter(|m| m.state.as_deref().is_none_or(|s| s == "active") && seen.insert(m.username.to_lowercase()))
+        .map(|m| Person { username: m.username, name: m.name, avatar_url: m.avatar_url })
+        .collect())
+}
+
+/// A GraphQL string literal: JSON's escaping is GraphQL's.
+fn literal(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_default()
+}
+
+/// Adds or removes one reviewer by username. `mode` is APPEND or REMOVE rather than a whole
+/// list, so a change made on the web meanwhile isn't overwritten from here.
+fn set_reviewers(item: &MergeRequest, username: &str, mode: &str) -> Result<(), String> {
+    let query = format!(
+        "mutation($path: ID!, $iid: String!) {{ mergeRequestSetReviewers(input: {{ projectPath: $path, iid: $iid, reviewerUsernames: [{}], operationMode: {mode} }}) {{ errors }} }}",
+        literal(username)
+    );
+    mutate(item, &query, "mergeRequestSetReviewers")
+}
+
+pub fn add_reviewer(item: &MergeRequest, username: &str) -> Result<(), String> {
+    set_reviewers(item, username, "APPEND")
+}
+
+pub fn remove_reviewer(item: &MergeRequest, reviewer: &Reviewer) -> Result<(), String> {
+    set_reviewers(item, &reviewer.person.username, "REMOVE")
+}
+
+/// Re-requests a review, which takes the reviewer's global ID.
+pub fn ask_again(item: &MergeRequest, reviewer: &Reviewer) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Found {
+        user: Option<UserId>,
+    }
+    #[derive(Deserialize)]
+    struct UserId {
+        id: String,
+    }
+    let found: Found =
+        cli().graphql("query($username: String!) { user(username: $username) { id } }", &[("username", Some(reviewer.person.username.clone()))], &[])?;
+    let id = found.user.ok_or_else(|| format!("GitLab doesn't know @{}.", reviewer.person.username))?.id;
+    let query = format!(
+        "mutation($path: ID!, $iid: String!) {{ mergeRequestReviewerRereview(input: {{ projectPath: $path, iid: $iid, userId: {} }}) {{ errors }} }}",
+        literal(&id)
+    );
+    mutate(item, &query, "mergeRequestReviewerRereview")
+}
+
+/// Rebases the source branch onto the target. GitLab does it in the background; this waits for
+/// it (up to a minute), so the refresh after it sees the new commits.
+pub fn rebase(item: &MergeRequest) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Progress {
+        rebase_in_progress: Option<bool>,
+        merge_error: Option<String>,
+    }
+    cli().send(&format!("{}/rebase", base(item)), "PUT", &json!({}))?;
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let now: Progress = cli().api_json(&format!("{}?include_rebase_in_progress=true", base(item)))?;
+        if now.rebase_in_progress != Some(true) {
+            return match now.merge_error.filter(|e| !e.trim().is_empty()) {
+                Some(e) => Err(format!("GitLab couldn't rebase it: {e}")),
+                None => Ok(()),
+            };
+        }
+    }
+    Ok(())
+}
+
+pub fn set_open(item: &MergeRequest, open: bool) -> Result<(), String> {
+    cli().send(&base(item), "PUT", &json!({ "state_event": if open { "reopen" } else { "close" } })).map(drop)
+}
+
+pub fn edit(item: &MergeRequest, title: Option<&str>, description: Option<&str>) -> Result<(), String> {
+    let mut body = json!({});
+    if let Some(title) = title {
+        body["title"] = json!(title);
+    }
+    if let Some(description) = description {
+        body["description"] = json!(description);
+    }
+    cli().send(&base(item), "PUT", &body).map(drop)
+}

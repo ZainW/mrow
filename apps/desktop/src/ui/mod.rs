@@ -8,6 +8,7 @@ pub mod diff;
 pub mod icons;
 pub mod images;
 pub mod inbox;
+pub mod manage;
 pub mod markdown;
 pub mod menus;
 pub mod mine;
@@ -88,6 +89,10 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     // After the card, whose bar holds the button it hangs from.
     if let Some(panel) = detail::review_panel(s, p, k) {
         root = root.child(panel);
+    }
+    // After the card, whose overview holds the reviewers button it hangs from.
+    if let Some(picker) = manage::picker(s, p, k) {
+        root = root.child(picker);
     }
     // After the sidebar, which holds the bell it hangs from.
     if s.inbox_open && s.sidebar_visible {

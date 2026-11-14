@@ -177,6 +177,19 @@ pub enum Msg {
         reload: Option<MergeRequest>,
         ticket: Option<u64>,
     },
+    /// People who can review in a project, for the reviewer picker. `key` is `people_key`'s.
+    People {
+        key: (String, String),
+        result: Result<Vec<Person>, String>,
+    },
+    /// A change to one of my requests, already shown; `was` is the request before it, put
+    /// back if the forge said no.
+    Edited {
+        was: MergeRequest,
+        result: Result<(), String>,
+        message: String,
+        ticket: u64,
+    },
 }
 
 pub struct Store {
@@ -231,6 +244,8 @@ pub struct Store {
     pub bg: Bg<Msg>,
     /// Asked to show a toast at the next `poll`, with the clock.
     pending_toast: Option<String>,
+    /// People who can review, by project and search, for the reviewer picker.
+    pub people: HashMap<(String, String), Loadable<Rc<Vec<Person>>>>,
 }
 
 impl Default for Store {
@@ -267,6 +282,7 @@ impl Default for Store {
             next_ticket: 0,
             bg: Bg::default(),
             pending_toast: None,
+            people: HashMap::new(),
         }
     }
 }
@@ -1246,6 +1262,10 @@ impl Store {
                         self.finished.insert(t, ok);
                     }
                 }
+                Msg::People { key, result } => {
+                    self.people.insert(key, result.map_or_else(Loadable::Failed, |found| Loadable::Loaded(Rc::new(found))));
+                }
+                Msg::Edited { was, result, message, ticket } => self.landed_edit(was, result, message, ticket),
             }
         }
         if let Some(message) = self.pending_toast.take() {
@@ -1414,6 +1434,193 @@ impl Store {
         self.accounts = accounts;
         self.diffs = diffs.into_iter().map(|(k, v)| (k, Loadable::Loaded(Rc::new(v)))).collect();
         self.discussions = threads.into_iter().map(|(k, v)| (k, Loadable::Loaded(Rc::new(v)))).collect();
+    }
+}
+
+/// The most people one search returns; a list this long may be missing someone.
+pub const PEOPLE_PAGE: usize = 100;
+
+/// Managing a request of my own: reviewers, its branch, closing it, its title and description.
+/// What's cheap to show (a reviewer, a title) shows at once and goes back if the forge refuses.
+impl Store {
+    /// Where a search for people in `item`'s project is kept: the project, and the search.
+    pub fn people_key(item: &MergeRequest, query: &str) -> (String, String) {
+        (format!("{}:{}", item.forge.raw(), item.project_path), query.trim().to_lowercase())
+    }
+
+    pub fn people(&self, item: &MergeRequest, query: &str) -> Option<&Loadable<Rc<Vec<Person>>>> {
+        self.people.get(&Store::people_key(item, query))
+    }
+
+    /// Looks for people who can review in `item`'s project, unless that search is already
+    /// here or on its way. A failed one is tried again.
+    pub fn find_people(&mut self, item: &MergeRequest, query: &str) {
+        let key = Store::people_key(item, query);
+        if self.offline || matches!(self.people.get(&key), Some(Loadable::Loading | Loadable::Loaded(_))) {
+            return;
+        }
+        self.people.insert(key.clone(), Loadable::Loading);
+        let (it, query) = (item.clone(), query.trim().to_string());
+        self.bg.spawn(move || Msg::People { key, result: it.kind().find_people(&it, &query) });
+    }
+
+    /// Changes `id` wherever it's listed, and returns how it was.
+    fn reshape(&mut self, id: &str, change: impl Fn(&mut MergeRequest)) -> Option<MergeRequest> {
+        let was = self.item(id).cloned()?;
+        for account in self.accounts.values_mut() {
+            for m in account.open.iter_mut().chain(account.done.iter_mut()).chain(account.mine.iter_mut()).filter(|m| m.id == id) {
+                change(m);
+            }
+        }
+        Some(was)
+    }
+
+    /// Runs `work` with the change already shown, as `perform` runs an action. The ticket's
+    /// result lands in `finished`.
+    fn perform_edit(
+        &mut self,
+        item: &MergeRequest,
+        label: &str,
+        message: String,
+        change: impl Fn(&mut MergeRequest),
+        work: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) -> u64 {
+        let ticket = self.ticket();
+        if self.offline {
+            self.finished.insert(ticket, false);
+            return ticket;
+        }
+        let was = self.reshape(&item.id, change).unwrap_or_else(|| item.clone());
+        self.busy = Some(label.into());
+        self.bg.spawn(move || Msg::Edited { was, result: work(), message, ticket });
+        ticket
+    }
+
+    fn landed_edit(&mut self, was: MergeRequest, result: Result<(), String>, message: String, ticket: u64) {
+        self.busy = None;
+        self.finished.insert(ticket, result.is_ok());
+        match result {
+            Ok(()) => self.show(&message),
+            Err(e) => {
+                self.reshape(&was.id, |m| *m = was.clone());
+                self.show(&e);
+            }
+        }
+        // Either way the forge has the last word on what changed.
+        self.refresh();
+    }
+
+    pub fn add_reviewer(&mut self, item: &MergeRequest, person: &Person) {
+        if item.reviewers.iter().any(|r| r.person.username.eq_ignore_ascii_case(&person.username)) {
+            return;
+        }
+        let (it, who) = (item.clone(), person.clone());
+        let first = person.name.split(' ').next().unwrap_or(&person.name).to_string();
+        let added = Reviewer { person: person.clone(), state: ReviewState::Unreviewed, approved: false };
+        self.perform_edit(
+            item,
+            &format!("Asking {first}…"),
+            format!("Asked {first} to review"),
+            move |m| m.reviewers.push(added.clone()),
+            move || it.kind().add_reviewer(&it, &who.username),
+        );
+    }
+
+    pub fn remove_reviewer(&mut self, item: &MergeRequest, reviewer: &Reviewer) {
+        if !mine::can_remove(item, reviewer) {
+            self.show(&format!("{} already reviewed it, and {} keeps everyone who reviewed on the list.", reviewer.person.name, item.kind().name()));
+            return;
+        }
+        let (it, who) = (item.clone(), reviewer.clone());
+        let username = reviewer.person.username.clone();
+        self.perform_edit(
+            item,
+            &format!("Removing {}…", reviewer.person.name),
+            format!("Removed {}", reviewer.person.name),
+            move |m| m.reviewers.retain(|r| r.person.username != username),
+            move || it.kind().remove_reviewer(&it, &who),
+        );
+    }
+
+    /// Asks these reviewers for another look. It counts as activity, so a quiet request goes
+    /// back to waiting at once.
+    pub fn ask_again(&mut self, item: &MergeRequest, reviewers: Vec<Reviewer>) {
+        if reviewers.is_empty() {
+            return;
+        }
+        let first: Vec<&str> = reviewers.iter().map(|r| r.person.name.split(' ').next().unwrap_or(&r.person.name)).collect();
+        let who = match first.as_slice() {
+            [one] => one.to_string(),
+            [a, b] => format!("{a} and {b}"),
+            [a, rest @ ..] => format!("{a} and {} others", rest.len()),
+            [] => String::new(),
+        };
+        let names: Vec<String> = reviewers.iter().map(|r| r.person.username.clone()).collect();
+        let it = item.clone();
+        self.perform_edit(
+            item,
+            &format!("Asking {who} again…"),
+            format!("Asked {who} again"),
+            move |m| {
+                m.updated_at = Utc::now();
+                for r in m.reviewers.iter_mut().filter(|r| names.contains(&r.person.username)) {
+                    r.state = ReviewState::Unreviewed;
+                }
+            },
+            move || reviewers.iter().try_for_each(|r| it.kind().ask_again(&it, r)),
+        );
+    }
+
+    /// Rebases it (GitLab) or merges the target in (GitHub).
+    pub fn update_branch(&mut self, item: &MergeRequest) {
+        let it = item.clone();
+        let done = format!("{} {}", item.kind().updated_branch(), item.short_reference());
+        self.perform(item.kind().updating_branch(), done, true, None, move || it.kind().update_branch(&it));
+    }
+
+    /// Closes it without merging, or reopens it.
+    pub fn set_open(&mut self, item: &MergeRequest, open: bool) {
+        let it = item.clone();
+        let (label, done) = if open { ("Reopening…", "Reopened") } else { ("Closing…", "Closed") };
+        self.perform_edit(
+            item,
+            label,
+            format!("{done} {}", item.short_reference()),
+            move |m| {
+                m.state = if open { "opened" } else { "closed" }.into();
+                m.closed_at = (!open).then(Utc::now);
+            },
+            move || it.kind().set_open(&it, open),
+        );
+    }
+
+    /// Saves a new title and description, sending only what changed. `title` is as typed: on a
+    /// GitLab draft, its prefix goes back on (see `mine::edited_title`).
+    pub fn edit_request(&mut self, item: &MergeRequest, title: &str, description: &str) -> u64 {
+        let title = mine::edited_title(item, title);
+        let new_title = (title != item.title).then(|| title.clone());
+        let new_description = (description.trim_end() != item.description.trim_end()).then(|| description.trim_end().to_string());
+        if new_title.is_none() && new_description.is_none() {
+            let t = self.ticket();
+            self.finished.insert(t, true);
+            return t;
+        }
+        let it = item.clone();
+        let (t, d) = (new_title.clone(), new_description.clone());
+        self.perform_edit(
+            item,
+            "Saving…",
+            "Saved".into(),
+            move |m| {
+                if let Some(t) = &t {
+                    m.title = t.clone();
+                }
+                if let Some(d) = &d {
+                    m.description = d.clone();
+                }
+            },
+            move || it.kind().edit(&it, new_title.as_deref(), new_description.as_deref()),
+        )
     }
 }
 
