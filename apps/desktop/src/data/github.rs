@@ -961,3 +961,90 @@ pub fn written(thread: &Discussion, note: &Note) -> (String, String) {
     }
     (String::new(), note.body.clone())
 }
+
+// MARK: Checks
+
+#[derive(Deserialize)]
+struct CheckRuns {
+    check_runs: Vec<CheckRun>,
+}
+
+#[derive(Deserialize)]
+struct CheckRun {
+    id: i64,
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    html_url: Option<String>,
+    details_url: Option<String>,
+    started_at: Option<Date>,
+    completed_at: Option<Date>,
+    app: Option<CheckApp>,
+}
+
+#[derive(Deserialize)]
+struct CheckApp {
+    slug: Option<String>,
+    name: Option<String>,
+}
+
+/// The check runs on the pull request's head commit, grouped by the app that ran them.
+pub fn jobs(item: &MergeRequest) -> Result<Vec<Job>, String> {
+    let head = refs(item)?.head_sha;
+    let mut runs = Vec::new();
+    for page in 1..=5 {
+        let path = format!("repos/{}/commits/{head}/check-runs?per_page=100&page={page}", item.project_path);
+        let batch: CheckRuns = cli().api_json(&path)?;
+        let n = batch.check_runs.len();
+        runs.extend(batch.check_runs);
+        if n < 100 {
+            break;
+        }
+    }
+    Ok(check_jobs(runs))
+}
+
+/// A recorded `check-runs` response, for the self-tests.
+#[cfg(test)]
+pub fn jobs_from_json(raw: &str) -> Result<Vec<Job>, String> {
+    let batch: CheckRuns = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    Ok(check_jobs(batch.check_runs))
+}
+
+/// Only GitHub Actions' runs can be re-run or read from here; another app's link out. An Actions
+/// check run's id is its job's id.
+fn check_jobs(mut runs: Vec<CheckRun>) -> Vec<Job> {
+    runs.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.id.cmp(&b.id)));
+    let jobs = runs
+        .into_iter()
+        .map(|r| {
+            let actions = r.app.as_ref().and_then(|a| a.slug.as_deref()) == Some("github-actions");
+            let status = PipelineStatus::from_check_run(&r.status, r.conclusion.as_deref());
+            Job {
+                id: r.id,
+                name: r.name,
+                stage: r.app.and_then(|a| a.name).unwrap_or_else(|| "Checks".into()),
+                retryable: actions && r.status == "completed",
+                has_log: actions && r.status == "completed",
+                status,
+                web_url: r.html_url.or(r.details_url).unwrap_or_default(),
+                started_at: r.started_at,
+                finished_at: r.completed_at,
+                allow_failure: false,
+            }
+        })
+        .collect();
+    by_stage(jobs)
+}
+
+pub fn retry_job(item: &MergeRequest, job: &Job) -> Result<(), String> {
+    if !job.retryable {
+        return Err("Only GitHub Actions jobs can be re-run from here.".into());
+    }
+    cli().send(&format!("repos/{}/actions/jobs/{}/rerun", item.project_path, job.id), "POST", &json!({})).map(drop)
+}
+
+/// The job's log: GitHub answers with a redirect to the text, which `gh api` follows.
+pub fn job_log(item: &MergeRequest, job: &Job) -> Result<Vec<u8>, String> {
+    cli().api(&[format!("repos/{}/actions/jobs/{}/logs", item.project_path, job.id)], None)
+}

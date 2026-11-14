@@ -136,6 +136,14 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     } else {
         s.walk_refresh = 0.0;
     }
+    // The pipeline's jobs, on the overview of the request on screen: loaded when it first shows,
+    // then asked for again while one runs.
+    let shown = s.store.selected_id.clone().filter(|id| s.tab(id) == Tab::Overview);
+    let (jobs_changed, jobs_wake) = s.store.tick_jobs(clock, shown.as_deref());
+    changed |= jobs_changed;
+    if let Some(at) = jobs_wake {
+        tx.wake_at(at);
+    }
     // The queue refreshes on its own every few minutes.
     let minutes = prefs::read(|p| p.refresh_minutes);
     if minutes > 0 && !s.store.offline {
@@ -436,6 +444,34 @@ fn scene_toast(s: &mut App) {
     s.store.show("Copied maya/batched-exports");
 }
 
+/// Gives the request `iid` a pipeline of fictional jobs and selects it, with the failed job's
+/// log open when `log`.
+fn with_jobs(s: &mut App, iid: &str, log: bool) {
+    let Some(item) = s.store.open().iter().chain(s.store.mine()).find(|m| m.iid == iid).cloned() else { return };
+    s.store.select(Some(item.id.clone()));
+    let jobs = fixtures::jobs(&item.web_url);
+    if log && let Some(failed) = jobs.iter().find(|j| j.failed_hard()) {
+        let key = data::store::Store::log_key(&item.id, failed.id);
+        let tail = data::models::JobLog::tail(fixtures::JOB_LOG.as_bytes(), data::models::LOG_LINES);
+        s.store.job_logs.insert(key.clone(), data::store::Loadable::Loaded(std::rc::Rc::new(tail)));
+        s.store.open_logs.insert(key);
+    }
+    s.store.jobs.insert(item.id, data::store::Loadable::Loaded(std::rc::Rc::new(jobs)));
+}
+
+/// A review's pipeline on its overview: jobs passed, failed, running, pending and manual, and a
+/// failed job's log open under it.
+fn scene_pipeline(s: &mut App) {
+    fixture(s);
+    with_jobs(s, "88", true);
+}
+
+/// One of my own with a failed pipeline: its next step retries the failed job.
+fn scene_pipeline_mine(s: &mut App) {
+    scene_mine(s);
+    with_jobs(s, "92", false);
+}
+
 const SCENES: &[(&str, fn(&mut App))] = &[
     ("to-review", scene_to_review),
     ("changes", scene_changes),
@@ -471,6 +507,8 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("ask-chat", scene_ask_chat),
     ("ask-comment", scene_ask_comment),
     ("bench", bench::scene),
+    ("pipeline", scene_pipeline),
+    ("pipeline-mine", scene_pipeline_mine),
 ];
 
 /// `--queue gitlab|github`: a live, read-only look at what a forge's mapping makes of your queue.

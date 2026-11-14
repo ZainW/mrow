@@ -257,3 +257,8 @@ icon!(
     12.0,
     r#"<path d="M3.5 1.5h5a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H6.2l-2.7 2v-2a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z" fill="none" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>"#
 );
+icon!(
+    PLAY,
+    "play",
+    r#"<path d="M5.2 3.6v8.8a.6.6 0 0 0 .9.5l6.8-4.4a.6.6 0 0 0 0-1L6.1 3.1a.6.6 0 0 0-.9.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/>"#
+);

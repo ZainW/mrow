@@ -177,6 +177,25 @@ pub enum Msg {
         reload: Option<MergeRequest>,
         ticket: Option<u64>,
     },
+    /// The jobs of a merge request's pipeline (or its checks).
+    Jobs {
+        id: String,
+        request: u64,
+        result: Result<Vec<Job>, String>,
+    },
+    /// A job was retried (or run), already shown as pending; `was` is how it stood before.
+    Retried {
+        id: String,
+        job: i64,
+        name: String,
+        was: PipelineStatus,
+        result: Result<(), String>,
+    },
+    JobLog {
+        key: String,
+        request: u64,
+        result: Result<JobLog, String>,
+    },
     /// A comment of mine was edited or deleted, already shown so; `was` is its thread before,
     /// `at` its place in the list, to put back if the forge said no.
     NoteChanged {
@@ -241,6 +260,14 @@ pub struct Store {
     pub bg: Bg<Msg>,
     /// Asked to show a toast at the next `poll`, with the clock.
     pending_toast: Option<String>,
+    /// The pipeline's jobs (or the checks) of the requests looked at, loaded when their overview shows.
+    pub jobs: HashMap<String, Loadable<Rc<Vec<Job>>>>,
+    /// Jobs' logs, by `log_key`.
+    pub job_logs: HashMap<String, Loadable<Rc<JobLog>>>,
+    /// The logs open under their jobs, by `log_key`.
+    pub open_logs: HashSet<String>,
+    /// The request whose running jobs are watched, and when they're next asked for.
+    jobs_poll: Option<(String, f64)>,
 }
 
 impl Default for Store {
@@ -277,6 +304,10 @@ impl Default for Store {
             next_ticket: 0,
             bg: Bg::default(),
             pending_toast: None,
+            jobs: HashMap::new(),
+            job_logs: HashMap::new(),
+            open_logs: HashSet::new(),
+            jobs_poll: None,
         }
     }
 }
@@ -877,6 +908,7 @@ impl Store {
         let selected = self.selected_id.clone();
         self.diffs.retain(|k, _| Some(k) == selected.as_ref());
         self.discussions.retain(|k, _| Some(k) == selected.as_ref());
+        self.forget_jobs(selected.as_deref());
         if let Some(item) = self.selected().cloned() {
             // What's on screen has been seen, including the update my own approval made.
             self.mark_seen(&item);
@@ -1352,6 +1384,13 @@ impl Store {
                         self.finished.insert(t, ok);
                     }
                 }
+                Msg::Jobs { id, request, result } => self.landed_jobs(id, request, result),
+                Msg::Retried { id, job, name, was, result } => self.landed_retry(id, job, &name, was, result),
+                Msg::JobLog { key, request, result } => {
+                    if self.requests.get(&format!("log {key}")) == Some(&request) {
+                        self.job_logs.insert(key, result.map_or_else(Loadable::Failed, |log| Loadable::Loaded(Rc::new(log))));
+                    }
+                }
                 Msg::NoteChanged { id, was, at, deleted, ticket, result } => {
                     self.finished.insert(ticket, result.is_ok());
                     match result {
@@ -1535,6 +1574,179 @@ impl Store {
         self.accounts = accounts;
         self.diffs = diffs.into_iter().map(|(k, v)| (k, Loadable::Loaded(Rc::new(v)))).collect();
         self.discussions = threads.into_iter().map(|(k, v)| (k, Loadable::Loaded(Rc::new(v)))).collect();
+    }
+}
+
+/// How often the jobs of the request on screen are asked for again while one runs, in seconds.
+const JOBS_EVERY: f64 = 15.0;
+
+impl Store {
+    // MARK: Jobs
+
+    /// The key of a job's log in `job_logs` and `open_logs`.
+    pub fn log_key(id: &str, job: i64) -> String {
+        format!("{id}|{job}")
+    }
+
+    /// Loads the jobs of the request whose overview is `shown` the first time it shows, then asks
+    /// again every few seconds while one runs or waits. Returns whether anything changed, and
+    /// when to look next.
+    pub fn tick_jobs(&mut self, now: f64, shown: Option<&str>) -> (bool, Option<f64>) {
+        if self.offline {
+            return (false, None);
+        }
+        let Some(item) = shown.and_then(|id| self.item(id)).cloned() else { return (false, None) };
+        let jobs = match self.jobs.get(&item.id) {
+            None if item.pipeline.is_some() => {
+                self.load_jobs(&item);
+                self.jobs_poll = Some((item.id.clone(), now + JOBS_EVERY));
+                return (true, None);
+            }
+            Some(Loadable::Loaded(jobs)) => jobs.clone(),
+            _ => return (false, None),
+        };
+        // A refresh of the queue asks for them again at once (`forget_jobs`), running or not.
+        let due = self.jobs_poll.as_ref().filter(|(id, _)| *id == item.id).map(|(_, at)| *at);
+        let forced = due == Some(0.0);
+        if !forced && !jobs.iter().any(Job::active) {
+            self.jobs_poll = None;
+            return (false, None);
+        }
+        let due = due.unwrap_or(now + JOBS_EVERY);
+        if now < due {
+            self.jobs_poll = Some((item.id.clone(), due));
+            return (false, Some(due));
+        }
+        self.load_jobs(&item);
+        // A running job's open log grows as it runs.
+        let growing: Vec<&Job> = jobs.iter().filter(|j| j.active() && self.open_logs.contains(&Self::log_key(&item.id, j.id))).collect();
+        for job in growing {
+            self.load_log(&item, job);
+        }
+        let next = now + JOBS_EVERY;
+        self.jobs_poll = Some((item.id.clone(), next));
+        (true, Some(next))
+    }
+
+    /// After a refresh: drops the jobs of requests not selected, and has the selected one's asked
+    /// for again the next time they show.
+    fn forget_jobs(&mut self, selected: Option<&str>) {
+        // A load that failed goes too, so the next look tries again.
+        self.jobs.retain(|k, v| Some(k.as_str()) == selected && v.value().is_some());
+        self.job_logs.retain(|k, _| selected.is_some_and(|s| k.split_once('|').is_some_and(|(id, _)| id == s)));
+        self.open_logs.retain(|k| selected.is_some_and(|s| k.split_once('|').is_some_and(|(id, _)| id == s)));
+        if let Some(id) = selected.filter(|id| self.jobs.contains_key(*id)) {
+            self.jobs_poll = Some((id.to_string(), 0.0));
+        }
+    }
+
+    fn load_jobs(&mut self, item: &MergeRequest) {
+        if self.offline {
+            return;
+        }
+        if self.jobs.get(&item.id).and_then(Loadable::value).is_none() {
+            self.jobs.insert(item.id.clone(), Loadable::Loading);
+        }
+        let request = self.start_request(format!("jobs {}", item.id));
+        let item = item.clone();
+        self.bg.spawn(move || Msg::Jobs { id: item.id.clone(), request, result: item.kind().jobs(&item) });
+    }
+
+    fn landed_jobs(&mut self, id: String, request: u64, result: Result<Vec<Job>, String>) {
+        if self.requests.get(&format!("jobs {id}")) != Some(&request) {
+            return;
+        }
+        match result {
+            Ok(jobs) => {
+                self.jobs.insert(id, Loadable::Loaded(Rc::new(jobs)));
+            }
+            // A poll that fails keeps what showed; the next one tries again.
+            Err(_) if self.jobs.get(&id).and_then(Loadable::value).is_some() => {}
+            Err(e) => {
+                self.jobs.insert(id, Loadable::Failed(e));
+            }
+        }
+    }
+
+    /// Retries a failed or canceled job, or runs a manual one. It shows as pending at once, and
+    /// goes back if the forge refuses.
+    pub fn retry_job(&mut self, item: &MergeRequest, job: &Job) {
+        if self.offline || !self.show_job_status(&item.id, job.id, PipelineStatus::Pending) {
+            return;
+        }
+        // A reload already on its way predates the retry.
+        self.start_request(format!("jobs {}", item.id));
+        let (it, j) = (item.clone(), job.clone());
+        self.bg.spawn(move || Msg::Retried { id: it.id.clone(), job: j.id, name: j.name.clone(), was: j.status, result: it.kind().retry_job(&it, &j) });
+    }
+
+    fn landed_retry(&mut self, id: String, job: i64, name: &str, was: PipelineStatus, result: Result<(), String>) {
+        let run = was == PipelineStatus::Manual;
+        match result {
+            Ok(()) => {
+                self.show(&if run { format!("Started {name}") } else { format!("Retrying {name}") });
+                // The new run is a new job, with a log of its own.
+                let key = Self::log_key(&id, job);
+                self.open_logs.remove(&key);
+                self.job_logs.remove(&key);
+                if let Some(item) = self.item(&id).cloned() {
+                    self.load_jobs(&item);
+                }
+            }
+            Err(e) => {
+                self.show_job_status(&id, job, was);
+                let verb = if run { "run" } else { "retry" };
+                self.show(&format!("Couldn’t {verb} {name}: {e}"));
+            }
+        }
+    }
+
+    /// Shows a loaded job with another status. False when it isn't there.
+    fn show_job_status(&mut self, id: &str, job: i64, status: PipelineStatus) -> bool {
+        let Some(Loadable::Loaded(jobs)) = self.jobs.get(id) else { return false };
+        let Some(at) = jobs.iter().position(|j| j.id == job) else { return false };
+        let mut jobs = jobs.as_ref().clone();
+        jobs[at].status = status;
+        if status == PipelineStatus::Pending {
+            jobs[at].started_at = None;
+            jobs[at].finished_at = None;
+        }
+        self.jobs.insert(id.to_string(), Loadable::Loaded(Rc::new(jobs)));
+        true
+    }
+
+    /// The job that failed my own request's pipeline and can be retried from here, once its
+    /// jobs are loaded: the one the queue named, else the first that failed outright.
+    pub fn failed_job(&self, item: &MergeRequest) -> Option<&Job> {
+        let jobs = self.jobs.get(&item.id).and_then(Loadable::value)?;
+        let named = item.failed_job.as_ref().and_then(|name| jobs.iter().find(|j| &j.name == name && j.failed_hard()));
+        named.or_else(|| jobs.iter().find(|j| j.failed_hard())).filter(|j| j.offers_retry())
+    }
+
+    /// Opens a job's log under it, loading it, or closes it.
+    pub fn toggle_log(&mut self, item: &MergeRequest, job: &Job) {
+        let key = Self::log_key(&item.id, job.id);
+        if self.open_logs.remove(&key) {
+            return;
+        }
+        self.open_logs.insert(key.clone());
+        let stale = !matches!(self.job_logs.get(&key), Some(Loadable::Loaded(_) | Loadable::Loading)) || job.active();
+        if stale {
+            self.load_log(item, job);
+        }
+    }
+
+    fn load_log(&mut self, item: &MergeRequest, job: &Job) {
+        if self.offline {
+            return;
+        }
+        let key = Self::log_key(&item.id, job.id);
+        if self.job_logs.get(&key).and_then(Loadable::value).is_none() {
+            self.job_logs.insert(key.clone(), Loadable::Loading);
+        }
+        let request = self.start_request(format!("log {key}"));
+        let (it, j) = (item.clone(), job.clone());
+        self.bg.spawn(move || Msg::JobLog { key, request, result: it.kind().job_log(&it, &j) });
     }
 }
 

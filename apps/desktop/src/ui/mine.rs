@@ -427,7 +427,18 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
             }
             Standing::NeedsYou if item.pipeline == Some(PipelineStatus::Failed) => {
                 let url = pipeline_url(item);
-                actions.push(action_button(p, "pipeline", Some(&I::ARROW_UP_RIGHT), "Open the Pipeline", true, true).on_press_tx(
+                // With the failed job loaded, retrying it is the step; the pipeline's page is the way to look.
+                let retry = store.failed_job(item).cloned();
+                if let Some(job) = &retry {
+                    let (it, j) = (item.clone(), job.clone());
+                    actions.push(action_button(p, "retry-failed", Some(&I::REFRESH), &format!("Retry {}", job.name), true, true).on_press_tx(
+                        move |s: &mut App, tx: &mut Tx| {
+                            tx.instant();
+                            s.store.retry_job(&it, &j);
+                        },
+                    ));
+                }
+                actions.push(action_button(p, "pipeline", Some(&I::ARROW_UP_RIGHT), "Open the Pipeline", retry.is_none(), true).on_press_tx(
                     move |_: &mut App, tx: &mut Tx| {
                         let _ = tx.open_url(&url);
                     },

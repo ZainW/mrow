@@ -726,3 +726,77 @@ pub fn edit_note(item: &MergeRequest, note: &Note, body: &str) -> Result<(), Str
 pub fn delete_note(item: &MergeRequest, note: &Note) -> Result<(), String> {
     cli().api(&["-X".into(), "DELETE".into(), format!("{}/notes/{}", base(item), note.id)], None).map(drop)
 }
+
+// MARK: Jobs
+
+#[derive(Deserialize)]
+struct RestPipeline {
+    id: i64,
+}
+
+#[derive(Deserialize)]
+struct RestJob {
+    id: i64,
+    name: String,
+    stage: Option<String>,
+    status: String,
+    web_url: Option<String>,
+    started_at: Option<Date>,
+    finished_at: Option<Date>,
+    #[serde(default)]
+    allow_failure: bool,
+}
+
+fn job_path(item: &MergeRequest, job: &Job) -> String {
+    format!("projects/{}/jobs/{}", item.project_id(), job.id)
+}
+
+/// The jobs of the merge request's latest pipeline, without the ones retried since.
+pub fn jobs(item: &MergeRequest) -> Result<Vec<Job>, String> {
+    let latest: Vec<RestPipeline> = cli().api_json(&format!("{}/pipelines?per_page=1", base(item)))?;
+    let Some(pipeline) = latest.first() else { return Ok(vec![]) };
+    let path = format!("projects/{}/pipelines/{}/jobs?include_retried=false", item.project_id(), pipeline.id);
+    Ok(gitlab_jobs(paged_rest(&cli(), &path, 10)?))
+}
+
+/// A recorded `/pipelines/:id/jobs` response, for the self-tests.
+#[cfg(test)]
+pub fn jobs_from_json(raw: &str) -> Result<Vec<Job>, String> {
+    Ok(gitlab_jobs(serde_json::from_str(raw).map_err(|e| e.to_string())?))
+}
+
+/// In the order they run: stages as they first come up, jobs by when they were made. (GitLab
+/// lists the newest first.)
+fn gitlab_jobs(mut rest: Vec<RestJob>) -> Vec<Job> {
+    rest.sort_by_key(|j| j.id);
+    let jobs: Vec<Job> = rest
+        .into_iter()
+        .map(|j| {
+            let status = PipelineStatus::from_gitlab_job(&j.status);
+            Job {
+                id: j.id,
+                name: j.name,
+                stage: j.stage.unwrap_or_default(),
+                retryable: matches!(status, PipelineStatus::Failed | PipelineStatus::Canceled | PipelineStatus::Success | PipelineStatus::Manual),
+                has_log: !matches!(status, PipelineStatus::Manual | PipelineStatus::Skipped | PipelineStatus::Pending),
+                status,
+                web_url: j.web_url.unwrap_or_default(),
+                started_at: j.started_at,
+                finished_at: j.finished_at,
+                allow_failure: j.allow_failure,
+            }
+        })
+        .collect();
+    by_stage(jobs)
+}
+
+/// Retries a finished job, or runs a manual one.
+pub fn retry_job(item: &MergeRequest, job: &Job) -> Result<(), String> {
+    let verb = if job.status == PipelineStatus::Manual { "play" } else { "retry" };
+    cli().send(&format!("{}/{verb}", job_path(item, job)), "POST", &json!({})).map(drop)
+}
+
+/// The job's whole log, as plain text.
+pub fn job_log(item: &MergeRequest, job: &Job) -> Result<Vec<u8>, String> {
+    cli().api(&[format!("{}/trace", job_path(item, job))], None)
+}

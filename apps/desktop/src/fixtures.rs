@@ -830,3 +830,71 @@ pub fn big_diff(files: usize, lines: usize) -> Vec<FileDiff> {
         })
         .collect()
 }
+
+/// A pipeline partway through, on `web_url`'s project: passed, failed (one allowed to), running,
+/// pending and manual jobs over three stages.
+pub fn jobs(web_url: &str) -> Vec<Job> {
+    use PipelineStatus::*;
+    let project = web_url.split("/-/").next().unwrap_or(web_url);
+    let minutes = |m: f64| Utc::now() - Duration::seconds((m * 60.0) as i64);
+    let job = |id: i64, name: &str, stage: &str, status: PipelineStatus, ran: Option<(f64, f64)>, allow_failure: bool| Job {
+        id,
+        name: name.into(),
+        stage: stage.into(),
+        status,
+        web_url: format!("{project}/-/jobs/{id}"),
+        started_at: ran.map(|(from, _)| minutes(from)),
+        finished_at: ran.and_then(|(from, took)| (took > 0.0).then(|| minutes(from - took))),
+        allow_failure,
+        retryable: matches!(status, Success | Failed | Canceled | Manual),
+        has_log: !matches!(status, Manual | Pending | Skipped),
+    };
+    vec![
+        job(9101, "compile", "build", Success, Some((14.0, 2.23)), false),
+        job(9102, "lint", "build", Success, Some((14.0, 0.68)), false),
+        job(9103, "test:unit", "test", Success, Some((11.5, 3.03)), false),
+        job(9104, "test:integration", "test", Failed, Some((11.5, 4.78)), false),
+        job(9105, "test:e2e-flaky", "test", Failed, Some((11.5, 1.17)), true),
+        job(9106, "test:migrations", "test", Running, Some((1.5, 0.0)), false),
+        job(9107, "deploy:review-app", "deploy", Pending, None, false),
+        job(9108, "deploy:staging", "deploy", Manual, None, false),
+    ]
+}
+
+/// The end of a failed job's log as GitLab sends it: colours, section markers and all.
+pub const JOB_LOG: &str = "\u{1b}[0Ksection_start:1731571200:prepare_script\r\u{1b}[0K\u{1b}[0K\u{1b}[36;1mPreparing environment\u{1b}[0;m
+Running on runner-x7k2 via ci-shared-4...
+\u{1b}[0Ksection_end:1731571203:prepare_script\r\u{1b}[0K
+\u{1b}[0Ksection_start:1731571203:step_script\r\u{1b}[0K\u{1b}[0K\u{1b}[36;1mExecuting \"step_script\" stage of the job script\u{1b}[0;m
+\u{1b}[32;1m$ cargo test --test integration -- --test-threads 4\u{1b}[0;m
+\u{1b}[1m\u{1b}[32m   Compiling\u{1b}[0m hooks v0.4.0 (/builds/fieldnotes/hooks)
+\u{1b}[1m\u{1b}[32m    Finished\u{1b}[0m `test` profile [unoptimized + debuginfo] target(s) in 38.12s
+\u{1b}[1m\u{1b}[32m     Running\u{1b}[0m tests/integration.rs (target/debug/deps/integration-5c1e)
+
+running 14 tests
+test deliveries::accepts_a_signed_delivery ... \u{1b}[32mok\u{1b}[0m
+test deliveries::queues_in_order ... \u{1b}[32mok\u{1b}[0m
+test deliveries::retries_after_a_timeout ... \u{1b}[32mok\u{1b}[0m
+test settings::caches_per_request ... \u{1b}[31mFAILED\u{1b}[0m
+test settings::reads_the_tenant_once ... \u{1b}[32mok\u{1b}[0m
+test settings::falls_back_without_a_tenant ... \u{1b}[32mok\u{1b}[0m
+
+failures:
+
+---- settings::caches_per_request stdout ----
+thread 'settings::caches_per_request' panicked at tests/integration.rs:212:9:
+assertion `left == right` failed: the second request read the settings again
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    settings::caches_per_request
+
+test result: \u{1b}[31mFAILED\u{1b}[0m. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.41s
+
+\u{1b}[31;1merror\u{1b}[0m: test failed, to rerun pass `--test integration`
+\u{1b}[0Ksection_end:1731571290:step_script\r\u{1b}[0K
+\u{1b}[31;1mERROR: Job failed: exit code 101
+\u{1b}[0;m
+";

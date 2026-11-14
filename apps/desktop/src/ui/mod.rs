@@ -11,6 +11,7 @@ pub mod inbox;
 pub mod markdown;
 pub mod menus;
 pub mod mine;
+pub mod pipeline;
 pub mod settings;
 pub mod sidebar;
 pub mod smooth_scroll;
