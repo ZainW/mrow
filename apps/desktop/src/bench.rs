@@ -23,7 +23,7 @@ use crate::data::forge::Forge;
 use crate::data::models::{Discussion, FileDiff, MergeRequest, Person};
 use crate::data::store::{Account, QueueMode, Store};
 use crate::data::{gitlab, markup, styler};
-use crate::ui::detail::Part;
+use crate::ui::detail;
 
 /// Swift's `Date` counts from 2001-01-01; Unix time from 1970.
 const SWIFT_EPOCH: f64 = 978_307_200.0;
@@ -377,11 +377,11 @@ fn plan(recording: &Recording, diffs: &HashMap<String, Vec<FileDiff>>) -> Plan {
 }
 
 thread_local! {
-    /// Where the changes page is scrolled to, and how far it goes.
+    /// Where the open tab's page is scrolled to, and how far it goes.
     static SCROLLED: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((0.0, 0.0)) };
 }
 
-/// The page's scroll watcher, while the bench runs.
+/// The open tab's scroll watcher, while the bench runs.
 pub fn note_scroll(at: rune::ScrollPos) {
     SCROLLED.with(|c| c.set((at.offset[1], at.max[1])));
 }
@@ -429,19 +429,21 @@ impl Driver {
                 if cold {
                     crate::ui::diff::forget_styles();
                 }
+                s.detail_tabs.insert(
+                    id.clone(),
+                    match tab {
+                        Tab::Overview => detail::Tab::Overview,
+                        Tab::Changes => detail::Tab::Changes,
+                        Tab::Discussion => detail::Tab::Conversation,
+                    },
+                );
                 if s.store.selected_id.as_deref() != Some(&id) {
                     s.store.select(Some(id));
                 }
-                let part = match tab {
-                    Tab::Overview => Part::Ask,
-                    Tab::Changes => Part::Changes,
-                    Tab::Discussion => Part::Conversation,
-                };
-                crate::ui::detail::jump(s, tx, part);
             }
             Step::Scroll { id, y } => {
                 // Like a person scrolling: the page moves, nothing in the app's state changes.
-                tx.scroll_to_instant(format!("page-{id}"), 0.0, y);
+                tx.scroll_to_instant(detail::scroll_key(&id, s.tab(&id)), 0.0, y);
                 tx.wake_after(Duration::from_millis(16));
                 return false;
             }

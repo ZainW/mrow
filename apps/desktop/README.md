@@ -77,11 +77,12 @@ badge is macOS-only for now.
   name (or press →) to see every part. **Merge the Stack** on a ready bottom part merges it,
   then each part above it as soon as that one is approved and green, and stops at the first that
   isn't. Mrow has to stay open while it does.
-- **Reviews**: one page read top to bottom: the ask, the description rendered natively, every
-  file's diff with syntax highlighting and line numbers (comment threads under their line), the
-  conversation with a comment box, and your verdict with Approve / Revoke. A contents rail
-  beside it lists those parts and every file, marks the one you're reading and jumps on a click.
-  Each file shows its thread count, filled when there's a reply you haven't seen.
+- **Reviews**: three tabs under a bar that keeps Approve / Revoke and the way out to the forge
+  in reach. Overview is the ask and the description rendered natively; Changes is the list of
+  files, then every file's diff with syntax highlighting and line numbers (comment threads under
+  their line); Conversation is every thread, then a comment box. Each tab keeps its place, a
+  thread's file and line jump to that line in Changes, and each file shows its thread count,
+  filled when there's a reply you haven't seen.
 - **Tabs**: keep several reviews open; a single click previews, a double click keeps.
 - **Ask**: a chat with Cursor's agent about the open review, beside the card.
 - **Inbox**: the bell at the top of the sidebar counts what changed since you last looked: a
@@ -107,8 +108,8 @@ On Linux, Ctrl stands in for ⌘, and the account switch is Alt+1 / Alt+2.
 | ⌃1 ⌃2 | Switch account |
 | ⌘1 ⌘2 ⌘3 ⌘4 | To review, Reviewed, Mine, Done |
 | → ← | In Mine: show every part of a stack, fold it again |
-| ⌥⌘1 ⌥⌘2 ⌥⌘3 | Top of the page, the changes, the conversation |
-| J K | Next / previous part of the page (each file is one) |
+| ⌥⌘1 ⌥⌘2 ⌥⌘3 | The Overview, Changes and Conversation tabs |
+| J K | Next / previous file in Changes |
 | ⌥⌘] ⌥⌘[ | Next / previous review |
 | ⌘K or ⌘F | Filter the list |
 | ⌘R | Refresh |

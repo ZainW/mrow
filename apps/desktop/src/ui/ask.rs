@@ -523,7 +523,7 @@ fn draft_comment(s: &mut App, tx: &mut Tx, id: &str, body: &str) {
     let draft = s.draft_mut(&key);
     let text = if draft.text.trim().is_empty() { body.to_string() } else { format!("{}\n\n{body}", draft.text.trim_end()) };
     *draft = rune::TextEdit::new(text);
-    crate::ui::detail::compose(tx, id);
+    crate::ui::detail::go(s, tx, crate::ui::detail::Jump::Composer);
 }
 
 thread_local! {

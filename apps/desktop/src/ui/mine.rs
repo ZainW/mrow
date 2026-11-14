@@ -360,13 +360,13 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
         })
     };
     let note = |line: String| text(line).font(ui(13.0, 400.0).lines(1.45)).color(p.text).wrap().w_full();
-    let mut actions = row().pt(4.0).gap(8.0).center_y().flex_wrap();
+    let mut actions = Vec::new();
     let confirm = s.confirm.as_ref().filter(|(id, _)| id == &item.id).map(|(_, kind)| *kind);
     let mut card = card;
     if store.walk_of(&item.id).is_some() {
         // Its stack is merging: say so, and offer the way out. Nothing else can be started.
         card = card.child(note("Merging the stack: each part merges as soon as it's ready. Keep Mrow open until it's done.".into()));
-        actions = actions.child(act(action_button(p, "stop-walk", Some(&I::CLOSE), "Stop", false, true), |s, item| s.store.stop_walk(&item.id)));
+        actions.push(act(action_button(p, "stop-walk", Some(&I::CLOSE), "Stop", false, true), |s, item| s.store.stop_walk(&item.id)));
     } else if let (Some(kind), Standing::Ready) = (confirm, status.standing) {
         // Merging can't be taken back, so it takes a second press.
         let (question, title): (String, &str) = match (kind, above) {
@@ -382,24 +382,23 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
             _ => (format!("Merge {} into {}?", item.reference(), item.target_branch), "Merge"),
         };
         card = card.child(note(question));
-        actions = actions
-            .child(act(
-                action_button(p, "confirm-merge", Some(&I::MERGE), title, true, idle),
-                match kind {
-                    Confirm::Stack => |s, item| {
-                        s.confirm = None;
-                        s.store.merge_stack(item);
-                    },
-                    Confirm::Merge => |s, item| {
-                        s.confirm = None;
-                        s.store.merge_here(item);
-                    },
+        actions.push(act(
+            action_button(p, "confirm-merge", Some(&I::MERGE), title, true, idle),
+            match kind {
+                Confirm::Stack => |s, item| {
+                    s.confirm = None;
+                    s.store.merge_stack(item);
                 },
-            ))
-            .child(action_button(p, "cancel-merge", None, "Cancel", false, true).on_press_tx(|s: &mut App, tx: &mut Tx| {
-                tx.instant();
-                s.confirm = None;
-            }));
+                Confirm::Merge => |s, item| {
+                    s.confirm = None;
+                    s.store.merge_here(item);
+                },
+            },
+        ));
+        actions.push(action_button(p, "cancel-merge", None, "Cancel", false, true).on_press_tx(|s: &mut App, tx: &mut Tx| {
+            tx.instant();
+            s.confirm = None;
+        }));
     } else {
         let ask = |b: El, kind: Confirm| {
             let id = item.id.clone();
@@ -410,15 +409,15 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
         };
         match status.standing {
             Standing::Ready => {
-                actions = actions.child(ask(action_button(p, "merge", Some(&I::MERGE), "Merge", true, idle), Confirm::Merge));
+                actions.push(ask(action_button(p, "merge", Some(&I::MERGE), "Merge", true, idle), Confirm::Merge));
                 if above.is_some_and(|a| store.is_mine(a)) {
-                    actions = actions.child(ask(action_button(p, "merge-stack", None, "Merge the Stack…", false, idle), Confirm::Stack));
+                    actions.push(ask(action_button(p, "merge-stack", None, "Merge the Stack…", false, idle), Confirm::Stack));
                 }
             }
             Standing::Held => {
                 if let Some(b) = below {
                     let id = b.id.clone();
-                    actions = actions.child(action_button(p, "go-below", None, &format!("Go to {}", b.reference()), false, true).on_press_tx(
+                    actions.push(action_button(p, "go-below", None, &format!("Go to {}", b.reference()), false, true).on_press_tx(
                         move |s: &mut App, tx: &mut Tx| {
                             tx.instant();
                             s.store.select(Some(id.clone()));
@@ -428,42 +427,33 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
             }
             Standing::NeedsYou if item.pipeline == Some(PipelineStatus::Failed) => {
                 let url = pipeline_url(item);
-                actions = actions.child(action_button(p, "pipeline", Some(&I::ARROW_UP_RIGHT), "Open the Pipeline", true, true).on_press_tx(
+                actions.push(action_button(p, "pipeline", Some(&I::ARROW_UP_RIGHT), "Open the Pipeline", true, true).on_press_tx(
                     move |_: &mut App, tx: &mut Tx| {
                         let _ = tx.open_url(&url);
                     },
                 ));
             }
             Standing::NeedsYou if item.unresolved_threads.unwrap_or(0) > 0 => {
-                actions = actions.child(
+                actions.push(
                     action_button(p, "threads", Some(&I::BUBBLE_TEXT), "Go to the Threads", true, true).on_press_tx(crate::ui::detail::jump_to_open_thread),
                 );
             }
             Standing::Waiting | Standing::Quiet if item.auto_merge => {
-                actions = actions
-                    .child(act(action_button(p, "auto-merge-off", None, "Turn Auto-Merge Off", false, idle), |s, item| s.store.set_auto_merge(item, false)));
+                actions.push(act(action_button(p, "auto-merge-off", None, "Turn Auto-Merge Off", false, idle), |s, item| s.store.set_auto_merge(item, false)));
             }
             Standing::Waiting | Standing::Quiet => {
-                actions = actions.child(
+                actions.push(
                     act(action_button(p, "auto-merge", Some(&I::MERGE), "Merge When Ready", false, idle), |s, item| s.store.set_auto_merge(item, true))
                         .help(format!("{} merges it by itself once everything passes", item.kind().name())),
                 );
             }
             Standing::Draft => {
-                actions = actions.child(act(action_button(p, "ready", Some(&I::CHECK), "Mark Ready", false, idle), |s, item| s.store.mark_ready(item)));
+                actions.push(act(action_button(p, "ready", Some(&I::CHECK), "Mark Ready", false, idle), |s, item| s.store.mark_ready(item)));
             }
             Standing::NeedsYou => {}
         }
-        for link in crate::ui::detail::link_buttons(p, item) {
-            actions = actions.child(link);
-        }
     }
-    if let Some(busy) = &store.busy {
-        actions = actions
-            .child(rune_kit::Spinner::new().size(14.0).build(&p.kit()).ml(4.0))
-            .child(text(busy.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line());
-    }
-    card.child(actions)
+    if actions.is_empty() { card } else { card.child(row().pt(4.0).gap(8.0).center_y().flex_wrap().children(actions)) }
 }
 
 /// The stack a merge request belongs to, in the order it merges: the branch it lands on, then

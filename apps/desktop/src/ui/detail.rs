@@ -1,11 +1,13 @@
-//! A merge request on its card, as one document read top to bottom: the ask (its header), the
-//! description, the changes file by file with each line's threads under that line, the
-//! conversation (the threads that aren't on a line, and a comment box), and your verdict. One of
-//! my own reads the same way, from where it stands to what's left before it merges. It's
-//! all one virtualized list in one scroll view, so the page scrolls together while only the rows
-//! on screen are built: a diff of thousands of lines costs what a screenful does. Beside it, when
-//! the card is wide enough, a contents rail lists those parts and every file, follows the reading
-//! and jumps.
+//! A merge request on its card: a bar of tabs, and one tab's page under it. Overview is the ask
+//! (its header), the description and where the review stands; Changes lists the files, then
+//! each file's lines with the threads on them; Conversation is every thread, then the comment
+//! box. One of my own ends its overview with what's left before it merges instead. Approve is in
+//! the bar on every tab, so approving never takes a scroll.
+//!
+//! Each tab is a virtualized list in its own scroll view, so only the rows on screen are built:
+//! a diff of thousands of lines costs what a screenful does. All three stay mounted, the hidden
+//! ones folded to no height, because Rune drops a scroll view's offset and its rows' measured
+//! heights once it leaves the tree: kept, each tab is where it was left when it shows again.
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -19,11 +21,12 @@ use rune::{El, GrowthSpec, PointerPress, PopupAnchor, PopupItem, PopupMenu, Scro
 use rune_kit::{Kit, Spinner, TextArea};
 
 use crate::app::{App, DraftKey};
-use crate::data::diff::{DiffLine, LineKind};
+use crate::data::diff::LineKind;
 use crate::data::models::{Discussion, FileDiff, MergeRequest, Note};
 use crate::data::store::{Loadable, Viewed, relative};
 use crate::ui::components::{
-    action_button, avatar, chip, comment_count, filled_mark, keys, long_date, month_day, pipeline_dot, progress_bar, rule, state_icon,
+    Chrome, ChromeButton, action_button, action_icon_button, avatar, chip, comment_count, filled_mark, keys, long_date, month_day, pipeline_dot, progress_bar,
+    rule, state_icon,
 };
 use crate::ui::diff;
 use crate::ui::icons as I;
@@ -34,85 +37,121 @@ use crate::ui::{Look, actions, look};
 
 /// Files longer than this wait for a click before their lines are drawn.
 pub const LARGE_FILE: usize = 400;
+/// The Changes tab's column; the others keep the reading measure.
 const PAGE_WIDTH: f32 = 1100.0;
-/// The contents rail's width, the room between it and the page, and the card's inset around both.
-const RAIL_WIDTH: f32 = 156.0;
-const RAIL_GAP: f32 = 20.0;
-const RAIL_INSET: f32 = 24.0;
-/// The narrowest the page's column gets beside the rail; a narrower card goes without the rail.
-const COLUMN_MIN: f32 = 600.0;
-/// Where the page and the rail start: the room above the first row.
+/// Where a tab's page starts: the room above its first row.
 const PAGE_TOP: f32 = 34.0;
+/// How far under the top of the Changes tab a jump to a thread's line puts it, so the lines
+/// before it show too.
+const LINE_ROOM: f32 = 96.0;
+/// The narrowest card whose bar has room for "Open in GitLab" written out beside the tabs,
+/// Revoke Approval and a busy line. A narrower one shows that button's icon alone, its tabs
+/// closer together, Revoke for Revoke Approval, and the busy spinner without its line (which
+/// becomes its tip).
+const BAR_ROOM: f32 = 760.0;
+/// The narrowest card whose bar still fits that: the tabs, the busy spinner, the forge's icon and
+/// Approve written out. A narrower one (the Ask panel open in a small window) leaves the way out
+/// to the window's toolbar and shows Approve as its icon.
+const TIGHT_ROOM: f32 = 480.0;
 
-/// A part of the page, in the rail's order. Each file is a part of its own.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Part {
+/// The tabs of a merge request's card, in the bar's order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Tab {
     #[default]
-    Ask,
-    Description,
+    Overview,
     Changes,
-    File(usize),
     Conversation,
-    Verdict,
 }
 
-impl Part {
-    /// The part `by` places on, in a page listing `files` files, stopping at either end.
-    pub fn step(self, by: i64, files: usize) -> Part {
-        let index = match self {
-            Part::Ask => 0,
-            Part::Description => 1,
-            Part::Changes => 2,
-            Part::File(f) => 3 + f.min(files.saturating_sub(1)),
-            Part::Conversation => 3 + files,
-            Part::Verdict => 4 + files,
-        };
-        match (index as i64 + by).clamp(0, 4 + files as i64) as usize {
-            0 => Part::Ask,
-            1 => Part::Description,
-            2 => Part::Changes,
-            i if i < 3 + files => Part::File(i - 3),
-            i if i == 3 + files => Part::Conversation,
-            _ => Part::Verdict,
+impl Tab {
+    pub const ALL: [Tab; 3] = [Tab::Overview, Tab::Changes, Tab::Conversation];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::Overview => "Overview",
+            Tab::Changes => "Changes",
+            Tab::Conversation => "Conversation",
+        }
+    }
+
+    /// The keys that open the tab, in the Mac's glyphs: those of its command in `actions`.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Tab::Overview => "⌥⌘1",
+            Tab::Changes => "⌥⌘2",
+            Tab::Conversation => "⌥⌘3",
+        }
+    }
+
+    /// The key of the tab's list of rows, the scope its rows are found in.
+    fn list_key(self) -> &'static str {
+        match self {
+            Tab::Overview => "overview-rows",
+            Tab::Changes => "changes-rows",
+            Tab::Conversation => "conversation-rows",
         }
     }
 }
 
-/// Where the reader is on a merge request's page, from what its scroll view shows.
-#[derive(Clone, Debug, Default)]
-pub struct Spy {
-    /// The part the first row on screen belongs to.
-    top: Part,
-    /// The page shows its end.
-    bottom: bool,
-    /// Where the last jump went, kept while the page's end stops that part reaching the top.
-    aimed: Option<Part>,
-    pub current: Part,
+/// The key of a merge request's scroll view on `tab`.
+pub fn scroll_key(id: &str, tab: Tab) -> String {
+    format!("{}-{id}", tab.list_key())
 }
 
-impl Spy {
-    /// Works out the current part again; true when it changed.
-    fn settle(&mut self) -> bool {
-        let read = if self.bottom && self.top != Part::Ask { Part::Verdict } else { self.top };
-        let current = self.aimed.unwrap_or(read);
-        std::mem::replace(&mut self.current, current) != current
+/// Where a jump lands: a tab where it was left, or a place on one.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Jump {
+    Tab(Tab),
+    /// A file's header at the top of the Changes tab; none is the tab's own top.
+    File(Option<usize>),
+    /// The diff line a thread (by its id) is on, in the Changes tab.
+    Line(String),
+    /// A thread, by its id, in the Conversation tab.
+    Thread(String),
+    /// The comment box at the end of the conversation, with the caret in it.
+    Composer,
+}
+
+impl Jump {
+    fn tab(&self) -> Tab {
+        match self {
+            Jump::Tab(tab) => *tab,
+            Jump::File(_) | Jump::Line(_) => Tab::Changes,
+            Jump::Thread(_) | Jump::Composer => Tab::Conversation,
+        }
     }
 }
 
-/// The part of the page `item` shows now.
-pub fn current_part(s: &App, item: &str) -> Part {
-    s.spies.get(item).map_or(Part::Ask, |spy| spy.current)
+/// Where the reader is in a merge request's changes, from what the Changes tab shows, for J and K.
+#[derive(Clone, Debug, Default)]
+pub struct Spy {
+    /// The file the first row on screen belongs to; none above the first file.
+    top: Option<usize>,
+    /// The tab shows its end.
+    bottom: bool,
+    /// The file the last jump went to, kept while the tab's end stops it reaching the top.
+    aimed: Option<usize>,
 }
 
-/// One row of the page.
+/// The file `by` files on from `from`, in a list of `files`, stopping at either end. None is the
+/// top of the tab, before the first file.
+fn step_file(from: Option<usize>, by: i64, files: usize) -> Option<usize> {
+    let at = from.map_or(0, |f| f.min(files.saturating_sub(1)) as i64 + 1);
+    match (at + by).clamp(0, files as i64) {
+        0 => None,
+        i => Some(i as usize - 1),
+    }
+}
+
+/// One row of a tab's page.
 #[derive(Clone, Debug, PartialEq)]
 enum Row {
     Header,
     Description,
-    /// The changes' or the conversation's title and the line under it.
-    Heading(Part),
-    Loading(Part),
-    Failed(Part, String),
+    /// Where the review stands and where to start; on my own, what's left before it merges.
+    Standing,
+    Loading,
+    Failed(String),
     Empty(&'static str),
     FileList,
     FileHeader(usize),
@@ -122,19 +161,14 @@ enum Row {
     Footer(usize),
     Thread(usize),
     Composer,
-    Verdict,
 }
 
 impl Row {
-    fn part(&self) -> Part {
+    /// The file a row of the changes belongs to.
+    fn file(&self) -> Option<usize> {
         match self {
-            Row::Header => Part::Ask,
-            Row::Description => Part::Description,
-            Row::Heading(part) | Row::Loading(part) | Row::Failed(part, _) => *part,
-            Row::Empty(_) | Row::FileList => Part::Changes,
-            Row::FileHeader(f) | Row::Notice(f, ..) | Row::Top(f) | Row::Line(f, _) | Row::Footer(f) => Part::File(*f),
-            Row::Thread(_) | Row::Composer => Part::Conversation,
-            Row::Verdict => Part::Verdict,
+            Row::FileHeader(f) | Row::Notice(f, ..) | Row::Top(f) | Row::Line(f, _) | Row::Footer(f) => Some(*f),
+            _ => None,
         }
     }
 
@@ -142,9 +176,9 @@ impl Row {
         match self {
             Row::Header => "header".into(),
             Row::Description => "description".into(),
-            Row::Heading(part) => section_key(*part).into(),
-            Row::Loading(part) => format!("loading-{}", section_key(*part)),
-            Row::Failed(part, _) => format!("failed-{}", section_key(*part)),
+            Row::Standing => "standing".into(),
+            Row::Loading => "loading".into(),
+            Row::Failed(_) => "failed".into(),
             Row::Empty(_) => "empty".into(),
             Row::FileList => "files".into(),
             Row::FileHeader(f) => format!("file:{}", files[*f].id()),
@@ -154,48 +188,51 @@ impl Row {
             Row::Footer(f) => format!("footer:{}", files[*f].id()),
             Row::Thread(t) => format!("thread:{}", threads[*t].id),
             Row::Composer => "composer".into(),
-            Row::Verdict => "verdict".into(),
         }
     }
 }
 
-/// The key of the row a part (other than a file) starts on.
-fn section_key(part: Part) -> &'static str {
-    match part {
-        Part::Ask => "header",
-        Part::Description => "description",
-        Part::Changes | Part::File(_) => "changes",
-        Part::Conversation => "conversation",
-        Part::Verdict => "verdict",
-    }
-}
-
-/// Everything a row needs that isn't on `App`, worked out once per frame.
+/// Everything a row needs that isn't on `App`, worked out once per frame and shared by the tabs.
 struct Page {
     item: MergeRequest,
-    rows: Rc<Vec<Row>>,
     files: Rc<Vec<FileDiff>>,
     /// The changes arrived (possibly with no files), and the threads.
     changes: bool,
     talk: bool,
     threads: Rc<Vec<Discussion>>,
     placed: Rc<Placed>,
+    /// A thread has a note written since I last looked.
+    fresh: bool,
     look: Rc<Look>,
-    /// The contents rail shows beside the page.
-    rail: bool,
-    /// I opened it: it starts with where it stands and ends with what's left before it merges.
+    /// I opened it: its overview ends with what's left before it merges, and nobody approves it.
     mine: bool,
 }
 
-/// How far in from the card's left edge the contents rail starts, or `None` when the card is too
-/// narrow for it. On a very wide card the rail and the page centre together.
-pub fn rail_inset([_, _, w, _]: [f32; 4]) -> Option<f32> {
-    let column = w - 2.0 - RAIL_INSET - RAIL_WIDTH - RAIL_GAP - RAIL_INSET;
-    (column >= COLUMN_MIN).then(|| RAIL_INSET + ((column - PAGE_WIDTH) / 2.0).max(0.0).floor())
+/// How much room a card's bar has for its buttons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Room {
+    /// Icons alone, and no way out to the forge: the window's toolbar has one.
+    Tight,
+    /// The forge's icon, Revoke for Revoke Approval.
+    Narrow,
+    /// Everything written out.
+    #[default]
+    Wide,
 }
 
-/// The page of `item`, with the contents rail `rail` points in from the card's edge if it shows.
-pub fn detail(s: &App, p: &Pal, _k: &Kit, item: &MergeRequest, rail: Option<f32>) -> El {
+/// The room in the bar of a card `[x, y, w, h]`.
+pub fn room([_, _, w, _]: [f32; 4]) -> Room {
+    if w < TIGHT_ROOM {
+        Room::Tight
+    } else if w < BAR_ROOM {
+        Room::Narrow
+    } else {
+        Room::Wide
+    }
+}
+
+/// The card of `item`: the bar, drawn for the `room` it has, and the open tab's page under it.
+pub fn detail(s: &App, p: &Pal, _k: &Kit, item: &MergeRequest, room: Room) -> El {
     let look = look(p.dark);
     let store = &s.store;
     let diffs = store.diffs.get(&item.id);
@@ -203,79 +240,178 @@ pub fn detail(s: &App, p: &Pal, _k: &Kit, item: &MergeRequest, rail: Option<f32>
     let files: Rc<Vec<FileDiff>> = diffs.and_then(Loadable::value).cloned().unwrap_or_default();
     let threads: Rc<Vec<Discussion>> = talk.and_then(Loadable::value).cloned().unwrap_or_default();
     let head = store.diff_refs.get(&item.id).map(|r| r.head_sha.clone());
-    let made = page_rows(s, item, diffs, talk, head, rail.is_some());
-    let count = made.rows.len();
-    let rows = made.rows.clone();
+    let lists = page_rows(s, item, diffs, talk, head);
+    let mine = store.is_mine(item);
     let page = Rc::new(Page {
         item: item.clone(),
-        rows: made.rows,
         files,
         changes: matches!(diffs, Some(Loadable::Loaded(_))),
         talk: matches!(talk, Some(Loadable::Loaded(_))),
         threads,
-        placed: made.placed,
+        placed: lists.placed.clone(),
+        fresh: lists.fresh,
         look,
-        rail: rail.is_some(),
-        mine: store.is_mine(item),
+        mine,
     });
-    let key_list = made.keys;
-    let built = page.clone();
-    let (seen, bottomed) = (item.id.clone(), item.id.clone());
-    let list = col()
-        .key("page-rows")
+    let open = s.tab(&item.id);
+    let overview = Rc::new(vec![Row::Header, Row::Description, Row::Standing]);
+    let overview_keys = Rc::new(overview.iter().map(|r| r.key(&page.files, &page.threads)).collect::<Vec<_>>());
+    let pages = col()
+        .key("pages")
         .w_full()
-        .growth(GrowthSpec::default())
-        .virtual_rows_version(&(item.id.as_str(), made.version))
-        .virtual_rows(count, 22.0, move |_: &App, i| Cow::Owned(key_list[i].clone()), move |s: &App, i| build_row(s, &built, i))
-        .on_visible_rows(move |s: &mut App, range: Range<usize>| {
+        .grow(1.0)
+        .min_h(0.0)
+        .child(tab_page(s, &page, Tab::Overview, (overview_keys, overview, None), open))
+        .child(tab_page(s, &page, Tab::Changes, (lists.keys, lists.rows, Some(lists.version)), open))
+        .child(tab_page(s, &page, Tab::Conversation, (lists.talk_keys, lists.talk_rows, Some(lists.version)), open));
+    col().key("review").w_full().h_full().min_h(0.0).child(bar(s, &page, open, room)).child(pages)
+}
+
+/// A tab's rows, their keys, and for a long list the version those keys go with.
+type Rows = (Rc<Vec<String>>, Rc<Vec<Row>>, Option<u64>);
+
+/// One tab's scroll view. The `open` tab's fills the card; the others stay mounted at no height,
+/// out of reach of the pointer, the keyboard and assistive technology, so they keep their place.
+fn tab_page(s: &App, page: &Rc<Page>, tab: Tab, (keys, rows, version): Rows, open: Tab) -> El {
+    let id = page.item.id.clone();
+    let count = rows.len();
+    let built = (page.clone(), rows.clone());
+    let mut list = col().key(tab.list_key()).w_full().growth(GrowthSpec::default());
+    if let Some(version) = version {
+        list = list.virtual_rows_version(&(id.as_str(), version));
+    }
+    list = list.virtual_rows(count, 22.0, move |_: &App, i| Cow::Owned(keys[i].clone()), move |s: &App, i| build_row(s, &built.0, tab, &built.1, i));
+    let key = scroll_key(&id, tab);
+    let view = col().key(key.clone()).w_full().min_h(0.0);
+    if tab != open {
+        return view.h(0.0).inert().a11y_hidden().child(list).scroll(ScrollSpec { stick_bottom: false });
+    }
+    if tab == Tab::Changes {
+        let seen = id.clone();
+        list = list.on_visible_rows(move |s: &mut App, range: Range<usize>| {
             let spy = s.spies.entry(seen.clone()).or_default();
-            spy.top = rows.get(range.start).map_or(Part::Ask, Row::part);
+            spy.top = rows.get(range.start).and_then(Row::file);
             if let Some(aim) = spy.aimed {
-                let first = rows.partition_point(|r| r.part() < aim);
-                if !(spy.bottom && range.contains(&first)) {
+                let header = rows.partition_point(|r| r.file() < Some(aim));
+                if !(spy.bottom && range.contains(&header)) {
                     spy.aimed = None;
                 }
             }
-            spy.settle()
+            false
         });
-    let key = format!("page-{}", item.id);
-    let scroll = col().key(key.clone()).h_full().min_h(0.0).child(list).scroll(ScrollSpec { stick_bottom: false }).on_at_bottom(move |s: &mut App, at| {
-        let spy = s.spies.entry(bottomed.clone()).or_default();
-        spy.bottom = at;
-        spy.settle();
-    });
-    let scroll = match &s.bench {
-        Some(_) => smooth_wheel_watching(scroll, &key, crate::bench::note_scroll),
-        None => smooth_wheel(scroll, &key),
-    };
-    // The same row with or without the rail: the scroll view keeps its place in the tree, and so
-    // where it's scrolled to, when the card crosses the width the rail needs.
-    let mut review = row().key("review").w_full().h_full().min_h(0.0);
-    if let Some(inset) = rail {
-        review = review.child(contents(&page, inset));
     }
-    review.child(scroll.grow(1.0).min_w(0.0))
+    let mut view = view.grow(1.0).role("tabpanel").label(tab.title()).child(list).scroll(ScrollSpec { stick_bottom: false });
+    if tab == Tab::Changes {
+        view = view.on_at_bottom(move |s: &mut App, at| s.spies.entry(id.clone()).or_default().bottom = at);
+    }
+    match &s.bench {
+        Some(_) => smooth_wheel_watching(view, &key, crate::bench::note_scroll),
+        None => smooth_wheel(view, &key),
+    }
 }
 
-/// The page's rows and their keys, and where its threads go.
+/// The bar over the page: the tabs, then what's under way, the way out to the forge and Approve.
+fn bar(s: &App, page: &Page, open: Tab, room: Room) -> El {
+    let p = &page.look.p;
+    let item = &page.item;
+    let narrow = room < Room::Wide;
+    // The tabs give way before the buttons do: on a sliver of a card they're cut short (their
+    // keys still switch them) and Approve stays in reach.
+    let mut tabs = row()
+        .key("tabs")
+        .role("tablist")
+        .label(format!("Parts of the {}", item.kind().noun()))
+        .focus_group()
+        .gap(2.0)
+        .center_y()
+        .shrink()
+        .min_w(0.0)
+        .clip_rounded(0.0);
+    for (index, tab) in Tab::ALL.into_iter().enumerate() {
+        let count = match tab {
+            Tab::Overview => 0,
+            Tab::Changes if page.changes => page.files.len(),
+            Tab::Changes => item.file_count.max(0) as usize,
+            Tab::Conversation => page.threads.len(),
+        };
+        let fresh = tab == Tab::Conversation && page.fresh;
+        let mut label = tab.title().to_string();
+        let mut button =
+            ChromeButton::new(format!("tab-{index}"), tab.title()).style(Chrome::Text).on(tab == open).dot(fresh).pad(if narrow { 6.0 } else { 10.0 });
+        if count > 0 {
+            button = button.count(count);
+            label = format!("{label} {count}");
+        }
+        if fresh {
+            label.push_str(", with something new");
+        }
+        tabs = tabs.child(
+            button
+                .build(p)
+                .role("tab")
+                .label(label)
+                .focus_selected(tab == open)
+                .help(keys(&format!("{}  {}", tab.title(), tab.hint())))
+                .on_press_tx(move |s: &mut App, tx: &mut Tx| go(s, tx, Jump::Tab(tab))),
+        );
+    }
+    let mut r = row().key("bar").w_full().h(48.0).px(12.0).gap(8.0).center_y().child(tabs).child(el().grow(1.0));
+    if let Some(busy) = &s.store.busy {
+        r = r.child(Spinner::new().size(14.0).build(&page.look.k).help(busy.clone()));
+        if !narrow {
+            r = r.child(text(busy.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line().truncate().shrink().min_w(0.0));
+        }
+    }
+    if room > Room::Tight {
+        r = r.child(forge_button(p, item, narrow));
+    }
+    if approves(item, page.mine) {
+        r = r.child(approval_button(s, p, item, room));
+    }
+    col().w_full().child(r).child(rule(p))
+}
+
+/// Whether the bar offers Approve: on an open request that isn't mine (nobody approves their
+/// own), whichever tab is open.
+fn approves(item: &MergeRequest, mine: bool) -> bool {
+    item.is_open() && !mine
+}
+
+/// The way out to the forge; on a narrow card its icon alone, named in its label and tip.
+fn forge_button(p: &Pal, item: &MergeRequest, narrow: bool) -> El {
+    let title = format!("Open in {}", item.kind().name());
+    let button = if narrow {
+        action_icon_button(p, "open-forge", &I::ARROW_UP_RIGHT, &title, false, true)
+    } else {
+        action_button(p, "open-forge", Some(&I::ARROW_UP_RIGHT), &title, false, true)
+    };
+    button.on_press_tx(actions::open_in_browser)
+}
+
+/// The rows of the Changes tab and of the Conversation tab with their keys, where the threads
+/// go, and whether one has something new.
 #[derive(Clone)]
 struct PageRows {
     rows: Rc<Vec<Row>>,
     keys: Rc<Vec<String>>,
+    talk_rows: Rc<Vec<Row>>,
+    talk_keys: Rc<Vec<String>>,
     placed: Rc<Placed>,
+    fresh: bool,
     /// Counts the times the rows were worked out, so the list re-reads its keys only then.
     version: u64,
 }
 
-/// What a page's rows are made of. Changes and threads compare by pointer: the store shares them.
+/// What those rows are made of. Changes and threads compare by pointer: the store shares them.
 struct Inputs {
     item: String,
+    /// When I last looked at it before this visit, which decides what's new.
+    seen: Option<f64>,
     diffs: Option<Loadable<Rc<Vec<FileDiff>>>>,
     talk: Option<Loadable<Rc<Vec<Discussion>>>>,
     head: Option<String>,
     /// How each file is folded: 0 open, 1 collapsed, 2 a large file expanded.
     folds: Vec<u8>,
-    rail: bool,
 }
 
 impl Inputs {
@@ -289,17 +425,17 @@ impl Inputs {
             }
         }
         self.item == other.item
+            && self.seen == other.seen
             && same(&self.diffs, &other.diffs)
             && same(&self.talk, &other.talk)
             && self.head == other.head
             && self.folds == other.folds
-            && self.rail == other.rail
     }
 }
 
 thread_local! {
-    /// The last page's rows, kept while what they're made of stays the same: a big diff has tens
-    /// of thousands of rows, too many to list again every frame.
+    /// The last card's rows, kept while what they're made of stays the same: a big diff has tens
+    /// of thousands of rows, too many to list again every frame, or on every switch of tab.
     static PAGE_ROWS: RefCell<Option<(Inputs, PageRows)>> = const { RefCell::new(None) };
     static VERSION: Cell<u64> = const { Cell::new(0) };
 }
@@ -310,7 +446,6 @@ fn page_rows(
     diffs: Option<&Loadable<Rc<Vec<FileDiff>>>>,
     talk: Option<&Loadable<Rc<Vec<Discussion>>>>,
     head: Option<String>,
-    rail: bool,
 ) -> PageRows {
     let files: &[FileDiff] = diffs.and_then(Loadable::value).map_or(&[], |f| f.as_slice());
     // This runs for every file each time the view does: nothing folded costs nothing, and
@@ -332,20 +467,18 @@ fn page_rows(
             })
             .collect()
     };
-    let inputs = Inputs { item: item.id.clone(), diffs: diffs.cloned(), talk: talk.cloned(), head, folds, rail };
+    let inputs = Inputs { item: item.id.clone(), seen: s.store.seen_before.get(&item.id).copied(), diffs: diffs.cloned(), talk: talk.cloned(), head, folds };
     let cached = PAGE_ROWS.with(|c| c.borrow().as_ref().and_then(|(was, rows)| was.same(&inputs).then(|| rows.clone())));
     if let Some(rows) = cached {
         return rows;
     }
     let threads: &[Discussion] = talk.and_then(Loadable::value).map_or(&[], |t| t.as_slice());
     let placed = Placed::new(threads, inputs.head.as_deref(), files);
-    let mut rows = vec![Row::Header, Row::Description, Row::Heading(Part::Changes)];
+    let mut rows = Vec::new();
     match diffs {
         Some(Loadable::Loaded(_)) if files.is_empty() => rows.push(Row::Empty("No changes.")),
         Some(Loadable::Loaded(_)) => {
-            if !rail {
-                rows.push(Row::FileList);
-            }
+            rows.push(Row::FileList);
             for (f, file) in files.iter().enumerate() {
                 rows.push(Row::FileHeader(f));
                 if inputs.folds[f] == 1 {
@@ -356,7 +489,7 @@ fn page_rows(
                 } else if file.lines.is_empty() {
                     let text = if file.renamed_file { "Renamed without changes." } else { "No changes to show (binary or mode change)." };
                     rows.push(Row::Notice(f, text.into(), false));
-                } else if (file.lines.len() > LARGE_FILE || file.generated_file) && inputs.folds[f] != 2 {
+                } else if waits_for_click(file) && inputs.folds[f] != 2 {
                     rows.push(Row::Notice(f, format!("{} lines. Show the diff", file.lines.len()), true));
                 } else {
                     rows.push(Row::Top(f));
@@ -365,100 +498,140 @@ fn page_rows(
                 rows.push(Row::Footer(f));
             }
         }
-        Some(Loadable::Failed(e)) => rows.push(Row::Failed(Part::Changes, e.clone())),
-        _ => rows.push(Row::Loading(Part::Changes)),
+        Some(Loadable::Failed(e)) => rows.push(Row::Failed(e.clone())),
+        _ => rows.push(Row::Loading),
     }
-    rows.push(Row::Heading(Part::Conversation));
-    match talk {
-        Some(Loadable::Loaded(_)) => {
-            rows.extend(placed.general.iter().map(|&t| Row::Thread(t)));
-            rows.push(Row::Composer);
-        }
-        Some(Loadable::Failed(e)) => rows.push(Row::Failed(Part::Conversation, e.clone())),
-        _ => rows.push(Row::Loading(Part::Conversation)),
-    }
-    rows.push(Row::Verdict);
     let keys = rows.iter().map(|r| r.key(files, threads)).collect();
+    let talk_rows = conversation_rows(talk, threads.len());
+    let talk_keys = talk_rows.iter().map(|r| r.key(files, threads)).collect();
+    let fresh = inputs.seen.is_some() && threads.iter().any(|t| s.store.has_fresh(item, t));
     let version = VERSION.with(|v| {
         v.set(v.get() + 1);
         v.get()
     });
-    let made = PageRows { rows: Rc::new(rows), keys: Rc::new(keys), placed: Rc::new(placed), version };
+    let made = PageRows {
+        rows: Rc::new(rows),
+        keys: Rc::new(keys),
+        talk_rows: Rc::new(talk_rows),
+        talk_keys: Rc::new(talk_keys),
+        placed: Rc::new(placed),
+        fresh,
+        version,
+    };
     PAGE_ROWS.with(|c| *c.borrow_mut() = Some((inputs, made.clone())));
     made
 }
 
-/// Scrolls the selected merge request's page so `part` starts at the top of the card, unfolding
-/// a file first.
-pub fn jump(s: &mut App, tx: &mut Tx, part: Part) {
-    let Some(item) = s.store.selected().cloned() else { return };
-    let files = s.store.diffs.get(&item.id).and_then(Loadable::value).cloned().unwrap_or_default();
-    let (part, key) = match part {
-        Part::File(f) if f < files.len() => {
-            let id = files[f].id();
-            s.collapsed.remove(&format!("{}|{id}", item.id));
-            (part, format!("file:{id}"))
-        }
-        Part::File(_) => (Part::Changes, section_key(Part::Changes).to_string()),
-        _ => (part, section_key(part).to_string()),
-    };
-    tx.instant();
-    // A row far down a big diff isn't built yet: revealing it builds it, then it lands on top.
-    tx.scroll_into_view_in("page-rows", key.clone());
-    tx.scroll_key_to(format!("page-rows/{key}"), 0.0);
-    // The rail may be scrolled itself, with a long list of files.
-    tx.scroll_into_view_in("rail", rail_key(part));
-    let spy = s.spies.entry(item.id).or_default();
-    spy.aimed = Some(part);
-    spy.settle();
+/// A long or generated file, whose lines wait for a click.
+fn waits_for_click(file: &FileDiff) -> bool {
+    file.lines.len() > LARGE_FILE || file.generated_file
 }
 
-/// The key of a part's row in the rail.
-fn rail_key(part: Part) -> String {
-    match part {
-        Part::File(f) => format!("rail-file-{f}"),
-        _ => format!("rail-{}", if part == Part::Ask { "ask" } else { section_key(part) }),
+/// The Conversation tab's rows: every thread, those on a line too, then the comment box.
+fn conversation_rows(talk: Option<&Loadable<Rc<Vec<Discussion>>>>, threads: usize) -> Vec<Row> {
+    let mut rows = Vec::new();
+    match talk {
+        Some(Loadable::Loaded(_)) => {
+            if threads == 0 {
+                rows.push(Row::Empty("No comments yet."));
+            }
+            rows.extend((0..threads).map(Row::Thread));
+            rows.push(Row::Composer);
+        }
+        Some(Loadable::Failed(e)) => rows.push(Row::Failed(e.clone())),
+        _ => rows.push(Row::Loading),
+    }
+    rows
+}
+
+/// Shows the tab `jump` is on, and scrolls to the place it names there: a file unfolds first,
+/// and a line's file shows all its lines.
+pub fn go(s: &mut App, tx: &mut Tx, jump: Jump) {
+    let Some(id) = s.store.selected_id.clone() else { return };
+    tx.instant();
+    s.detail_tabs.insert(id.clone(), jump.tab());
+    let files = s.store.diffs.get(&id).and_then(Loadable::value).cloned().unwrap_or_default();
+    match jump {
+        Jump::Tab(_) => {}
+        Jump::File(f) => {
+            s.spies.entry(id.clone()).or_default().aimed = f;
+            match f.and_then(|f| files.get(f)) {
+                Some(file) => {
+                    s.collapsed.remove(&format!("{id}|{}", file.id()));
+                    land(tx, Tab::Changes, format!("file:{}", file.id()), 0.0);
+                }
+                None => tx.scroll_to_instant(scroll_key(&id, Tab::Changes), 0.0, 0.0),
+            }
+        }
+        Jump::Line(thread) => {
+            let threads = s.store.discussions.get(&id).and_then(Loadable::value).cloned().unwrap_or_default();
+            let head = s.store.diff_refs.get(&id).map(|r| r.head_sha.as_str());
+            let Some((f, l)) = threads.iter().find(|t| t.id == thread).and_then(|t| line_of(t, head, &files)) else { return };
+            let key = format!("{id}|{}", files[f].id());
+            s.collapsed.remove(&key);
+            if waits_for_click(&files[f]) {
+                s.expanded_large.insert(key);
+            }
+            land(tx, Tab::Changes, format!("line:{f}:{l}"), LINE_ROOM);
+        }
+        Jump::Thread(thread) => land(tx, Tab::Conversation, format!("thread:{thread}"), 0.0),
+        Jump::Composer => {
+            tx.scroll_into_view_in(Tab::Conversation.list_key(), "composer");
+            tx.focus(draft_field_key(&DraftKey::Comment(id)), false);
+        }
     }
 }
 
-/// J and K: the next or previous part of the page, each file a part. False with nothing open.
+/// Scrolls `tab`'s row `key` to `at` points under the top of the page. A row far down a big diff
+/// isn't built yet: revealing it builds it, then it lands.
+fn land(tx: &mut Tx, tab: Tab, key: String, at: f32) {
+    tx.scroll_into_view_in(tab.list_key(), key.clone());
+    tx.scroll_key_to(format!("{}/{key}", tab.list_key()), at);
+}
+
+/// J and K: on the Changes tab, the next or previous file's header at the top; on another tab J
+/// opens the Changes tab. False with nothing open.
 pub fn step(s: &mut App, tx: &mut Tx, by: i64) -> bool {
     let Some(id) = s.store.selected_id.clone() else { return false };
+    if s.tab(&id) != Tab::Changes {
+        if by > 0 {
+            go(s, tx, Jump::Tab(Tab::Changes));
+        }
+        return true;
+    }
     let files = s.store.diffs.get(&id).and_then(Loadable::value).map_or(0, |f| f.len());
-    let to = current_part(s, &id).step(by, files);
-    jump(s, tx, to);
+    let from = s.spies.get(&id).and_then(|spy| spy.aimed.or(spy.top));
+    go(s, tx, Jump::File(step_file(from, by, files)));
     true
 }
 
-/// Shows the comment box at the end of the conversation with the caret in it.
-pub fn compose(tx: &mut Tx, id: &str) {
-    tx.instant();
-    tx.scroll_into_view_in("page-rows", "composer");
-    tx.focus(draft_field_key(&DraftKey::Comment(id.to_string())), false);
+/// The first file of `item` I haven't viewed, or have and it changed since.
+pub fn first_unviewed(s: &App, item: &MergeRequest) -> Option<usize> {
+    let files = s.store.diffs.get(&item.id).and_then(Loadable::value)?;
+    files.iter().position(|f| s.store.viewed(f, item) != Viewed::Yes)
 }
 
-/// Centres a row's content in the page's column, with the page's margins; beside the rail, the
-/// column starts at the rail's gap instead.
-fn frame(page: &Page, i: usize, content: El) -> El {
-    let last = i + 1 == page.rows.len();
-    let mut outer = if page.rail { row().w_full().pl(RAIL_GAP).pr(RAIL_INSET) } else { row().w_full().px(44.0).justify_center() };
+/// Centres a row's content in its tab's column, the reading measure or the changes' wider one,
+/// with the page's margins.
+fn frame(tab: Tab, count: usize, i: usize, content: El) -> El {
+    let width = if tab == Tab::Changes { PAGE_WIDTH } else { READING_WIDTH };
+    let mut outer = row().w_full().px(44.0).justify_center();
     if i == 0 {
         outer = outer.pt(PAGE_TOP);
     }
-    if last {
+    if i + 1 == count {
         outer = outer.pb(60.0);
     }
-    outer.child(col().w_full().max_w(PAGE_WIDTH).child(content))
+    outer.child(col().w_full().max_w(width).child(content))
 }
 
-fn build_row(s: &App, page: &Page, i: usize) -> El {
+fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
     let p = &page.look.p;
     let k = &*page.look.k;
     let item = &page.item;
-    // The first thing under a heading sits closer to it than to what came before.
-    let first = i > 0 && matches!(page.rows[i - 1], Row::Heading(_));
-    let content = match &page.rows[i] {
-        Row::Header => header(s, p, item, !page.rail),
+    let what = if tab == Tab::Changes { "changes" } else { "conversation" };
+    let content = match &rows[i] {
+        Row::Header => header(s, p, item),
         Row::Description => {
             let body = if item.description.trim().is_empty() {
                 text("No description.").font(serif(16.0, 400.0).italic()).color(p.tertiary)
@@ -467,32 +640,20 @@ fn build_row(s: &App, page: &Page, i: usize) -> El {
             };
             el().w_full().max_w(READING_WIDTH).pt(30.0).child(body)
         }
-        Row::Heading(Part::Changes) => {
-            let n = page.files.len();
-            let lede = match n {
-                0 => None,
-                1 => Some("1 file. Mark it viewed when you finish it.".to_string()),
-                n => Some(format!("{n} files. Mark each one as you finish it.")),
-            };
-            heading(p, "The changes", lede)
-        }
-        Row::Heading(_) => {
-            heading(p, "Conversation", Some(format!("Comments on the {} as a whole. Comments on a line are under that line.", item.kind().noun())))
-        }
-        Row::Loading(part) => {
-            row().gap(8.0).center_y().child(Spinner::new().size(14.0).build(k)).child(
-                text(format!("Loading the {}…", if *part == Part::Changes { "changes" } else { "conversation" })).font(ui(13.0, 400.0)).color(p.secondary),
-            )
-        }
-        Row::Failed(part, message) => row().gap(6.0).items_start().child(icon(&I::WARNING, 13.0).color(p.red)).max_w(READING_WIDTH).child(
-            text(format!("Couldn't load the {}: {message}", if *part == Part::Changes { "changes" } else { "conversation" }))
-                .font(ui(13.0, 400.0))
-                .color(p.red)
-                .wrap()
-                .grow(1.0)
-                .shrink()
-                .min_w(0.0),
-        ),
+        Row::Standing if !item.is_open() => how_it_ended(p, item),
+        Row::Standing if page.mine => before_it_merges(s, p, item),
+        Row::Standing => standing(s, p, page),
+        Row::Loading => row()
+            .gap(8.0)
+            .center_y()
+            .child(Spinner::new().size(14.0).build(k))
+            .child(text(format!("Loading the {what}…")).font(ui(13.0, 400.0)).color(p.secondary)),
+        Row::Failed(message) => row()
+            .gap(6.0)
+            .items_start()
+            .child(icon(&I::WARNING, 13.0).color(p.red))
+            .max_w(READING_WIDTH)
+            .child(text(format!("Couldn’t load the {what}: {message}")).font(ui(13.0, 400.0)).color(p.red).wrap().grow(1.0).shrink().min_w(0.0)),
         Row::Empty(message) => el().child(text(*message).font(ui(13.0, 400.0)).color(p.tertiary)),
         Row::FileList => file_list(s, p, page),
         Row::FileHeader(f) => file_header(s, p, page, *f),
@@ -503,10 +664,10 @@ fn build_row(s: &App, page: &Page, i: usize) -> El {
             el().w_full().pb(14.0).child(el().w_full().h(10.0).fill(p.paper).corners([0.0, 0.0, 10.0, 10.0]).border_sides([0.0, 1.0, 1.0, 1.0], p.strong_line))
         }
         Row::Thread(t) => {
-            let thread = &page.threads[*t];
-            el().w_full().max_w(READING_WIDTH).pt(if first { 0.0 } else { 16.0 }).child(thread_card(s, p, k, item, thread, true))
+            let head = if page.placed.at[*t].is_some() { Head::Link } else { Head::Place };
+            el().w_full().pt(if i == 0 { 0.0 } else { 16.0 }).child(thread_card(s, p, k, item, &page.threads[*t], head))
         }
-        Row::Composer => el().w_full().max_w(READING_WIDTH).pt(if first { 0.0 } else { 24.0 }).child(composer(
+        Row::Composer => el().w_full().pt(if i == 0 { 0.0 } else { 24.0 }).child(composer(
             s,
             p,
             k,
@@ -515,33 +676,21 @@ fn build_row(s: &App, page: &Page, i: usize) -> El {
             "Comment",
             false,
         )),
-        Row::Verdict if page.mine => before_it_merges(s, p, item),
-        Row::Verdict => verdict(s, p, page),
     };
-    frame(page, i, content)
+    frame(tab, rows.len(), i, content)
 }
 
-/// A part's title over a rule, and a line saying what's in it.
-fn heading(p: &Pal, title: &str, lede: Option<String>) -> El {
-    let mut c = col()
-        .w_full()
-        .pt(44.0)
-        .pb(18.0)
-        .child(rule(p))
-        .child(text(title.to_string()).font(serif(22.0, SEMIBOLD).lines(1.25)).color(p.text).pt(22.0).selectable(true));
-    if let Some(lede) = lede {
-        c = c.child(text(lede).font(ui(13.0, 400.0).lines(1.5)).color(p.secondary).wrap().max_w(READING_WIDTH).pt(6.0));
-    }
-    c
+/// A part's title over a rule.
+fn heading(p: &Pal, title: &str) -> El {
+    col().w_full().pt(44.0).child(rule(p)).child(text(title.to_string()).font(serif(22.0, SEMIBOLD).lines(1.25)).color(p.text).pt(22.0).selectable(true))
 }
 
-/// Your verdict: where the review stands in one sentence, then Approve.
-fn verdict(s: &App, p: &Pal, page: &Page) -> El {
+/// Where the review stands, in one sentence: what's left to view and which threads are open.
+fn sum_up(s: &App, page: &Page) -> String {
     let item = &page.item;
     let open = page.threads.iter().filter(|t| is_open(t)).count();
-    let viewed = page.files.iter().filter(|f| s.store.viewed(f, item) == Viewed::Yes).count();
-    let left = page.files.len() - viewed;
-    let files = match left {
+    let viewed = s.store.viewed_count(&page.files, item);
+    let files = match page.files.len() - viewed {
         _ if !page.changes || page.files.is_empty() => None,
         0 => Some("You’ve viewed every file".to_string()),
         1 => Some("1 file still to view".to_string()),
@@ -553,63 +702,59 @@ fn verdict(s: &App, p: &Pal, page: &Page) -> El {
         1 => Some("1 thread is open".to_string()),
         n => Some(format!("{n} threads are open")),
     };
-    let sentence = match (files, threads) {
+    match (files, threads) {
         (Some(files), Some(threads)) => format!("{files}, and {threads}."),
         (Some(files), None) => format!("{files}."),
         (None, Some(threads)) => format!("{}{}.", threads[..1].to_uppercase(), &threads[1..]),
         (None, None) => "There’s nothing to sum up yet.".to_string(),
-    };
-    let mut c = col()
-        .w_full()
-        .max_w(READING_WIDTH)
-        .gap(14.0)
-        .child(heading(p, "Your verdict", None).pb(0.0))
-        .child(text(sentence).font(serif(16.0, 400.0).lines(1.6)).color(p.text).wrap().selectable(true));
-    if !item.is_open() {
-        let state = if item.state == "merged" { "was merged" } else { "is closed" };
-        return c.child(text(format!("This {} {state}, so there’s nothing to approve.", item.kind().noun())).font(ui(13.0, 400.0)).color(p.secondary));
     }
-    let mut actions = row().gap(8.0).center_y().child(approval_button(s, p, item, true));
-    if let Some(busy) = &s.store.busy {
-        actions =
-            actions.child(Spinner::new().size(14.0).build(&p.kit()).ml(4.0)).child(text(busy.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line());
-    }
-    if i_approved(s, item) {
-        c = c.child(
-            row()
-                .gap(6.0)
-                .center_y()
-                .child(filled_mark(&I::DISC, &I::SMALL_CHECK, p.green, p.paper, 14.0))
-                .child(text("You approved this.").font(ui(13.0, MEDIUM)).color(p.green)),
-        );
-    }
-    c.child(actions)
 }
 
-/// The end of a request of my own: what stands between it and its merge, or how it ended.
+/// The end of the overview of a request I'm reviewing: where the review stands, and the way into
+/// the changes at the first file not viewed yet.
+fn standing(s: &App, p: &Pal, page: &Page) -> El {
+    let (title, jump) = match first_unviewed(s, &page.item) {
+        Some(f) => {
+            let path = &page.files[f].new_path;
+            (format!("Start with {}", path.rsplit('/').next().unwrap_or(path)), Jump::File(Some(f)))
+        }
+        None => ("See the Changes".to_string(), Jump::Tab(Tab::Changes)),
+    };
+    let start = action_button(p, "start-changes", None, &title, false, true).on_press_tx(move |s: &mut App, tx: &mut Tx| go(s, tx, jump.clone()));
+    col().w_full().pt(34.0).child(rule(p)).child(
+        row()
+            .w_full()
+            .pt(20.0)
+            .gaps(12.0, 16.0)
+            .center_y()
+            .flex_wrap()
+            .child(text(sum_up(s, page)).font(serif(16.0, 400.0).lines(1.6)).color(p.text).wrap().selectable(true).grow(1.0).shrink().min_w(0.0))
+            .child(start),
+    )
+}
+
+/// The end of the overview of an open request of my own: what stands between it and its merge.
 fn before_it_merges(s: &App, p: &Pal, item: &MergeRequest) -> El {
-    let c = col().w_full().max_w(READING_WIDTH).gap(14.0);
-    if item.is_open() {
-        return c.child(heading(p, "Before it merges", None).pb(0.0)).child(crate::ui::mine::checklist(s, p, item));
-    }
+    col().w_full().gap(14.0).child(heading(p, "Before it merges")).child(crate::ui::mine::checklist(s, p, item))
+}
+
+/// The end of the overview of a request that's merged or closed, mine or not: there's nothing
+/// left to review or to do.
+fn how_it_ended(p: &Pal, item: &MergeRequest) -> El {
     let end = if item.state == "merged" { "was merged" } else { "was closed without merging" };
-    c.child(heading(p, "How it ended", None).pb(0.0))
+    col()
+        .w_full()
+        .gap(14.0)
+        .child(heading(p, "How it ended"))
         .child(text(format!("This {} {end}.", item.kind().noun())).font(serif(16.0, 400.0).lines(1.6)).color(p.text).wrap().selectable(true))
 }
 
-/// Jumps to the first thread someone can still resolve: the file it's on, or the conversation.
+/// The Conversation tab at the first thread someone can still resolve.
 pub fn jump_to_open_thread(s: &mut App, tx: &mut Tx) {
     let Some(id) = s.store.selected_id.clone() else { return };
-    let files = s.store.diffs.get(&id).and_then(Loadable::value).cloned().unwrap_or_default();
     let threads = s.store.discussions.get(&id).and_then(Loadable::value).cloned().unwrap_or_default();
-    let head = s.store.diff_refs.get(&id).map(|r| r.head_sha.as_str());
-    let placed = Placed::new(&threads, head, &files);
-    let file = placed.by_file.iter().position(|on| on.iter().any(|&t| is_open(&threads[t])));
-    if let Some(f) = file {
-        // A long file's lines wait for a click, and its threads with them: show them.
-        s.expanded_large.insert(format!("{id}|{}", files[f].id()));
-    }
-    jump(s, tx, file.map_or(Part::Conversation, Part::File));
+    let open = threads.iter().find(|t| is_open(t)).map(|t| t.id.clone());
+    go(s, tx, open.map_or(Jump::Tab(Tab::Conversation), Jump::Thread));
 }
 
 /// Whether a thread that can be resolved has been; none for one that can't (a plain comment).
@@ -623,163 +768,29 @@ fn is_open(thread: &Discussion) -> bool {
     resolved(thread) == Some(false)
 }
 
-/// Approve (the accent one in the verdict, `prominent`), or Revoke Approval once approved.
-fn approval_button(s: &App, p: &Pal, item: &MergeRequest, prominent: bool) -> El {
+/// Approve, or Revoke Approval once approved, as the `room` allows: written out, then Revoke
+/// for short, then their icons alone, named in full in their labels and tips.
+fn approval_button(s: &App, p: &Pal, item: &MergeRequest, room: Room) -> El {
     let idle = s.store.busy.is_none();
     if i_approved(s, item) {
         let it = item.clone();
-        action_button(p, "revoke", Some(&I::UNDO), "Revoke Approval", false, idle).on_press(move |s: &mut App| {
+        let revoke = match room {
+            Room::Wide => action_button(p, "revoke", Some(&I::UNDO), "Revoke Approval", false, idle),
+            Room::Narrow => action_button(p, "revoke", Some(&I::UNDO), "Revoke", false, idle).label("Revoke Approval").help("Revoke Approval"),
+            Room::Tight => action_icon_button(p, "revoke", &I::UNDO, "Revoke Approval", false, idle),
+        };
+        revoke.on_press(move |s: &mut App| {
             if s.store.busy.is_none() {
                 s.store.unapprove(&it)
             }
         })
     } else {
-        action_button(p, "approve", Some(&I::CHECK), "Approve", prominent, idle).help(keys("Approve  ⇧⌘A")).on_press_tx(actions::approve)
+        let approve = match room {
+            Room::Tight => action_icon_button(p, "approve", &I::CHECK, "Approve", true, idle),
+            _ => action_button(p, "approve", Some(&I::CHECK), "Approve", true, idle),
+        };
+        approve.help(keys("Approve  ⇧⌘A")).on_press_tx(actions::approve)
     }
-}
-
-// MARK: Contents
-
-/// The rail of contents beside the page: its parts and every file, the one being read marked
-/// with a clay edge; each row jumps there.
-fn contents(page: &Rc<Page>, inset: f32) -> El {
-    // Nobody approves their own.
-    let approve = page.item.is_open() && !page.mine;
-    let files = page.files.len();
-    let count = 6 + files + approve as usize;
-    let built = page.clone();
-    // Only the rows in sight are built, so a request touching thousands of files costs the
-    // rail no more than one touching three.
-    let rows = col().key("rail").w_full().growth(GrowthSpec::default()).virtual_rows_version(&(page.item.id.as_str(), count)).virtual_rows(
-        count,
-        26.0,
-        move |_: &App, i| Cow::Owned(rail_at(i, files).key()),
-        move |s: &App, i| rail_entry(s, &built, i, inset),
-    );
-    col().key("contents").role("navigation").label("Contents").w(RAIL_WIDTH + inset).h_full().min_h(0.0).child(rows).scroll(ScrollSpec { stick_bottom: false })
-}
-
-/// What a row of the rail is: its title, a part of the page, or the button at its foot.
-enum RailRow {
-    Title,
-    Part(Part),
-    Approve,
-}
-
-impl RailRow {
-    fn key(&self) -> String {
-        match self {
-            RailRow::Title => "rail-title".into(),
-            RailRow::Part(part) => rail_key(*part),
-            RailRow::Approve => "rail-foot".into(),
-        }
-    }
-}
-
-/// Row `i` of the rail of a page with `files` files.
-fn rail_at(i: usize, files: usize) -> RailRow {
-    match i {
-        0 => RailRow::Title,
-        1 => RailRow::Part(Part::Ask),
-        2 => RailRow::Part(Part::Description),
-        3 => RailRow::Part(Part::Changes),
-        i if i < 4 + files => RailRow::Part(Part::File(i - 4)),
-        i if i == 4 + files => RailRow::Part(Part::Conversation),
-        i if i == 5 + files => RailRow::Part(Part::Verdict),
-        _ => RailRow::Approve,
-    }
-}
-
-fn rail_entry(s: &App, page: &Page, i: usize, inset: f32) -> El {
-    let p = &page.look.p;
-    let item = &page.item;
-    let part = match rail_at(i, page.files.len()) {
-        RailRow::Title => return el().w_full().pl(inset + 12.0).pt(PAGE_TOP).pb(8.0).child(text("Contents").font(ui(12.0, MEDIUM)).color(p.secondary)),
-        RailRow::Approve => return el().w_full().pl(inset + 12.0).pt(18.0).pb(24.0).child(approval_button(s, p, item, false).key("rail-approve")),
-        RailRow::Part(part) => part,
-    };
-    let current = current_part(s, &item.id);
-    let label = |title: &str| {
-        text(title.to_string()).font(ui(13.0, 400.0)).color(if part == current { p.text } else { p.secondary }).group_color(p.text).single_line().truncate()
-    };
-    // My own starts with where it stands (its mark here too) and ends with what's left.
-    let own = (page.mine, item.is_open());
-    let r = match part {
-        Part::Ask => {
-            let (title, standing) = match own {
-                (true, true) => ("Where it stands", vec![crate::ui::mine::standing_mark(p, s.store.status_of(item).standing, 12.0, p.paper)]),
-                (true, false) => ("Where it stands", vec![]),
-                (false, _) => ("The ask", vec![]),
-            };
-            rail_row(p, part, current, 10.0, label(title), standing)
-        }
-        Part::Description => rail_row(p, part, current, 10.0, label("Description"), vec![]),
-        Part::Changes => {
-            let mut tally = vec![];
-            if page.changes && !page.files.is_empty() {
-                let viewed = s.store.viewed_count(&page.files, item);
-                tally.push(text(format!("{viewed} of {}", page.files.len())).font(ui(12.0, 400.0).features("'tnum' 1")).color(p.secondary).single_line());
-            }
-            rail_row(p, part, current, 10.0, label("The changes"), tally)
-        }
-        Part::File(f) => {
-            let file = &page.files[f];
-            let state = s.store.viewed(file, item);
-            let tint = if part == current {
-                p.text
-            } else if state == Viewed::Yes {
-                p.tertiary
-            } else {
-                p.secondary
-            };
-            let threads = &page.placed.by_file[f];
-            let fresh = threads.iter().any(|&t| s.store.has_fresh(item, &page.threads[t]));
-            let name = file.new_path.rsplit('/').next().unwrap_or(&file.new_path).to_string();
-            let name = text(name).font(mono(12.0, 400.0)).color(tint).group_color(p.text).single_line().truncate();
-            let end = comment_count(p, threads.len(), fresh).into_iter().chain([viewed_mark(p, state, p.paper)]).collect();
-            rail_row(p, part, current, 20.0, name, end).label(file.new_path.clone()).help(file.new_path.clone())
-        }
-        Part::Conversation => {
-            let general = &page.placed.general;
-            let fresh = general.iter().any(|&t| s.store.has_fresh(item, &page.threads[t]));
-            rail_row(p, part, current, 10.0, label("Conversation"), comment_count(p, general.len(), fresh).into_iter().collect())
-        }
-        Part::Verdict => {
-            let title = match own {
-                (true, true) => "Before it merges",
-                (true, false) => "How it ended",
-                (false, _) => "Your verdict",
-            };
-            // The rail ends here on my own, with no button under it.
-            let r = rail_row(p, part, current, 10.0, label(title), vec![]);
-            return el().w_full().pl(inset).pb(if own.0 || !item.is_open() { 24.0 } else { 0.0 }).child(r);
-        }
-    };
-    el().w_full().pl(inset).child(r)
-}
-
-/// One row of the rail: a 2-point edge (clay on the part being read, kept on every row so
-/// nothing shifts), the label `indent` points in, and what's at its end.
-fn rail_row(p: &Pal, part: Part, current: Part, indent: f32, label: El, end: Vec<El>) -> El {
-    let on = part == current;
-    let mut edge = el().w(2.0).h(26.0);
-    if on {
-        edge = edge.fill(p.accent);
-    }
-    let mut r = row()
-        .role("button")
-        .w_full()
-        .h(26.0)
-        .pr(10.0)
-        .gap(6.0)
-        .center_y()
-        .hover_group()
-        .child(edge)
-        .child(label.ml(indent - 6.0).grow(1.0).shrink().min_w(0.0));
-    for e in end {
-        r = r.child(e);
-    }
-    r.on_press_tx(move |s: &mut App, tx: &mut Tx| jump(s, tx, part))
 }
 
 /// Viewed, changed since, or not yet, its marks knocked out in `ink` (the surface under them).
@@ -793,7 +804,7 @@ fn viewed_mark(p: &Pal, state: Viewed, ink: rune::Color) -> El {
 
 // MARK: Header
 
-fn header(s: &App, p: &Pal, item: &MergeRequest, with_actions: bool) -> El {
+fn header(s: &App, p: &Pal, item: &MergeRequest) -> El {
     let mut top = row()
         .gap(8.0)
         .center_y()
@@ -823,9 +834,7 @@ fn header(s: &App, p: &Pal, item: &MergeRequest, with_actions: bool) -> El {
     if let Some(stack) = crate::ui::mine::stack_section(s, p, item) {
         c = c.child(stack.pt(2.0));
     }
-    c = c.child(reviewers(s, p, item));
-    // An open request of mine has its actions in the next step, above.
-    if !with_actions || (mine && item.is_open()) { c } else { c.child(action_bar(s, p, item).pt(4.0)) }
+    c.child(reviewers(s, p, item))
 }
 
 /// "You opened this 2 days ago", for a merge request of my own.
@@ -940,44 +949,12 @@ fn i_approved(s: &App, item: &MergeRequest) -> bool {
     item.approved_by.iter().any(|a| a.eq_ignore_ascii_case(&me.username))
 }
 
-fn action_bar(s: &App, p: &Pal, item: &MergeRequest) -> El {
-    let mut r = row().gap(8.0).center_y();
-    // Nobody approves their own.
-    if item.is_open() && !s.store.is_mine(item) {
-        r = r.child(approval_button(s, p, item, true));
-    }
-    for link in link_buttons(p, item) {
-        r = r.child(link);
-    }
-    if let Some(busy) = &s.store.busy {
-        r = r.child(Spinner::new().size(14.0).build(&p.kit()).ml(4.0)).child(text(busy.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line());
-    }
-    r
-}
-
-/// "Open in GitLab" and "Copy Branch", in that order.
-pub fn link_buttons(p: &Pal, item: &MergeRequest) -> Vec<El> {
-    let url = item.web_url.clone();
-    let branch = item.source_branch.clone();
-    vec![
-        action_button(p, "open-forge", Some(&I::ARROW_UP_RIGHT), &format!("Open in {}", item.kind().name()), false, true).on_press_tx(
-            move |_: &mut App, tx: &mut Tx| {
-                let _ = tx.open_url(&url);
-            },
-        ),
-        action_button(p, "copy-branch", Some(&I::COPY), "Copy Branch", false, true).on_press_tx(move |s: &mut App, tx: &mut Tx| {
-            tx.copy(branch.clone());
-            s.store.show(&format!("Copied {branch}"));
-        }),
-    ]
-}
-
 // MARK: Changes
 
 fn file_list(s: &App, p: &Pal, page: &Page) -> El {
     let item = &page.item;
     let files = &page.files;
-    let viewed = files.iter().filter(|f| s.store.viewed(f, item) == Viewed::Yes).count();
+    let viewed = s.store.viewed_count(files, item);
     let done = viewed == files.len() && viewed > 0;
     let mut c = col().w_full().py(6.0).radius(10.0).fill(p.well).border(1.0, p.line).child(
         row()
@@ -1023,7 +1000,7 @@ fn file_list(s: &App, p: &Pal, page: &Page) -> El {
                 )
                 .child(counts(p, file).opacity(if state == Viewed::Yes { 0.6 } else { 1.0 }))
                 .child(viewed_mark(p, state, p.well))
-                .on_press_tx(move |s: &mut App, tx: &mut Tx| jump(s, tx, Part::File(f))),
+                .on_press_tx(move |s: &mut App, tx: &mut Tx| go(s, tx, Jump::File(Some(f)))),
         );
     }
     el().w_full().pb(14.0).child(c)
@@ -1185,8 +1162,8 @@ fn line_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, l: usize) -> El {
         file.id(),
         l,
     ));
-    for thread in page.placed.on(line, file) {
-        c = c.child(el().w_full().px(14.0).py(8.0).fill(p.well).child(thread_card(s, p, k, item, &page.threads[thread], false).max_w(760.0)));
+    for &thread in page.placed.on(f, l) {
+        c = c.child(el().w_full().px(14.0).py(8.0).fill(p.well).child(thread_card(s, p, k, item, &page.threads[thread], Head::Bare).max_w(760.0)));
     }
     let key = DraftKey::Line(item.id.clone(), file.id(), l);
     if s.line_comment.as_ref() == Some(&key) {
@@ -1202,49 +1179,40 @@ fn line_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, l: usize) -> El {
     c
 }
 
-/// Where each thread goes: under the diff line it's about when a line row shows that line,
-/// else in the conversation, so none goes missing (general comments, and positions that are
-/// outdated or not in the diff).
+/// Where each thread sits in the changes: under the diff line it's about, when a line row shows
+/// that line. The rest (general comments, and positions outdated or not in the diff) are in the
+/// conversation only, where every thread is.
 #[derive(Default)]
 struct Placed {
-    by_line: HashMap<String, Vec<usize>>,
+    /// Each thread's file and line, by the thread's index.
+    at: Vec<Option<(usize, usize)>>,
+    by_line: HashMap<(usize, usize), Vec<usize>>,
     /// The threads under each file's lines.
     by_file: Vec<Vec<usize>>,
-    /// The threads for the conversation.
-    general: Vec<usize>,
 }
 
 impl Placed {
     fn new(threads: &[Discussion], head: Option<&str>, files: &[FileDiff]) -> Placed {
         let mut placed = Placed { by_file: vec![Vec::new(); files.len()], ..Placed::default() };
-        for (index, thread) in threads.iter().enumerate() {
-            match line_of(thread, head, files) {
-                Some((key, f)) => {
-                    placed.by_line.entry(key).or_default().push(index);
-                    placed.by_file[f].push(index);
-                }
-                None => placed.general.push(index),
+        placed.at = threads.iter().map(|thread| line_of(thread, head, files)).collect();
+        for (index, at) in placed.at.iter().enumerate() {
+            if let Some((f, l)) = *at {
+                placed.by_line.entry((f, l)).or_default().push(index);
+                placed.by_file[f].push(index);
             }
         }
         placed
     }
 
-    fn on(&self, line: &DiffLine, file: &FileDiff) -> Vec<usize> {
-        if self.by_line.is_empty() {
-            return Vec::new();
-        }
-        let key = match line.kind {
-            LineKind::Added | LineKind::Context => line.new_number.map(|n| format!("n|{}|{n}", file.new_path)),
-            LineKind::Removed => line.old_number.map(|n| format!("o|{}|{n}", file.old_path)),
-            _ => None,
-        };
-        key.and_then(|k| self.by_line.get(&k).cloned()).unwrap_or_default()
+    /// The threads under line `l` of file `f`.
+    fn on(&self, f: usize, l: usize) -> &[usize] {
+        self.by_line.get(&(f, l)).map_or(&[], Vec::as_slice)
     }
 }
 
-/// The line key `Placed::on` finds a thread under, and its file, when the diff has that line
-/// and the thread was left on this version of it.
-fn line_of(thread: &Discussion, head: Option<&str>, files: &[FileDiff]) -> Option<(String, usize)> {
+/// The file and the line of it a thread is on, when the diff shows that line and the thread was
+/// left on this version of it.
+fn line_of(thread: &Discussion, head: Option<&str>, files: &[FileDiff]) -> Option<(usize, usize)> {
     let position = thread.notes.iter().find(|n| !n.system).and_then(|n| n.position.as_ref())?;
     if let (Some(head), Some(at)) = (head, position.head_sha.as_deref()) {
         if at != head {
@@ -1257,21 +1225,32 @@ fn line_of(thread: &Discussion, head: Option<&str>, files: &[FileDiff]) -> Optio
         _ => return None,
     };
     let f = files.iter().position(|f| if new { &f.new_path == path } else { &f.old_path == path })?;
-    let shown = files[f].lines.iter().any(|l| match l.kind {
+    let l = files[f].lines.iter().position(|l| match l.kind {
         LineKind::Added | LineKind::Context => new && l.new_number == Some(number),
         LineKind::Removed => !new && l.old_number == Some(number),
         _ => false,
-    });
-    shown.then(|| (format!("{}|{path}|{number}", if new { "n" } else { "o" }), f))
+    })?;
+    Some((f, l))
 }
 
 // MARK: Discussion
 
-pub fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussion, shows_position: bool) -> El {
+/// What a thread card shows above its notes.
+#[derive(Clone, Copy, PartialEq)]
+enum Head {
+    /// Nothing: it sits under its line.
+    Bare,
+    /// The file and line it was left on.
+    Place,
+    /// That place, as a way to its line in the changes.
+    Link,
+}
+
+fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussion, shows: Head) -> El {
     let notes: Vec<&Note> = thread.notes.iter().filter(|n| !n.system).collect();
     let resolved = resolved(thread) == Some(true);
     let mut c = col().key(format!("thread-{}", thread.id)).w_full().radius(10.0).fill(p.paper).border(1.0, p.strong_line).clip_rounded(10.0);
-    if shows_position {
+    if shows != Head::Bare {
         if let Some(position) = notes.first().and_then(|n| n.position.as_ref()) {
             if let Some(path) = position.new_path.clone().or_else(|| position.old_path.clone()) {
                 let at = position.new_line.or(position.old_line).map(|l| format!(":{l}")).unwrap_or_default();
@@ -1287,6 +1266,18 @@ pub fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Disc
                     .child(el().grow(1.0));
                 if resolved {
                     head = head.child(chip(p, Some(&I::CHECK), "Resolved", p.green, None, false));
+                }
+                if shows == Head::Link {
+                    let id = thread.id.clone();
+                    head = head
+                        .key("show-line")
+                        .role("button")
+                        .label(format!("{path}{at}"))
+                        .help("Show this line in the changes")
+                        .hover_group()
+                        .hover(p.hover)
+                        .child(icon(&I::CHEVRON_RIGHT, 10.0).color(p.tertiary).group_color(p.text))
+                        .on_press_tx(move |s: &mut App, tx: &mut Tx| go(s, tx, Jump::Line(id.clone())));
                 }
                 c = c.child(head).child(rule(p));
             }
@@ -1318,7 +1309,7 @@ pub fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Disc
                 .child(icon(&I::UNDO, 11.0).color(p.secondary))
                 .child(text("Reply").font(ui(12.0, MEDIUM)).color(p.secondary))
                 .child(el().grow(1.0));
-            if !shows_position && resolved {
+            if shows == Head::Bare && resolved {
                 reply = reply.child(text("Resolved").font(ui(12.0, 400.0)).color(p.secondary));
             }
             let focus_key = draft_field_key(&key);
@@ -1445,44 +1436,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_rail_lists_each_part_once_in_the_pages_order() {
-        let files = 3;
-        let parts: Vec<Part> = (0..7 + files)
-            .filter_map(|i| match rail_at(i, files) {
-                RailRow::Part(part) => Some(part),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(parts, [Part::Ask, Part::Description, Part::Changes, Part::File(0), Part::File(1), Part::File(2), Part::Conversation, Part::Verdict]);
-        assert!(matches!(rail_at(0, files), RailRow::Title));
-        assert!(matches!(rail_at(6 + files, files), RailRow::Approve), "the button comes last, after the verdict");
-        assert_eq!(rail_at(4, files).key(), rail_key(Part::File(0)), "a jump finds a row by the key it was listed under");
+    fn files_step_one_at_a_time_and_stop_at_the_ends() {
+        assert_eq!(step_file(None, 1, 3), Some(0));
+        assert_eq!(step_file(Some(0), 1, 3), Some(1));
+        assert_eq!(step_file(Some(2), 1, 3), Some(2), "J on the last file stays there");
+        assert_eq!(step_file(Some(1), -1, 3), Some(0));
+        assert_eq!(step_file(Some(0), -1, 3), None, "K on the first file goes to the top of the tab");
+        assert_eq!(step_file(None, -1, 3), None);
+        assert_eq!(step_file(None, 1, 0), None, "no files, nowhere to go");
+        assert_eq!(step_file(Some(7), -1, 3), Some(1), "a file the diff no longer has counts as its last");
     }
 
     #[test]
-    fn parts_step_in_the_rails_order_and_stop_at_the_ends() {
-        assert_eq!(Part::Ask.step(-1, 3), Part::Ask);
-        assert_eq!(Part::Changes.step(1, 3), Part::File(0));
-        assert_eq!(Part::File(2).step(1, 3), Part::Conversation);
-        assert_eq!(Part::Conversation.step(-1, 3), Part::File(2));
-        assert_eq!(Part::Changes.step(1, 0), Part::Conversation);
-        assert_eq!(Part::Verdict.step(1, 3), Part::Verdict);
+    fn jumps_open_the_tab_their_place_is_on() {
+        assert_eq!(Jump::File(Some(2)).tab(), Tab::Changes);
+        assert_eq!(Jump::Line("t1".into()).tab(), Tab::Changes);
+        assert_eq!(Jump::Thread("t1".into()).tab(), Tab::Conversation);
+        assert_eq!(Jump::Composer.tab(), Tab::Conversation);
     }
 
     #[test]
-    fn every_thread_shows_once_on_a_line_or_in_the_conversation() {
+    fn every_thread_is_in_the_conversation_and_those_on_a_line_under_it_once() {
         let (_, diffs, threads) = crate::fixtures::load();
         let (id, files) = diffs.into_iter().find(|(_, files)| files[0].new_path == "src/export/job.rs").unwrap();
         let threads = &threads[&id];
+        let talk = Some(Loadable::Loaded(Rc::new(threads.clone())));
+        let rows = conversation_rows(talk.as_ref(), threads.len());
+        let listed: Vec<usize> = rows.iter().filter_map(|r| if let Row::Thread(t) = r { Some(*t) } else { None }).collect();
+        assert_eq!(listed, (0..threads.len()).collect::<Vec<_>>(), "every thread, in order");
+        assert_eq!(rows.last(), Some(&Row::Composer), "it ends with the comment box");
+        assert_eq!(conversation_rows(talk.as_ref(), 0)[0], Row::Empty("No comments yet."));
+
         let placed = Placed::new(threads, None, &files);
-        let on_lines: usize = placed.by_file.iter().map(Vec::len).sum();
-        assert_eq!(on_lines + placed.general.len(), threads.len());
         // One on a line of job.rs; a general note, and one on a file the diff doesn't have.
+        assert_eq!(placed.at.iter().flatten().count(), 1);
         assert_eq!(placed.by_file[0].len(), 1);
-        assert_eq!(placed.general.len(), 2);
+        let lines: Vec<usize> = (0..files[0].lines.len()).filter(|&l| !placed.on(0, l).is_empty()).collect();
+        assert_eq!(lines.len(), 1, "under one line only");
+        assert_eq!(placed.at[placed.on(0, lines[0])[0]], Some((0, lines[0])), "a jump to its line finds the row it's under");
         // The fixture's positions name no commit, so they hold for any head.
-        assert_eq!(Placed::new(threads, Some("abc"), &files).general.len(), 2);
-        let lines: Vec<_> = files[0].lines.iter().filter(|l| !placed.on(l, &files[0]).is_empty()).collect();
-        assert_eq!(lines.len(), 1);
+        assert_eq!(Placed::new(threads, Some("abc"), &files).at, placed.at);
+    }
+
+    #[test]
+    fn the_bar_tightens_as_the_card_narrows() {
+        assert_eq!(room([0.0, 0.0, 900.0, 600.0]), Room::Wide);
+        assert_eq!(room([0.0, 0.0, 600.0, 600.0]), Room::Narrow);
+        // The Ask panel open beside the default sidebar in an 1100pt window.
+        assert_eq!(room([0.0, 0.0, 384.0, 600.0]), Room::Tight);
+    }
+
+    #[test]
+    fn approve_shows_on_others_open_requests() {
+        let (accounts, ..) = crate::fixtures::load();
+        let account = accounts.values().next().unwrap();
+        let open = account.open.iter().find(|m| m.is_open()).unwrap();
+        let merged = account.done.iter().find(|m| !m.is_open()).unwrap();
+        assert!(approves(open, false));
+        assert!(!approves(open, true), "nobody approves their own");
+        assert!(!approves(merged, false));
     }
 }

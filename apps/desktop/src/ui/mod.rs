@@ -246,13 +246,14 @@ fn tab_chip(p: &Pal, item: &MergeRequest, active: bool, preview: bool, unread: b
 
 fn card(s: &App, p: &Pal, k: &Kit, cx: &Cx<App>) -> El {
     let inner = match s.store.selected() {
-        // The card's width decides whether the contents rail fits; it changes on a resize, not a scroll.
-        Some(item) => detail::detail(s, p, k, item, cx.layout_with("card-wrap/card", detail::rail_inset).flatten()),
+        // The card's width decides whether the bar's buttons are written out; it changes on a
+        // resize, not a scroll.
+        Some(item) => detail::detail(s, p, k, item, cx.layout_with("card-wrap/card", detail::room).unwrap_or_default()),
         None => placeholder(s, p),
     };
     col()
         .key("card")
-        // Switching reviews and parts happens all day: the page changes at once, with no
+        // Switching reviews and tabs happens all day: the page changes at once, with no
         // cross-fade or rows growing in (the Ask panel beside it keeps its streaming motion).
         .instant_changes()
         .grow(1.0)
