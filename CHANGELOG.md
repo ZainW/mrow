@@ -1,6 +1,16 @@
 # Changelog
 
 What changed in each release of the Mrow app.
+## 0.1.1 (2026-11-14)
+
+### New
+
+- A disk image for macOS beside the archive, to download and drag into Applications (#9)
+
+### Fixed
+
+- Sign and notarize the macOS release with a Developer ID (#11)
+
 ## 0.1.0 (2026-11-13)
 
 ### New
