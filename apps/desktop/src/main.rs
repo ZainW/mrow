@@ -397,6 +397,58 @@ fn scene_mine_waiting(s: &mut App) {
     s.store.select(first);
 }
 
+/// A request of mine gone quiet: its row and its next step offer to ask again.
+fn scene_mine_quiet(s: &mut App) {
+    scene_mine(s);
+    let quiet = s.store.mine().iter().find(|m| m.iid == "307").map(|m| m.id.clone());
+    s.store.select(quiet);
+}
+
+/// The reviewer picker open on a quiet request, a search typed.
+fn scene_reviewers(s: &mut App) {
+    scene_mine_quiet(s);
+    let Some(item) = s.store.selected().cloned() else { return };
+    s.store.people.insert(data::store::Store::people_key(&item, ""), data::store::Loadable::Loaded(std::rc::Rc::new(fixtures::people())));
+    s.pick_reviewers(&item.id);
+    s.people_filter = rune::TextEdit::new("ma");
+}
+
+/// The title and description of a request of mine, open for editing.
+fn scene_edit_request(s: &mut App) {
+    scene_mine(s);
+    let id = s.store.mine().iter().find(|m| m.iid == "231").map(|m| m.id.clone());
+    s.store.select(id.clone());
+    let Some(id) = id else { return };
+    s.edit_request(&id);
+    if let Some(edit) = &mut s.request_edit {
+        edit.description = rune::TextEdit::new(
+            "The v1 export endpoint has had no callers since March.\n\nThis removes the route, its handler and the tests that covered it. Clients on v1 get a 410 with a link to the v2 docs.",
+        );
+    }
+}
+
+/// A request of mine whose target moved on: its next step offers to bring the branch up to date.
+fn scene_mine_rebase(s: &mut App) {
+    scene_mine(s);
+    let id = s.store.mine().iter().find(|m| m.iid == "231").map(|m| m.id.clone());
+    if let Some(account) = s.store.accounts.get_mut(&Forge::Gitlab) {
+        for m in account.mine.iter_mut().filter(|m| Some(&m.id) == id.as_ref()) {
+            m.merge_status = Some("need_rebase".into());
+        }
+    }
+    s.store.select(id);
+}
+
+/// Closing a request of mine, asked about first.
+fn scene_mine_close(s: &mut App) {
+    scene_mine(s);
+    let id = s.store.mine().iter().find(|m| m.iid == "92").map(|m| m.id.clone());
+    s.store.select(id.clone());
+    if let Some(id) = id {
+        s.confirm = Some((id, app::Confirm::Close));
+    }
+}
+
 fn scene_inbox(s: &mut App) {
     fixture(s);
     s.inbox_open = true;
@@ -493,6 +545,11 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("mine-merging", scene_mine_merging),
     ("mine-work", scene_mine_work),
     ("mine-waiting", scene_mine_waiting),
+    ("mine-quiet", scene_mine_quiet),
+    ("reviewers", scene_reviewers),
+    ("edit-request", scene_edit_request),
+    ("mine-rebase", scene_mine_rebase),
+    ("mine-close", scene_mine_close),
     ("inbox", scene_inbox),
     ("inbox-mine", scene_inbox_mine),
     ("inbox-empty", scene_inbox_empty),

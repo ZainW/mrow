@@ -372,6 +372,9 @@ fn bar(s: &App, page: &Page, open: Tab, room: Room) -> El {
     if room > Room::Tight {
         r = r.child(forge_button(p, item, narrow));
     }
+    if page.mine {
+        r = r.child(crate::ui::manage::more_button(s, p, item));
+    }
     let pending = s.store.pending_count(item);
     if reviews(item, page.mine, pending) {
         r = r.child(review_button(s, p, item, room, pending));
@@ -775,7 +778,8 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
     let item = &page.item;
     let what = if tab == Tab::Changes { "changes" } else { "conversation" };
     let content = match &rows[i] {
-        Row::Header => header(s, p, item),
+        Row::Header => header(s, p, k, item),
+        Row::Description if s.editing_request(&item.id).is_some() => crate::ui::manage::description_editor(s, p, k, item).unwrap_or_else(el),
         Row::Description => {
             let body = if item.description.trim().is_empty() {
                 text("No description.").font(serif(16.0, 400.0).italic()).color(p.tertiary)
@@ -784,7 +788,7 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
             };
             el().w_full().max_w(READING_WIDTH).pt(30.0).child(body)
         }
-        Row::Standing if !item.is_open() => how_it_ended(p, item),
+        Row::Standing if !item.is_open() => how_it_ended_here(s, p, item),
         Row::Standing if page.mine => before_it_merges(s, p, item),
         Row::Standing => standing(s, p, page),
         Row::Loading => row()
@@ -894,6 +898,15 @@ fn how_it_ended(p: &Pal, item: &MergeRequest) -> El {
         .child(text(format!("This {} {end}.", item.kind().noun())).font(serif(16.0, 400.0).lines(1.6)).color(p.text).wrap().selectable(true))
 }
 
+/// How a request ended, and on one of mine just closed, the way to reopen it.
+fn how_it_ended_here(s: &App, p: &Pal, item: &MergeRequest) -> El {
+    let ended = how_it_ended(p, item);
+    match crate::ui::manage::reopen_button(s, p, item) {
+        Some(reopen) => ended.child(row().child(reopen)),
+        None => ended,
+    }
+}
+
 /// The Conversation tab at the first thread someone can still resolve.
 pub fn jump_to_open_thread(s: &mut App, tx: &mut Tx) {
     let Some(id) = s.store.selected_id.clone() else { return };
@@ -950,7 +963,7 @@ fn viewed_mark(p: &Pal, state: Viewed, ink: rune::Color) -> El {
 
 // MARK: Header
 
-fn header(s: &App, p: &Pal, item: &MergeRequest) -> El {
+fn header(s: &App, p: &Pal, k: &Kit, item: &MergeRequest) -> El {
     let mut top = row()
         .gap(8.0)
         .center_y()
@@ -965,8 +978,15 @@ fn header(s: &App, p: &Pal, item: &MergeRequest) -> El {
     if item.state == "closed" {
         top = top.child(chip(p, Some(&I::CLOSE), "Closed", p.red, None, false));
     }
-    let title = text(item.title.clone()).font(serif(27.0, SEMIBOLD).lines(1.3)).color(p.text).wrap().selectable(true).w_full().max_w(READING_WIDTH);
     let mine = s.store.is_mine(item);
+    let editing = s.editing_request(&item.id).is_some();
+    if mine && item.is_open() && !editing {
+        top = top.child(el().grow(1.0)).child(crate::ui::manage::edit_button(p, item).my(-6.0));
+    }
+    let title = match crate::ui::manage::title_field(s, p, k, item) {
+        Some(field) => field,
+        None => text(item.title.clone()).font(serif(27.0, SEMIBOLD).lines(1.3)).color(p.text).wrap().selectable(true).w_full().max_w(READING_WIDTH),
+    };
     let mut c = col()
         .w_full()
         .gap(14.0)
@@ -1086,6 +1106,9 @@ fn reviewers(s: &App, p: &Pal, item: &MergeRequest) -> El {
                 .child(text(name).font(ui(12.0, MEDIUM)).color(p.text).single_line())
                 .child(state_icon(p, reviewer.state, 12.0)),
         );
+    }
+    if item.is_open() && s.store.is_mine(item) {
+        r = r.child(crate::ui::manage::reviewers_button(s, p, item).ml(-8.0).my(-5.0));
     }
     r
 }

@@ -758,6 +758,24 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
     (accounts, diffs, threads)
 }
 
+/// The people who can review in a project, for the reviewer picker.
+pub fn people() -> Vec<Person> {
+    [
+        ("robin", "Robin Okafor"),
+        ("maya.lind", "Maya Lindqvist"),
+        ("sam", "Samuel Achterberg"),
+        ("dev.k", "Devika Rao"),
+        ("tomas.v", "Tomás Varga"),
+        ("marta.n", "Marta Nowak"),
+        ("amari", "Amari Mensah"),
+        ("jonah.ek", "Jonah Ek"),
+        ("mathilde", "Mathilde Arnaud"),
+    ]
+    .into_iter()
+    .map(|(u, n)| person(u, n))
+    .collect()
+}
+
 /// The inbox: four new events (on Robin's own requests and a review asked of them) and some
 /// already dealt with, one about a request that has since merged.
 pub fn events() -> Vec<Event> {

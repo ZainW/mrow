@@ -250,6 +250,77 @@ mod mine {
     }
 
     #[test]
+    fn a_quiet_request_offers_to_ask_its_waiting_reviewers_again() {
+        use crate::data::mine::{ask_again, explain};
+        let mut asked = approved(request("1", "One", "a", "main"));
+        asked.reviewers.push(reviewer("Tomás Varga", ReviewState::Unreviewed));
+        let waiting = status(&asked, None);
+        assert!(ask_again(&asked, &waiting).is_empty(), "a request still fresh isn't nagged");
+
+        asked.updated_at = Utc::now() - Duration::days(4);
+        let quiet = status(&asked, None);
+        assert_eq!(quiet.standing, Standing::Quiet);
+        let who: Vec<String> = ask_again(&asked, &quiet).into_iter().map(|r| r.person.name).collect();
+        assert_eq!(who, ["Tomás Varga"], "only the one still to review, not Maya who approved");
+        assert!(explain(&asked, &quiet, None, None).contains("Ask again"));
+
+        asked.auto_merge = true;
+        assert!(ask_again(&asked, &status(&asked, None)).is_empty(), "auto-merge says it merges by itself; nothing to ask");
+    }
+
+    #[test]
+    fn a_branch_behind_its_target_is_offered_an_update() {
+        use crate::data::mine::{explain, needs_update};
+        let mut behind = approved(request("1", "One", "a", "main"));
+        assert!(!needs_update(&behind));
+        behind.merge_status = Some("need_rebase".into());
+        let st = status(&behind, None);
+        assert_eq!((st.standing, st.step.as_str()), (Standing::NeedsYou, "Needs a rebase"));
+        assert!(needs_update(&behind));
+        assert!(explain(&behind, &st, None, None).contains("Rebase it"));
+        behind.forge = Forge::Github;
+        assert!(explain(&behind, &st, None, None).contains("Update the branch"), "GitHub's word for it");
+        behind.merge_status = Some("conflict".into());
+        assert!(!needs_update(&behind), "a conflict needs a person, not a button");
+        behind.merge_status = Some("need_rebase".into());
+        behind.state = "closed".into();
+        assert!(!needs_update(&behind));
+    }
+
+    #[test]
+    fn github_keeps_reviewers_who_reviewed() {
+        use crate::data::mine::can_remove;
+        let mut item = request("1", "One", "a", "main");
+        let (asked, done) = (reviewer("Sam", ReviewState::Unreviewed), reviewer("Maya", ReviewState::Approved));
+        assert!(can_remove(&item, &asked) && can_remove(&item, &done));
+        item.forge = Forge::Github;
+        assert!(can_remove(&item, &asked));
+        assert!(!can_remove(&item, &done));
+    }
+
+    #[test]
+    fn editing_a_title_keeps_a_gitlab_drafts_prefix() {
+        use crate::data::mine::{edited_title, title_parts};
+        let mut item = request("1", "Draft: Cache tenant settings", "a", "main");
+        item.draft = true;
+        assert_eq!(title_parts(&item), ("Draft: ", "Cache tenant settings"));
+        assert_eq!(edited_title(&item, "  Cache settings per request "), "Draft: Cache settings per request");
+        for (title, prefix) in [("[Draft] x", "[Draft] "), ("(draft)x", "(draft)"), ("WIP: x", "WIP: "), ("Draft - x", "Draft - ")] {
+            item.title = title.into();
+            assert_eq!(title_parts(&item).0, prefix, "{title}");
+        }
+        // Not a draft: the title is all there is, and typing a prefix is a choice made in plain sight.
+        item.draft = false;
+        item.title = "Draft: notes on drafts".into();
+        assert_eq!(title_parts(&item), ("", "Draft: notes on drafts"));
+        // GitHub keeps the flag apart from the title.
+        item.draft = true;
+        item.forge = Forge::Github;
+        assert_eq!(edited_title(&item, "Draft: x"), "Draft: x");
+        assert_eq!(title_parts(&item).0, "");
+    }
+
+    #[test]
     fn whose_move_it_is() {
         let plain = request("1", "One", "a", "main");
         assert_eq!(status(&plain, None).step, "No reviewers yet");
@@ -926,6 +997,41 @@ fn github_pending_review_comments_land_in_place_and_threads_keep_their_node() {
     assert_eq!(new.id, "pc-22");
     assert!(new.notes[0].pending);
     assert_eq!(new.position().map(|p| (p.new_line, p.old_line)), Some((None, Some(3))), "a comment on the left is on the old line");
+}
+
+#[test]
+fn gitlab_members_become_people_who_can_review() {
+    let raw = br#"[
+        {"id": 7, "username": "maya.lind", "name": "Maya Lindqvist", "state": "active", "avatar_url": "https://gitlab.example.com/a/7.png", "access_level": 30},
+        {"id": 9, "username": "gone", "name": "Left Long Ago", "state": "blocked", "avatar_url": null},
+        {"id": 7, "username": "Maya.Lind", "name": "Maya Lindqvist", "state": "active", "avatar_url": null},
+        {"id": 11, "username": "sam", "name": "Samuel Achterberg"}
+    ]"#;
+    let people = super::gitlab::people_from_json(raw).expect("members decode");
+    let names: Vec<&str> = people.iter().map(|p| p.username.as_str()).collect();
+    assert_eq!(names, ["maya.lind", "sam"], "blocked members can't review, and one inherited twice shows once");
+    assert_eq!(people[0].avatar_url.as_deref(), Some("https://gitlab.example.com/a/7.png"));
+}
+
+#[test]
+fn github_assignable_users_become_people_who_can_review() {
+    let json = r#"{"repository": {"assignableUsers": {"nodes": [
+        {"login": "maya", "name": "Maya Lindqvist", "avatarUrl": "https://avatars.example/maya"},
+        {"login": "octo", "name": null, "avatarUrl": null},
+        null
+    ]}}}"#;
+    let people = super::github::people_from_json(json).expect("users decode");
+    assert_eq!(people.len(), 2, "an unreadable user is skipped");
+    assert_eq!((people[0].username.as_str(), people[0].name.as_str()), ("maya", "Maya Lindqvist"));
+    assert_eq!(people[1].name, "octo", "no name falls back to the login");
+    assert!(super::github::people_from_json(r#"{"repository": null}"#).unwrap().is_empty());
+}
+
+#[test]
+fn forges_name_bringing_a_branch_up_to_date_their_own_way() {
+    assert_eq!(Forge::Gitlab.update_branch_title(), "Rebase");
+    assert_eq!(Forge::Github.update_branch_title(), "Update Branch");
+    assert!(Forge::Gitlab.removes_reviewed() && !Forge::Github.removes_reviewed());
 }
 
 #[test]

@@ -911,6 +911,95 @@ pub fn submit_review(item: &MergeRequest, verdict: Verdict, body: &str) -> Resul
     }
 }
 
+// MARK: Managing my own
+
+const PEOPLE: &str = "query($owner: String!, $name: String!, $query: String) {
+      repository(owner: $owner, name: $name) {
+        assignableUsers(query: $query, first: 100) { nodes { login name avatarUrl } }
+      }
+    }";
+
+#[derive(Deserialize)]
+struct PeoplePayload {
+    repository: Option<PeopleRepo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PeopleRepo {
+    assignable_users: Nodes<Option<Actor>>,
+}
+
+/// The people who can be asked to review: the repository's assignable users, matching `query`.
+pub fn find_people(item: &MergeRequest, query: &str) -> Result<Vec<Person>, String> {
+    let (owner, name) = item.project_path.split_once('/').ok_or("GitHub didn't say whose repository this is.")?;
+    let query = query.trim();
+    let vars = [("owner", Some(owner.to_string())), ("name", Some(name.to_string())), ("query", (!query.is_empty()).then(|| query.to_string()))];
+    let payload: PeoplePayload = cli().graphql(PEOPLE, &vars, &[])?;
+    Ok(people_of(payload))
+}
+
+fn people_of(payload: PeoplePayload) -> Vec<Person> {
+    let users = payload.repository.map(|r| r.assignable_users.nodes).unwrap_or_default();
+    users.into_iter().flatten().map(|a| person(Some(&a))).collect()
+}
+
+/// A recorded `assignableUsers` answer (its `data`), for the self-tests.
+#[cfg(test)]
+pub fn people_from_json(json: &str) -> Result<Vec<Person>, String> {
+    let payload: PeoplePayload = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    Ok(people_of(payload))
+}
+
+fn requested_reviewers(item: &MergeRequest, method: &str, login: &str) -> Result<(), String> {
+    cli().send(&format!("{}/requested_reviewers", base(item)), method, &json!({ "reviewers": [login] })).map(drop)
+}
+
+pub fn add_reviewer(item: &MergeRequest, login: &str) -> Result<(), String> {
+    requested_reviewers(item, "POST", login)
+}
+
+/// Withdraws a pending request. Someone who already reviewed stays listed whatever is sent, so
+/// that's said rather than seeming to work.
+pub fn remove_reviewer(item: &MergeRequest, reviewer: &Reviewer) -> Result<(), String> {
+    if reviewer.state != ReviewState::Unreviewed {
+        return Err(format!("{} already reviewed it, and GitHub keeps everyone who reviewed on the list.", reviewer.person.name));
+    }
+    requested_reviewers(item, "DELETE", &reviewer.person.username)
+}
+
+/// Requests another review. Asking someone whose request is still pending changes nothing on
+/// GitHub, so that request is withdrawn and made again, which notifies them.
+pub fn ask_again(item: &MergeRequest, reviewer: &Reviewer) -> Result<(), String> {
+    if reviewer.state == ReviewState::Unreviewed {
+        requested_reviewers(item, "DELETE", &reviewer.person.username)?;
+    }
+    requested_reviewers(item, "POST", &reviewer.person.username)
+}
+
+/// Merges the base branch into the head. GitHub does it in the background; a short wait lets
+/// the refresh after it see the new commit more often than not.
+pub fn update_branch(item: &MergeRequest) -> Result<(), String> {
+    cli().send(&format!("{}/update-branch", base(item)), "PUT", &json!({}))?;
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    Ok(())
+}
+
+pub fn set_open(item: &MergeRequest, open: bool) -> Result<(), String> {
+    cli().send(&base(item), "PATCH", &json!({ "state": if open { "open" } else { "closed" } })).map(drop)
+}
+
+pub fn edit(item: &MergeRequest, title: Option<&str>, description: Option<&str>) -> Result<(), String> {
+    let mut body = json!({});
+    if let Some(title) = title {
+        body["title"] = json!(title);
+    }
+    if let Some(description) = description {
+        body["body"] = json!(description);
+    }
+    cli().send(&base(item), "PATCH", &body).map(drop)
+}
+
 // MARK: My comments
 //
 // A comment's kind is in its thread's id, as `threads_of` names them: `ic-` a conversation

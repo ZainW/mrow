@@ -11,13 +11,15 @@ use crate::data::models::{Discussion, FileDiff, MergeRequest, Note, Verdict};
 use crate::data::prefs;
 use crate::data::store::{Loadable, Store};
 
-/// A merge the next step asks about before doing it.
+/// A merge (or a close) the next step asks about before doing it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Confirm {
     /// This merge request alone.
     Merge,
     /// This one now, then each part stacked on it once it's ready.
     Stack,
+    /// Closing it without merging.
+    Close,
 }
 
 /// Where a comment being written goes.
@@ -123,6 +125,24 @@ pub struct App {
     pub confirm: Option<(String, Confirm)>,
     /// When the queue is next refreshed for a stack that's being merged, on the app clock.
     pub walk_refresh: f64,
+    /// The merge request whose reviewer picker is open, under its Reviewers button.
+    pub reviewer_picker: Option<String>,
+    /// The picker's search, and the person in its list the keyboard is on.
+    pub people_filter: TextEdit,
+    pub people_pick: usize,
+    /// The title and description of one of my requests, open for editing.
+    pub request_edit: Option<RequestEdit>,
+}
+
+/// A request of mine being edited on its overview. While it saves the page shows the new text;
+/// if the forge refuses, the editor opens again with what was typed.
+pub struct RequestEdit {
+    pub id: String,
+    /// The title without a GitLab draft's prefix, which goes back on when it's saved.
+    pub title: TextEdit,
+    pub description: TextEdit,
+    /// The store's ticket while it saves.
+    pub saving: Option<u64>,
 }
 
 /// Where a comment the agent drafted stands. Nothing posts until the user clicks Post.
@@ -211,6 +231,10 @@ impl Default for App {
             updater: Default::default(),
             confirm: None,
             walk_refresh: 0.0,
+            reviewer_picker: None,
+            people_filter: TextEdit::new(""),
+            people_pick: 0,
+            request_edit: None,
         }
     }
 }
@@ -430,6 +454,7 @@ impl App {
 
     /// Clears the drafts whose comments landed, and closes their boxes.
     pub fn settle_posts(&mut self) -> bool {
+        let edited = self.settle_request_edit();
         let landed: Vec<u64> = self.proposal_tickets.keys().copied().filter(|t| self.store.finished.contains_key(t)).collect();
         for ticket in &landed {
             let ok = self.store.finished.remove(ticket).unwrap_or(false);
@@ -477,6 +502,56 @@ impl App {
                 DraftKey::Comment(_) | DraftKey::Revise(..) => {}
             }
         }
-        !done.is_empty() || !landed.is_empty()
+        !done.is_empty() || !landed.is_empty() || edited
+    }
+
+    // MARK: Managing my own
+
+    /// Opens the title and description of `id` for editing, as they stand.
+    pub fn edit_request(&mut self, id: &str) {
+        let Some(item) = self.store.item(id) else { return };
+        let title = crate::data::mine::title_parts(item).1.to_string();
+        self.request_edit =
+            Some(RequestEdit { id: id.to_string(), title: TextEdit::new(title), description: TextEdit::new(item.description.clone()), saving: None });
+    }
+
+    /// The edit open on `id`, unless it's saving.
+    pub fn editing_request(&self, id: &str) -> Option<&RequestEdit> {
+        self.request_edit.as_ref().filter(|e| e.id == id && e.saving.is_none())
+    }
+
+    /// Saves the edit. An empty title can't be saved.
+    pub fn save_request_edit(&mut self) {
+        let Some(edit) = &self.request_edit else { return };
+        let Some(item) = self.store.item(&edit.id).cloned() else { return };
+        if edit.saving.is_some() || edit.title.text.trim().is_empty() || self.store.busy.is_some() {
+            return;
+        }
+        let (title, description) = (edit.title.text.clone(), edit.description.text.clone());
+        let ticket = self.store.edit_request(&item, &title, &description);
+        if let Some(edit) = &mut self.request_edit {
+            edit.saving = Some(ticket);
+        }
+    }
+
+    /// Closes the editor once its save lands, or opens it again if the save failed.
+    fn settle_request_edit(&mut self) -> bool {
+        let Some(ticket) = self.request_edit.as_ref().and_then(|e| e.saving) else { return false };
+        let Some(ok) = self.store.finished.remove(&ticket) else { return false };
+        if ok {
+            self.request_edit = None;
+        } else if let Some(edit) = &mut self.request_edit {
+            edit.saving = None;
+        }
+        true
+    }
+
+    /// Opens the reviewer picker on `id`, with an empty search, and starts looking for people.
+    pub fn pick_reviewers(&mut self, id: &str) {
+        let Some(item) = self.store.item(id).cloned() else { return };
+        self.people_filter = TextEdit::new("");
+        self.people_pick = 0;
+        self.reviewer_picker = Some(id.to_string());
+        self.store.find_people(&item, "");
     }
 }

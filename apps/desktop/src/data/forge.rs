@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::cli::Cli;
-use super::models::{DiffRefs, Discussion, FileDiff, Job, JobLog, LOG_LINES, MergeRequest, Note, Person, Verdict};
+use super::models::{DiffRefs, Discussion, FileDiff, Job, JobLog, LOG_LINES, MergeRequest, Note, Person, Reviewer, Verdict};
 use super::{github, gitlab};
 use crate::data::diff::DiffLine;
 
@@ -294,6 +294,93 @@ impl Forge {
         match self {
             Forge::Gitlab => (String::new(), note.body.clone()),
             Forge::Github => github::written(thread, note),
+        }
+    }
+
+    // Managing a request of my own without opening the forge: who reviews it, bringing its
+    // branch up to date, closing it, and its title and description.
+
+    /// What bringing a branch up to date is called: GitLab rebases it, GitHub merges the base in.
+    pub fn update_branch_title(self) -> &'static str {
+        match self {
+            Forge::Gitlab => "Rebase",
+            Forge::Github => "Update Branch",
+        }
+    }
+
+    /// The busy line while it runs.
+    pub fn updating_branch(self) -> &'static str {
+        match self {
+            Forge::Gitlab => "Rebasing…",
+            Forge::Github => "Updating the branch…",
+        }
+    }
+
+    /// The toast once it's done: "Rebased web!42".
+    pub fn updated_branch(self) -> &'static str {
+        match self {
+            Forge::Gitlab => "Rebased",
+            Forge::Github => "Updated the branch of",
+        }
+    }
+
+    /// Whether a reviewer who already reviewed can be taken off. GitHub keeps everyone who
+    /// reviewed on the list; only a pending request can be withdrawn.
+    pub fn removes_reviewed(self) -> bool {
+        self == Forge::Gitlab
+    }
+
+    /// People who can review in the request's project, matching `query` (blank for the first 100).
+    pub fn find_people(self, item: &MergeRequest, query: &str) -> Result<Vec<Person>, String> {
+        match self {
+            Forge::Gitlab => gitlab::find_people(item, query),
+            Forge::Github => github::find_people(item, query),
+        }
+    }
+
+    pub fn add_reviewer(self, item: &MergeRequest, username: &str) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::add_reviewer(item, username),
+            Forge::Github => github::add_reviewer(item, username),
+        }
+    }
+
+    pub fn remove_reviewer(self, item: &MergeRequest, reviewer: &Reviewer) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::remove_reviewer(item, reviewer),
+            Forge::Github => github::remove_reviewer(item, reviewer),
+        }
+    }
+
+    /// Asks a reviewer for another look: a fresh request, notification and all.
+    pub fn ask_again(self, item: &MergeRequest, reviewer: &Reviewer) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::ask_again(item, reviewer),
+            Forge::Github => github::ask_again(item, reviewer),
+        }
+    }
+
+    /// Brings the source branch up to date with the target, and waits (a while) until it has.
+    pub fn update_branch(self, item: &MergeRequest) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::rebase(item),
+            Forge::Github => github::update_branch(item),
+        }
+    }
+
+    /// Closes it without merging, or reopens it.
+    pub fn set_open(self, item: &MergeRequest, open: bool) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::set_open(item, open),
+            Forge::Github => github::set_open(item, open),
+        }
+    }
+
+    /// Changes the title, the description, or both; None leaves one as it is.
+    pub fn edit(self, item: &MergeRequest, title: Option<&str>, description: Option<&str>) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::edit(item, title, description),
+            Forge::Github => github::edit(item, title, description),
         }
     }
 }
