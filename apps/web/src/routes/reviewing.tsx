@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { Chapter, KeyList, Keys, PageHead } from '../components/Chapter'
-import { AccountsFigure, QueueFigure, ReviewFigure } from '../components/figures'
+import { AccountsFigure, FinishFigure, QueueFigure, ReviewFigure } from '../components/figures'
 import { Page } from '../components/Layout'
 import { seo } from '../lib/site'
 
@@ -10,7 +10,7 @@ export const Route = createFileRoute('/reviewing')({
       path: '/reviewing',
       title: 'Reviewing in Mrow',
       description:
-        'The reviews waiting on you, sorted by when you were asked, and each review as one page with a contents rail: description, every diff, the conversation and your verdict.',
+        'The reviews waiting on you, sorted by when you were asked. Each opens in three tabs, Overview, Changes and Conversation, and you finish it in the app: resolve threads, hold comments, then comment, request changes or approve.',
     }),
   component: Reviewing,
 })
@@ -20,8 +20,8 @@ function Reviewing() {
     <Page>
       <PageHead title="The reviews waiting on you">
         <p>
-          Mrow keeps the requests you were asked to review in one list, newest ask first, and opens each one as a single
-          page you read from top to bottom.
+          Mrow keeps the requests you were asked to review in one list, newest ask first. Each one opens in three tabs, and
+          you can see it through to the end without going to the browser.
         </p>
       </PageHead>
 
@@ -53,32 +53,71 @@ function Reviewing() {
 
       <Chapter
         id="review"
-        title="One page, top to bottom"
+        title="Overview, Changes, Conversation"
         aside={
           <KeyList
             items={[
-              [['J', 'K'], 'Next or previous part of the page; each file is one'],
-              [['⌥⌘1', '⌥⌘2', '⌥⌘3'], 'The top, the changes, the conversation'],
+              [['⌥⌘1', '⌥⌘2', '⌥⌘3'], 'Overview, Changes, Conversation'],
+              [['J', 'K'], 'Next or previous file, in Changes'],
               [['⇧⌘A'], 'Approve'],
-              [['⌘↩'], 'Post the comment'],
             ]}
           />
         }
         figure={<ReviewFigure />}
       >
         <p>
-          A review is one page: who asked and when, the description rendered the way its author wrote it, every file’s
-          diff with syntax highlighting and line numbers, the conversation with a box to add to it, and your verdict at
-          the end. Comment threads sit under the lines they’re about.
+          A review is three tabs under a bar that stays put. <strong>Overview</strong> has who asked and when, the
+          description rendered the way its author wrote it, and where your review stands, with a button into the first
+          file you haven’t viewed. <strong>Changes</strong> lists the files, how many you’ve viewed, then each diff with
+          syntax highlighting, line numbers, and the threads under the lines they’re about. <strong>Conversation</strong>{' '}
+          has every thread, those on lines too, then a box to add to it. A thread’s file and line take you to that line in
+          Changes.
         </p>
         <p>
-          Beside it, a contents rail lists those parts and every file, marks the one you’re reading and jumps to any of
-          them. Each file shows how many threads it has, filled in when there’s a reply you haven’t seen. Tick files off
-          as viewed while you go, then approve, or revoke an approval you gave.
+          The bar holds “Open in GitLab” (or GitHub), Review and Approve on every tab, so a quick approval never takes a
+          scroll. Each tab keeps its place when you leave it. Tick files off as viewed while you go.
         </p>
         <p>
           Reading text is set in Charis SIL, a serif made for long reading. The interface is Inter and the code is Geist
           Mono.
+        </p>
+      </Chapter>
+
+      <Chapter
+        id="finish"
+        title="Finish the review here"
+        aside={
+          <>
+            <p>
+              GitHub can’t hold a comment on the whole pull request in a review; the summary covers that. On GitLab,
+              Request Changes uses GitLab’s own requested-changes state.
+            </p>
+            <KeyList
+              items={[
+                [['⌘↩'], 'Post the comment, or add it to your review once one is started'],
+                [['⇧⌘R'], 'Finish the review'],
+                [['esc'], 'Close the panel'],
+              ]}
+            />
+          </>
+        }
+        figure={<FinishFigure />}
+      >
+        <p>
+          Every thread that can be resolved has <strong>Resolve</strong> under it, and <strong>Unresolve</strong> once
+          it is. Resolved threads are dimmed and marked, so the open ones stand out.
+        </p>
+        <p>
+          A comment can post at once, or wait. <strong>Start a Review</strong> holds it in a pending review on the forge,
+          where only you can see it. After that, <Keys keys={['⌘↩']} /> adds each comment to the review, with <strong>Comment Now</strong>{' '}
+          beside it for one that shouldn’t wait. Pending comments show where they’ll land, marked Pending, and you can
+          edit or delete them until they go.
+        </p>
+        <p>
+          <strong>Review</strong> in the bar counts what you’re holding and opens “Finish your review”: a summary if you
+          want one, then <strong>Comment</strong>, <strong>Request Changes</strong> or <strong>Approve</strong>, and
+          everything posts together. Approve is still one press when nothing is held; with comments pending, it opens the
+          panel so they don’t go out unseen.
         </p>
       </Chapter>
 

@@ -6,13 +6,15 @@ export type Group = 'Today' | 'Yesterday' | 'This week' | 'Older'
 /** Where one of your own requests stands, as the Mine list sorts them. */
 export type Standing = 'ready' | 'needs' | 'waiting' | 'quiet' | 'held' | 'draft' | 'merged'
 
-export type Comment = { author: string; body: string; when: string; unseen?: boolean }
+/** `pending`: held in your review, seen by nobody else until you submit it. */
+export type Comment = { author: string; body: string; when: string; unseen?: boolean; pending?: boolean }
 export type Line = {
   kind: 'ctx' | 'add' | 'del'
   old?: number
   new?: number
   code: string
   thread?: Comment[]
+  resolved?: boolean
 }
 export type DiffFile = { path: string; lines: Line[] }
 export type Reviewer = { name: string; state: 'approved' | 'pending' | 'changes' }
@@ -100,6 +102,7 @@ const JOB_RS: DiffFile = {
       thread: [
         { author: 'Tomás Varga', when: '2 hours ago', body: 'Should the flush be optional? On a local disk this is a lot of fsyncs.' },
         { author: 'Maya Lindqvist', when: '1 hour ago', body: 'It flushes per batch now, not per row, so 200 a million.', unseen: true },
+        { author: 'You', when: '', body: 'A one-line comment there would settle it for the next reader too.', pending: true },
       ],
     },
     { kind: 'add', new: 16, code: '    batch: Batch,' },
@@ -112,7 +115,13 @@ const EXPORTS_MD: DiffFile = {
   lines: [
     { kind: 'ctx', old: 8, new: 8, code: '## Large ledgers' },
     { kind: 'del', old: 9, code: 'Exports over 1 GB can time out.' },
-    { kind: 'add', new: 9, code: 'Exports run as a job. The API answers with its id at once.' },
+    {
+      kind: 'add',
+      new: 9,
+      code: 'Exports run as a job. The API answers with its id at once.',
+      thread: [{ author: 'Tomás Varga', when: 'yesterday', body: 'Worth saying where the file ends up?' }],
+      resolved: true,
+    },
   ],
 }
 

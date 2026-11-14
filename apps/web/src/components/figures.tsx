@@ -1,5 +1,22 @@
 import { useState } from 'react'
-import { AccountPicker, AskChat, BubbleIcon, Checklist, DiffView, InboxList, NextStep, ProviderMark, QueueRow, StackGroup, StandingMark } from './AppMock'
+import {
+  AccountPicker,
+  AskChat,
+  Checklist,
+  DiffView,
+  FileList,
+  InboxList,
+  NextStep,
+  pendingIn,
+  ProviderMark,
+  QueueRow,
+  ReviewBar,
+  ReviewPanel,
+  StackGroup,
+  StandingMark,
+  ThreadView,
+  threadsOf,
+} from './AppMock'
 import { accounts, inbox, reviews } from './mockData'
 import type { Review } from './mockData'
 
@@ -88,41 +105,72 @@ function MiniQueue({ when, groups }: { when: string; groups: { name: string; row
   )
 }
 
-/** A review's page, part way down, with its contents rail. */
+/** A review on its Changes tab: the file list, then a diff with a thread under its line. */
 export function ReviewFigure() {
   const r = need('gl-214')
+  const threads = threadsOf(r)
   const file = r.files[0]
-  const rail: { label: string; file?: boolean; threads?: number; unseen?: boolean; note?: string; here?: boolean }[] = [
-    { label: 'The ask' },
-    { label: 'Description' },
-    { label: 'The changes', note: '0 of 2' },
-    { label: 'job.rs', file: true, threads: 1, unseen: true, here: true },
-    { label: 'exports.md', file: true },
-    { label: 'Conversation', note: '1' },
-    { label: 'Your verdict' },
-  ]
   return (
-    <figure className="review-figure" aria-label="A review in Mrow: the contents rail on the left marks job.rs, the file being read, which has one thread with a reply you haven’t seen.">
-      <div className="rail static" aria-hidden="true">
-        <p className="rail-title">Contents</p>
-        {rail.map((p) => (
-          <span key={p.label} className={`rail-item${p.file ? ' file' : ''}`} aria-current={p.here ? 'location' : undefined}>
-            <span className="rail-label">{p.label}</span>
-            {p.threads && <span className={p.unseen ? 'rail-threads unseen' : 'rail-threads'}>
-                <BubbleIcon filled={p.unseen} />
-                {p.threads}
-              </span>}
-            {p.file && <span className="rail-viewed" />}
-            {p.note && <span className="rail-note">{p.note}</span>}
-          </span>
-        ))}
+    <figure
+      className="review-figure"
+      aria-label="A review in Mrow on its Changes tab. The bar holds the tabs Overview, Changes and Conversation, then Open in GitLab, Review with one pending comment, and Approve. Below it, 1 of 2 files viewed, then the diff of job.rs with a thread under a line: two replies and your pending comment, with Reply and Resolve."
+    >
+      <div className="card" inert>
+        <ReviewBar
+          id="review-figure"
+          tab="changes"
+          files={r.files.length}
+          threads={threads.length}
+          unseen
+          account={accounts.gitlab}
+          pending={pendingIn(threads)}
+          reviews
+          approves
+          approved={false}
+          panelOpen={false}
+        />
+        <div className="pane">
+          <FileList files={r.files} viewed={new Set(r.files.slice(1).map((f) => f.path))} />
+          {file && (
+            <div className="page-file">
+              <DiffView file={file.path} lines={file.lines} />
+            </div>
+          )}
+        </div>
       </div>
-      <div className="review-figure-page">
-        <p className="page-ref">
-          {r.project} <b>{r.number}</b>
-        </p>
-        <p className="review-figure-title">{r.title}</p>
-        {file && <DiffView file={file.path} lines={file.lines} />}
+    </figure>
+  )
+}
+
+/** The Conversation tab with a comment held in a review, and the panel that finishes it. */
+export function FinishFigure() {
+  const r = need('gl-214')
+  const threads = threadsOf(r).filter((t) => t.file)
+  return (
+    <figure
+      className="review-figure finish-figure"
+      aria-label="The Conversation tab of a review. A thread on job.rs ends with your comment marked Pending, then Reply and Resolve; a resolved thread on exports.md is dimmed. The Finish your review panel hangs from the Review button: one pending comment posts with it, a summary, then Comment, Request Changes and Approve."
+    >
+      <div className="card" inert>
+        <ReviewBar
+          id="finish-figure"
+          tab="conversation"
+          files={r.files.length}
+          threads={threadsOf(r).length}
+          unseen
+          account={accounts.gitlab}
+          pending={pendingIn(threads)}
+          reviews
+          approves
+          approved={false}
+          panelOpen
+        />
+        <ReviewPanel pending={pendingIn(threads)} mine={false} noun={accounts.gitlab.noun} summary="Looks right to me. One small thing inline; it doesn’t block." />
+        <div className="pane">
+          {threads.map((t) => (
+            <ThreadView key={t.id} thread={t} live flat />
+          ))}
+        </div>
       </div>
     </figure>
   )

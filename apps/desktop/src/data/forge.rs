@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::cli::Cli;
-use super::models::{DiffRefs, Discussion, FileDiff, MergeRequest, Person};
+use super::models::{DiffRefs, Discussion, FileDiff, MergeRequest, Note, Person, Verdict};
 use super::{github, gitlab};
 use crate::data::diff::DiffLine;
 
@@ -65,6 +65,12 @@ impl Forge {
             Forge::Gitlab => "GL",
             Forge::Github => "GH",
         }
+    }
+
+    /// Whether a review in progress can hold a comment on the whole request. GitHub's can't:
+    /// there, that's what the summary is for.
+    pub fn drafts_general_comments(self) -> bool {
+        self == Forge::Gitlab
     }
 
     pub fn cli(self) -> Cli {
@@ -172,6 +178,53 @@ impl Forge {
         match self {
             Forge::Gitlab => gitlab::reply(item, thread, body),
             Forge::Github => github::reply(item, thread, body),
+        }
+    }
+
+    pub fn set_resolved(self, item: &MergeRequest, thread: &Discussion, resolved: bool) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::set_resolved(item, thread, resolved),
+            Forge::Github => github::set_resolved(thread, resolved),
+        }
+    }
+
+    // A review in progress: comments held on the forge (so they outlast a relaunch and show on
+    // the web) until it's submitted with a verdict.
+
+    /// Holds a comment on the whole request; only where `drafts_general_comments`.
+    pub fn draft_comment(self, item: &MergeRequest, body: &str) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::draft_comment(item, body),
+            Forge::Github => Err("GitHub can't hold a comment on the whole pull request in a review. Write it in the review's summary.".into()),
+        }
+    }
+
+    pub fn draft_on_line(self, item: &MergeRequest, file: &FileDiff, line: &DiffLine, refs: &DiffRefs, body: &str) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::draft_on_line(item, file, line, refs, body),
+            Forge::Github => github::draft_on_line(item, file, line, refs, body),
+        }
+    }
+
+    pub fn edit_draft(self, item: &MergeRequest, note: &Note, body: &str) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::edit_draft(item, note, body),
+            Forge::Github => github::edit_draft(note, body),
+        }
+    }
+
+    pub fn delete_draft(self, item: &MergeRequest, note: &Note) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::delete_draft(item, note),
+            Forge::Github => github::delete_draft(note),
+        }
+    }
+
+    /// Posts the held comments and the summary (when there is one) with the verdict.
+    pub fn submit_review(self, item: &MergeRequest, verdict: Verdict, body: &str) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::submit_review(item, verdict, body),
+            Forge::Github => github::submit_review(item, verdict, body),
         }
     }
 }

@@ -161,6 +161,14 @@ pub enum Msg {
         request: u64,
         result: Result<Vec<Discussion>, String>,
     },
+    /// A thread was resolved or reopened, already shown so; `was` is how it stood before, to
+    /// go back to if the forge said no.
+    Resolved {
+        id: String,
+        thread: String,
+        was: bool,
+        result: Result<(), String>,
+    },
     /// An approve, comment or reply finished. `reload` names a merge request whose threads to reload.
     Done {
         result: Result<(), String>,
@@ -1064,6 +1072,78 @@ impl Store {
         self.perform("Posting reply…", "Reply posted".into(), false, Some(item.clone()), move || it.kind().reply(&it, &thread, &body))
     }
 
+    /// Resolves a thread, or reopens it. It shows so at once, and goes back if the forge refuses.
+    pub fn set_resolved(&mut self, item: &MergeRequest, thread: &Discussion, resolved: bool) {
+        if self.offline || !self.show_resolved(&item.id, &thread.id, resolved) {
+            return;
+        }
+        let (it, th) = (item.clone(), thread.clone());
+        let (id, thread) = (item.id.clone(), thread.id.clone());
+        self.bg.spawn(move || Msg::Resolved { id, thread, was: !resolved, result: it.kind().set_resolved(&it, &th, resolved) });
+    }
+
+    /// Marks a loaded thread's notes resolved or not. False when the thread isn't there.
+    fn show_resolved(&mut self, id: &str, thread: &str, resolved: bool) -> bool {
+        let Some(Loadable::Loaded(threads)) = self.discussions.get(id) else { return false };
+        let Some(at) = threads.iter().position(|t| t.id == thread) else { return false };
+        let mut threads = threads.as_ref().clone();
+        for note in threads[at].notes.iter_mut().filter(|n| n.resolvable == Some(true)) {
+            note.resolved = Some(resolved);
+        }
+        self.discussions.insert(id.to_string(), Loadable::Loaded(Rc::new(threads)));
+        true
+    }
+
+    // MARK: Reviews
+
+    /// My comments held in the review I haven't submitted, as last loaded.
+    pub fn pending_count(&self, item: &MergeRequest) -> usize {
+        let threads = self.discussions.get(&item.id).and_then(Loadable::value);
+        threads.map_or(0, |t| t.iter().flat_map(|t| &t.notes).filter(|n| n.pending).count())
+    }
+
+    /// Holds a comment on the whole request in my review. The ticket's result lands in `finished`.
+    pub fn hold(&mut self, item: &MergeRequest, body: String) -> u64 {
+        let it = item.clone();
+        self.perform("Adding to your review…", "Added to your review".into(), false, Some(item.clone()), move || it.kind().draft_comment(&it, &body))
+    }
+
+    /// Holds a comment on a line in my review, like `comment_on_line`.
+    pub fn hold_on_line(&mut self, item: &MergeRequest, file: &FileDiff, line: &DiffLine, refs: Option<DiffRefs>, body: String) -> u64 {
+        let Some(refs) = refs else {
+            self.show("The changes moved while loading. Refresh, then comment on the line again.");
+            let t = self.ticket();
+            self.finished.insert(t, false);
+            return t;
+        };
+        let (it, file, line) = (item.clone(), file.clone(), line.clone());
+        self.perform("Adding to your review…", "Added to your review".into(), false, Some(item.clone()), move || {
+            it.kind().draft_on_line(&it, &file, &line, &refs, &body)
+        })
+    }
+
+    pub fn edit_draft(&mut self, item: &MergeRequest, note: &Note, body: String) -> u64 {
+        let (it, note) = (item.clone(), note.clone());
+        self.perform("Saving…", "Saved".into(), false, Some(item.clone()), move || it.kind().edit_draft(&it, &note, &body))
+    }
+
+    pub fn delete_draft(&mut self, item: &MergeRequest, note: &Note) -> u64 {
+        let (it, note) = (item.clone(), note.clone());
+        self.perform("Deleting…", "Deleted from your review".into(), false, Some(item.clone()), move || it.kind().delete_draft(&it, &note))
+    }
+
+    /// Submits my review with a verdict and an optional summary, then reloads its threads and
+    /// the queue, as approving does.
+    pub fn submit_review(&mut self, item: &MergeRequest, verdict: Verdict, body: String) -> u64 {
+        let done = match verdict {
+            Verdict::Comment => format!("Reviewed {}", item.short_reference()),
+            Verdict::Approve => format!("Approved {}", item.short_reference()),
+            Verdict::RequestChanges => format!("Requested changes on {}", item.short_reference()),
+        };
+        let it = item.clone();
+        self.perform("Submitting your review…", done, true, Some(item.clone()), move || it.kind().submit_review(&it, verdict, &body))
+    }
+
     fn ticket(&mut self) -> u64 {
         self.next_ticket += 1;
         self.next_ticket
@@ -1128,6 +1208,20 @@ impl Store {
                     };
                     self.discussions.insert(id, value);
                 }
+                Msg::Resolved { id, thread, was, result } => match result {
+                    Ok(()) => {
+                        self.show(if was { "Reopened the thread" } else { "Resolved the thread" });
+                        // My own list counts the open threads.
+                        if self.item(&id).is_some_and(|m| self.is_mine(m)) {
+                            self.refresh();
+                        }
+                    }
+                    Err(e) => {
+                        self.show_resolved(&id, &thread, was);
+                        let verb = if was { "reopen" } else { "resolve" };
+                        self.show(&format!("Couldn’t {verb} the thread: {e}"));
+                    }
+                },
                 Msg::Done { result, message, refresh, reload, ticket } => {
                     self.busy = None;
                     let ok = result.is_ok();

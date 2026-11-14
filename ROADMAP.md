@@ -3,6 +3,30 @@
 What Mrow could do next. Nothing here is promised or scheduled; the order within a section is
 roughly by value.
 
+## Shipped
+
+- **v0.1.0**: the review queue from GitLab and GitHub on macOS and Linux; Ask (Claude, opencode
+  or pi) drafting comments you approve before they post; Mine, stacks, merging, the inbox and
+  notifications; one Mrow per user on Linux; a review as one page with a contents rail; Charis
+  SIL as the reading face and type on whole points; the site at mrow.wania.app.
+- **v0.1.1**: a disk image beside the archive, and the macOS release signed with a Developer ID
+  and notarized.
+- **On main, not released**: a review in three tabs (Overview, Changes, Conversation) under a
+  fixed bar holding Approve and "Open in <forge>", with ⌥⌘1/2/3 between tabs and J and K file by
+  file. The site deploys from main and after every release.
+- **In this branch**: finishing a review in the app. Threads resolve and reopen; comments can be
+  held in a pending review on the forge (edited, deleted, shown in place) and submitted with
+  Comment, Request Changes or Approve and a summary (⇧⌘R).
+
+Loose ends from these:
+
+- The site describes the tabs and finishing a review ahead of the release that ships them.
+- Resolving, pending reviews and submitting haven't been run against either forge. GitLab's
+  Request Changes needs 17.x; GitHub can't hold a comment on the whole pull request in a
+  review, so there the summary stands in. Replies still post at once.
+- The tabs haven't been run on macOS (menu bar included), against live forge data, or through
+  the frame-time benchmark.
+
 ## In progress: your own requests, stacks, an inbox, notifications
 
 Mrow shows the reviews waiting on you. These add the other half: the requests you opened, how
@@ -116,9 +140,7 @@ line ("Ines pushed 3 commits and asked again"), including reviews.
 
 ### Finish a review inside the app
 
-- Request changes (today the only verdict is Approve).
-- Resolve and unresolve threads.
-- Batched reviews: comments held as pending and submitted together with a verdict.
+- Replies held in a pending review, not only new threads.
 - Multi-line comments and suggestion blocks.
 - Merge, for requests that are ready.
 
@@ -132,7 +154,8 @@ line ("Ines pushed 3 commits and asked again"), including reviews.
 - Mark the changed words within a changed line.
 - Expand the context around a hunk; a side-by-side mode for wide windows.
 - Find in the diff (⌘F filters the list today).
-- A keyboard flow: next and previous file, thread and unresolved thread, mark viewed, comment.
+- A keyboard flow: next and previous thread and unresolved thread, mark viewed, comment (J and
+  K step file by file in Changes today).
 - Image diffs.
 
 ### Queue

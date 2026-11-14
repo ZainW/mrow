@@ -85,6 +85,10 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     if let Some(message) = &s.store.toast {
         root = root.child(toast(p, message));
     }
+    // After the card, whose bar holds the button it hangs from.
+    if let Some(panel) = detail::review_panel(s, p, k) {
+        root = root.child(panel);
+    }
     // After the sidebar, which holds the bell it hangs from.
     if s.inbox_open && s.sidebar_visible {
         root = root.child(inbox::panel(s, p));

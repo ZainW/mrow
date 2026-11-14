@@ -32,11 +32,13 @@ const GROUPS: { title: string; keys: [string[], string][] }[] = [
   {
     title: 'A review',
     keys: [
-      [['J', 'K'], 'Next or previous part of the page; each file is one'],
-      [['⌥⌘1', '⌥⌘2', '⌥⌘3'], 'The top of the page, the changes, the conversation'],
+      [['⌥⌘1', '⌥⌘2', '⌥⌘3'], 'Overview, Changes, Conversation'],
+      [['J', 'K'], 'Next or previous file, in Changes'],
       [['⌥⌘]', '⌥⌘['], 'Next or previous review'],
-      [['⇧⌘A'], 'Approve'],
-      [['⌘↩'], 'Post the comment'],
+      [['⇧⌘A'], 'Approve; with comments pending, finish the review'],
+      [['⇧⌘R'], 'Finish the review: comment, request changes or approve'],
+      [['⌘↩'], 'Post the comment; once a review is started, add it to the review'],
+      [['esc'], 'Close the review panel'],
       [['⌘O'], 'Open in GitLab or GitHub'],
       [['⇧⌘C'], 'Copy the link'],
     ],

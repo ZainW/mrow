@@ -293,6 +293,9 @@ pub struct Discussion {
     pub id: String,
     pub individual_note: bool,
     pub notes: Vec<Note>,
+    /// What the forge resolves it by, when that isn't `id`: GitHub's review thread node.
+    #[serde(default)]
+    pub node_id: Option<String>,
 }
 
 impl Discussion {
@@ -321,4 +324,39 @@ pub struct Note {
     pub resolvable: Option<bool>,
     pub resolved: Option<bool>,
     pub position: Option<Position>,
+    /// Held in my review until I submit it: nobody else sees it yet.
+    #[serde(default)]
+    pub pending: bool,
+    /// GitHub's GraphQL id, which editing or deleting a pending comment needs.
+    #[serde(default)]
+    pub node_id: Option<String>,
+}
+
+/// How a review ends when it's submitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Verdict {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl Verdict {
+    pub const ALL: [Verdict; 3] = [Verdict::Comment, Verdict::RequestChanges, Verdict::Approve];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Verdict::Comment => "Comment",
+            Verdict::Approve => "Approve",
+            Verdict::RequestChanges => "Request Changes",
+        }
+    }
+
+    /// GitHub's name for it, in a review's `event`.
+    pub fn event(self) -> &'static str {
+        match self {
+            Verdict::Comment => "COMMENT",
+            Verdict::Approve => "APPROVE",
+            Verdict::RequestChanges => "REQUEST_CHANGES",
+        }
+    }
 }

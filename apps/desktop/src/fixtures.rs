@@ -453,7 +453,27 @@ fn file(old: &str, new: &str, diff: &str, new_file: bool) -> FileDiff {
 }
 
 fn note(id: i64, who: (&str, &str), body: &str, hours: i64, position: Option<Position>) -> Note {
-    Note { id, body: body.into(), author: person(who.0, who.1), created_at: ago(hours), system: false, resolvable: Some(true), resolved: Some(false), position }
+    Note {
+        id,
+        body: body.into(),
+        author: person(who.0, who.1),
+        created_at: ago(hours),
+        system: false,
+        resolvable: Some(true),
+        resolved: Some(false),
+        position,
+        pending: false,
+        node_id: None,
+    }
+}
+
+/// One of Robin's comments, held in the review they haven't submitted yet.
+fn draft(id: i64, body: &str, position: Option<Position>) -> Note {
+    Note { resolvable: None, resolved: None, pending: true, ..note(id, ("robin", "Robin Okafor"), body, 0, position) }
+}
+
+fn at(path: &str, line: i64) -> Position {
+    Position { new_path: Some(path.into()), old_path: Some(path.into()), new_line: Some(line), old_line: None, head_sha: None }
 }
 
 pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, HashMap<String, Vec<Discussion>>) {
@@ -600,9 +620,10 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
             file("/dev/null", "docs/exports.md", DIFF_MD, true),
         ],
     );
-    let on_line =
-        Position { new_path: Some("src/export/job.rs".into()), old_path: Some("src/export/job.rs".into()), new_line: Some(28), old_line: None, head_sha: None };
+    let on_line = at("src/export/job.rs", 28);
     let mut threads = HashMap::new();
+    // Open and resolved threads, with Robin's review under way: a reply held in the first
+    // thread, a new one on a line, and one on the whole change.
     threads.insert(
         first.id.clone(),
         vec![
@@ -611,8 +632,16 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
                 individual_note: false,
                 notes: vec![
                     note(1, ("tomas.v", "Tomás Varga"), "Should the flush be optional? On a local disk this is a lot of `fsync`s.", 2, Some(on_line.clone())),
-                    note(2, maya, "It's a buffered writer, so `flush` hands the batch to the OS; it doesn't sync. I'll add a comment.", 1, Some(on_line)),
+                    note(
+                        2,
+                        maya,
+                        "It's a buffered writer, so `flush` hands the batch to the OS; it doesn't sync. I'll add a comment.",
+                        1,
+                        Some(on_line.clone()),
+                    ),
+                    draft(21, "A one-line comment there would settle it for the next reader too.", Some(on_line)),
                 ],
+                node_id: None,
             },
             Discussion {
                 id: "t2".into(),
@@ -624,6 +653,7 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
                     2,
                     None,
                 )],
+                node_id: None,
             },
             // On a file this change doesn't touch, so it has no line to sit under.
             Discussion {
@@ -636,15 +666,47 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
                         ("tomas.v", "Tomás Varga"),
                         "`Batch::rows` could take a `NonZeroUsize`, so a zero batch can't loop forever.",
                         26,
-                        Some(Position {
-                            new_path: Some("src/export/batch.rs".into()),
-                            old_path: Some("src/export/batch.rs".into()),
-                            new_line: Some(14),
-                            old_line: None,
-                            head_sha: None,
-                        }),
+                        Some(at("src/export/batch.rs", 14)),
                     )
                 }],
+                node_id: None,
+            },
+            Discussion {
+                id: "t4".into(),
+                individual_note: false,
+                notes: vec![
+                    Note {
+                        resolved: Some(true),
+                        ..note(
+                            5,
+                            ("tomas.v", "Tomás Varga"),
+                            "Every two seconds feels eager for an export that takes minutes.",
+                            20,
+                            Some(at("web/src/exports.ts", 7)),
+                        )
+                    },
+                    Note {
+                        resolved: Some(true),
+                        ..note(6, maya, "It backs off to ten seconds after the first minute.", 19, Some(at("web/src/exports.ts", 7)))
+                    },
+                ],
+                node_id: None,
+            },
+            Discussion {
+                id: "draft-22".into(),
+                individual_note: false,
+                notes: vec![draft(
+                    22,
+                    "`written` counts rows, but the API docs call it a byte count. Rename it `rows_written`?",
+                    Some(at("src/export/job.rs", 31)),
+                )],
+                node_id: None,
+            },
+            Discussion {
+                id: "draft-23".into(),
+                individual_note: true,
+                notes: vec![draft(23, "Happy with this once the flush comment is in. The numbers speak for themselves.", None)],
+                node_id: None,
             },
         ],
     );
@@ -671,6 +733,7 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
                     id: "h1".into(),
                     individual_note: false,
                     notes: vec![note(11, maya, "`secret()` reads the environment on every delivery. Can it load once at startup?", 2, Some(at))],
+                    node_id: None,
                 },
                 Discussion {
                     id: "h2".into(),
@@ -682,6 +745,7 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
                         1,
                         None,
                     )],
+                    node_id: None,
                 },
             ]
         } else {

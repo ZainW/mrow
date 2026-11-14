@@ -19,7 +19,7 @@ const PAGES = [
   {
     to: '/reviewing',
     title: 'Reviewing',
-    text: 'Four lists, the reviews sorted by when you were asked. Each review is one page with a contents rail beside it.',
+    text: 'Four lists, the reviews sorted by when you were asked. Each review opens in three tabs, and you can resolve, comment and approve without leaving.',
   },
   {
     to: '/mine',

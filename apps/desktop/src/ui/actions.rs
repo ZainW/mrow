@@ -81,11 +81,28 @@ pub fn copy(s: &mut App, tx: &mut Tx, value: String) {
     s.store.show("Copied");
 }
 
-pub fn approve(s: &mut App, _: &mut Tx) {
+/// Approves at once; with comments held in a review, opens the review panel instead, so they
+/// don't go out unseen.
+pub fn approve(s: &mut App, tx: &mut Tx) {
     let Some(item) = s.store.selected().cloned() else { return };
-    if item.is_open() && s.store.busy.is_none() {
+    if s.store.pending_count(&item) > 0 {
+        if s.review_panel.is_none() {
+            review(s, tx);
+        }
+    } else if item.is_open() && s.store.busy.is_none() {
         s.store.approve(&item);
     }
+}
+
+/// Opens the panel that finishes the review, with the caret in its summary, or closes it.
+pub fn review(s: &mut App, tx: &mut Tx) {
+    let Some(item) = s.store.selected().cloned() else { return };
+    tx.instant();
+    if s.review_panel.take().is_some() || !crate::ui::detail::offers_review(s, &item) {
+        return;
+    }
+    s.review_panel = Some(item.id);
+    tx.focus("review-summary/input", false);
 }
 
 pub fn mark_all_read(s: &mut App, _: &mut Tx) {
@@ -268,6 +285,7 @@ const COMMANDS: &[Command] = &[
     cmd(R, "open", "Open in Browser", Some("cmd+o"), open_in_browser),
     cmd(R, "copy-link", "Copy Link", Some("cmd+shift+c"), copy_link),
     cmd(R, "approve", "Approve", Some("cmd+shift+a"), approve),
+    cmd(R, "review", "Finish Review…", Some("cmd+shift+r"), review),
     sep("Review"),
     cmd(R, "mark-read", "Mark All as Read", None, mark_all_read),
     cmd(W, "next-tab", "Show Next Tab", Some("cmd+shift+bracketright"), next_tab),
@@ -334,6 +352,11 @@ pub fn on_key(s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
         }
         rune::Key::Escape if s.settings_open => {
             s.settings_open = false;
+            true
+        }
+        rune::Key::Escape if s.review_panel.is_some() => {
+            tx.instant();
+            s.review_panel = None;
             true
         }
         rune::Key::Escape if s.confirm.is_some() => {
