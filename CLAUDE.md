@@ -35,6 +35,10 @@ Start site, pnpm).
   the version, writes `CHANGELOG.md` (git-cliff, `cliff.toml`), tags `vX.Y.Z` and publishes the
   GitHub release with a signed `latest.json`. Commit messages are the changelog: use
   conventional commits (`feat:`, `fix:`, `perf:` appear; `(web)`-scoped and chores don't).
+- The site deploys itself (`.github/workflows/deploy-web.yml`): on pushes to main that touch
+  `apps/web`, and as the release's last job, since its download links name the version in
+  `Cargo.toml`. It needs the `CLOUDFLARE_API_TOKEN` secret. Don't deploy by hand before a release
+  is published: the links would point at files that don't exist yet.
 - CI minutes are scarce: PR checks stay static and fast (fmt, `cargo check`, web typecheck,
   actionlint/shellcheck, `.github/scripts/hygiene.sh`), path-filtered, never on push/merge. Don't
   add builds, test matrices or macOS jobs to PR checks.
