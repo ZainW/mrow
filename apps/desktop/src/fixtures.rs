@@ -849,6 +849,141 @@ pub fn big_diff(files: usize, lines: usize) -> Vec<FileDiff> {
         .collect()
 }
 
+/// The commit the first review's changes are shown at, for its files' texts.
+pub const HEAD: &str = "5e1f0a9c2b7d";
+
+/// `src/export/job.rs` as the first review leaves it: the lines its diff shows and those around.
+pub const JOB_RS: &str = "//! The ledger export: rows out to CSV, a batch at a time.
+
+use std::time::Duration;
+
+use crate::db::Replica;
+use crate::export::batch::{Batch, Cursor};
+use crate::export::writer::Writer;
+use crate::Result;
+use crate::ledger::LedgerId;
+use crate::ledger::Ledger;
+
+/// Writes a ledger out as CSV.
+pub struct ExportJob {
+    ledger: LedgerId,
+    cursor: Cursor,
+    batch: Batch,
+}
+
+impl ExportJob {
+    pub fn new(ledger: LedgerId, batch: Batch) -> Self {
+        ExportJob { ledger, cursor: Cursor::start(), batch }
+    }
+
+    /// Streams the rows in batches, flushing after each one, so a slow
+    /// reader never holds the writer for long.
+    pub async fn run(&mut self, out: &mut Writer) -> Result<usize> {
+        let mut written = 0;
+        while let Some(rows) = self.next_batch().await? {
+            out.write_rows(&rows)?;
+            out.flush()?;
+            written += rows.len();
+        }
+        Ok(written)
+    }
+}
+
+impl ExportJob {
+    /// The next batch of rows after the cursor, or none once the ledger is done.
+    async fn next_batch(&mut self) -> Result<Option<Vec<Row>>> {
+        let replica = Replica::connect().await?;
+        self.back_off(replica.lag().await?).await;
+        let rows = replica.rows(self.ledger, self.cursor.after(), self.batch).await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        self.cursor = rows.last_cursor();
+        Ok(Some(rows))
+    }
+
+    /// How far along the export is, for the status endpoint.
+    pub fn progress(&self, total: usize) -> f32 {
+        if total == 0 {
+            return 1.0;
+        }
+        self.cursor.position() as f32 / total as f32
+    }
+
+    /// Waits between batches while the replica falls behind, so the export
+    /// doesn't read rows the primary hasn't handed over yet.
+    async fn back_off(&self, lag: Duration) {
+        if lag > Duration::from_secs(2) {
+            tokio::time::sleep(lag / 2).await;
+        }
+    }
+
+    /// The file name a finished export is offered under.
+    pub fn file_name(&self, ledger: &Ledger) -> String {
+        let day = ledger.closed_on().format(\"%Y-%m-%d\");
+        format!(\"{}-{day}.csv\", ledger.slug())
+    }
+
+    /// Whether the job can pick up where a crashed one stopped.
+    pub fn resumable(&self) -> bool {
+        self.cursor != Cursor::start()
+    }
+
+    /// Starts again from a cursor kept by a crashed job.
+    pub fn resume(ledger: LedgerId, batch: Batch, cursor: Cursor) -> Self {
+        ExportJob { ledger, cursor, batch }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_empty_ledger_writes_nothing() {
+        let mut job = ExportJob::new(LedgerId::EMPTY, Batch::rows(100));
+        let mut out = Writer::memory();
+        assert_eq!(job.run(&mut out).await.unwrap(), 0);
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batches_are_flushed_one_by_one() {
+        let mut job = ExportJob::new(LedgerId::SAMPLE, Batch::rows(2));
+        let mut out = Writer::memory();
+        job.run(&mut out).await.unwrap();
+        assert_eq!(out.flushes(), 3);
+    }
+}
+";
+
+/// A change to `src/export/job.rs` in two hunks far enough apart to leave a long gap between
+/// them, a short one above the first and another under the last.
+pub fn job_rs_wide() -> FileDiff {
+    let fields = "@@ -12,7 +12,8 @@ use crate::ledger::Ledger;
+ /// Writes a ledger out as CSV.
+ pub struct ExportJob {
+     ledger: LedgerId,
+-    cursor: Option<RowId>,
++    cursor: Cursor,
++    batch: Batch,
+ }
+
+ impl ExportJob {
+";
+    let tests = "@@ -85,7 +86,7 @@ mod tests {
+
+     #[tokio::test]
+     async fn an_empty_ledger_writes_nothing() {
+-        let mut job = ExportJob::new(LedgerId::EMPTY);
++        let mut job = ExportJob::new(LedgerId::EMPTY, Batch::rows(100));
+         let mut out = Writer::memory();
+         assert_eq!(job.run(&mut out).await.unwrap(), 0);
+         assert!(out.is_empty());
+";
+    file("src/export/job.rs", "src/export/job.rs", &format!("{fields}{tests}"), false)
+}
+
 /// A pipeline partway through, on `web_url`'s project: passed, failed (one allowed to), running,
 /// pending and manual jobs over three stages.
 pub fn jobs(web_url: &str) -> Vec<Job> {

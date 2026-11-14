@@ -67,6 +67,11 @@ icon!(
     r#"<path d="M4.5 6.3L8 9.8l3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#
 );
 icon!(
+    CHEVRON_UP,
+    "chevron-up",
+    r#"<path d="M4.5 9.7L8 6.2l3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#
+);
+icon!(
     CHEVRON_RIGHT,
     "chevron-right",
     r#"<path d="M6.3 4.5L9.8 8l-3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#

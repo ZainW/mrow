@@ -279,6 +279,27 @@ fn scene_big_diff(s: &mut App) {
     s.store.diffs.insert(id, crate::data::store::Loadable::Loaded(std::rc::Rc::new(fixtures::big_diff(40, 300))));
 }
 
+/// The changes with the lines around them: the short gap over the first hunk still folded, and
+/// the long one between two hunks shown twenty lines up from the second.
+fn scene_diff_context(s: &mut App) {
+    use crate::data::diff::Reveal;
+    use crate::data::store::Loadable;
+    scene_changes(s);
+    let Some(item) = s.store.selected().cloned() else { return };
+    let mut files = s.store.diffs.get(&item.id).and_then(|l| l.value()).map(|f| f.as_ref().clone()).unwrap_or_default();
+    let wide = fixtures::job_rs_wide();
+    files[0] = wide.clone();
+    s.store.diffs.insert(item.id.clone(), Loadable::Loaded(std::rc::Rc::new(files)));
+    let head = fixtures::HEAD.to_string();
+    s.store.diff_refs.insert(item.id.clone(), data::models::DiffRefs { base_sha: "a07c3e".into(), start_sha: "a07c3e".into(), head_sha: head.clone() });
+    s.store.insert_file_text(&head, &wide.new_path, fixtures::JOB_RS);
+    let gaps = s.store.gaps(&item, &wide);
+    if let Some(between) = gaps.get(1) {
+        s.store.reveal(&item, &wide, between, Reveal::Up);
+    }
+    s.pending_jump = Some(Jump::File(Some(0)));
+}
+
 fn scene_ask(s: &mut App) {
     fixture(s);
     s.ask_visible = true;
@@ -560,6 +581,7 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("toast", scene_toast),
     ("update", scene_update),
     ("big-diff", scene_big_diff),
+    ("diff-context", scene_diff_context),
     ("ask", scene_ask),
     ("ask-chat", scene_ask_chat),
     ("ask-comment", scene_ask_comment),

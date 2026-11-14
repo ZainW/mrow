@@ -37,6 +37,9 @@ pub enum DraftKey {
     Summary(String),
     /// A posted comment of mine being edited: (merge request, thread, note id).
     Revise(String, String, i64),
+    /// A comment on a line the diff leaves out, shown from the file: (merge request, file id,
+    /// its line number on the new side).
+    Context(String, String, i64),
 }
 
 impl DraftKey {
@@ -48,7 +51,8 @@ impl DraftKey {
             | DraftKey::Line(id, ..)
             | DraftKey::Edit(id, _)
             | DraftKey::Summary(id)
-            | DraftKey::Revise(id, ..) => id,
+            | DraftKey::Revise(id, ..)
+            | DraftKey::Context(id, ..) => id,
         }
     }
 }
@@ -327,6 +331,14 @@ impl App {
             }
             // Sent with its verdict, by `submit_review`.
             DraftKey::Summary(_) => return,
+            DraftKey::Context(id, file, number) => {
+                let Some(item) = self.store.item(id).cloned() else { return };
+                let files = self.store.diffs.get(id).and_then(|l| l.value());
+                let Some(file) = files.and_then(|f| f.iter().find(|d| &d.id() == file)).cloned() else { return };
+                let Some(line) = self.store.context_line(&item, &file, *number) else { return };
+                let refs = self.store.diff_refs.get(id).cloned();
+                if hold { self.store.hold_on_line(&item, &file, &line, refs, body) } else { self.store.comment_on_line(&item, &file, &line, refs, body) }
+            }
             DraftKey::Revise(id, thread, note) => {
                 let Some(item) = self.store.item(id).cloned() else { return };
                 // Shown at once: the box closes now, and opens again with the text if it fails.
@@ -481,7 +493,7 @@ impl App {
             }
             self.drafts.remove(&key);
             match &key {
-                DraftKey::Line(..) => {
+                DraftKey::Line(..) | DraftKey::Context(..) => {
                     if self.line_comment.as_ref() == Some(&key) {
                         self.line_comment = None;
                     }

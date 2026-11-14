@@ -8,7 +8,7 @@ use std::rc::Rc;
 use chrono::{Local, Utc};
 
 use super::bg::Bg;
-use super::diff::DiffLine;
+use super::diff::{self, DiffLine, Gap, Reveal, Shown};
 use super::forge::{Forge, QueueResult};
 use super::inbox::{self, Event, Notice};
 use super::mine::{self, Stack, Standing, Status, WalkStep};
@@ -219,6 +219,12 @@ pub enum Msg {
         message: String,
         ticket: u64,
     },
+    /// A file's text at a commit, by `text_key`, for the lines its diff leaves out.
+    FileText {
+        key: String,
+        request: u64,
+        result: Result<String, String>,
+    },
 }
 
 pub struct Store {
@@ -283,6 +289,15 @@ pub struct Store {
     jobs_poll: Option<(String, f64)>,
     /// People who can review, by project and search, for the reviewer picker.
     pub people: HashMap<(String, String), Loadable<Rc<Vec<Person>>>>,
+    /// Files' texts at a commit, by `text_key`, as lines: what a diff's gaps show.
+    pub file_texts: HashMap<String, Loadable<Rc<Vec<String>>>>,
+    /// How much of each gap shows, by "merge request id|file id|digest", then the gap's first line.
+    pub shown: HashMap<String, BTreeMap<i64, Shown>>,
+    /// Counts changes to `file_texts` and `shown`, so a view knows when to list its rows again.
+    pub context_version: u64,
+    /// The requests whose changes and threads were loaded before they were opened, and when:
+    /// their threads load again on the visit if they've aged since.
+    pub fetched_ahead: HashMap<String, Date>,
 }
 
 impl Default for Store {
@@ -324,6 +339,10 @@ impl Default for Store {
             open_logs: HashSet::new(),
             jobs_poll: None,
             people: HashMap::new(),
+            file_texts: HashMap::new(),
+            shown: HashMap::new(),
+            context_version: 0,
+            fetched_ahead: HashMap::new(),
         }
     }
 }
@@ -666,7 +685,11 @@ impl Store {
         if item.kind() != self.forge {
             self.set_forge(item.kind());
         }
+        if self.fetched_ahead.remove(&item.id).is_some_and(|at| stale_ahead(at, Utc::now())) {
+            self.load_discussions(&item);
+        }
         self.load_details_if_needed(&item);
+        self.fetch_ahead();
     }
 
     /// Keeps when a merge request was last seen, before showing it marks it seen again: what
@@ -922,6 +945,12 @@ impl Store {
         }
         // Changes and threads may have moved on; fetch them again when next shown.
         let selected = self.selected_id.clone();
+        // A load ahead still on its way would land data from before this refresh: drop it.
+        let ahead: Vec<String> = self.fetched_ahead.drain().map(|(id, _)| id).filter(|id| Some(id) != selected.as_ref()).collect();
+        for id in ahead {
+            self.start_request(format!("diffs {id}"));
+            self.start_request(format!("threads {id}"));
+        }
         self.diffs.retain(|k, _| Some(k) == selected.as_ref());
         self.discussions.retain(|k, _| Some(k) == selected.as_ref());
         self.forget_jobs(selected.as_deref());
@@ -1426,6 +1455,7 @@ impl Store {
                     self.people.insert(key, result.map_or_else(Loadable::Failed, |found| Loadable::Loaded(Rc::new(found))));
                 }
                 Msg::Edited { was, result, message, ticket } => self.landed_edit(was, result, message, ticket),
+                Msg::FileText { key, request, result } => self.landed_file_text(key, request, result),
             }
         }
         if let Some(message) = self.pending_toast.take() {
@@ -1440,6 +1470,9 @@ impl Store {
         if self.toast.is_some() && now >= self.toast_until && self.toast_until > 0.0 {
             self.toast = None;
             changed = true;
+        }
+        if changed {
+            self.fetch_ahead();
         }
         (changed, effects)
     }
@@ -1954,6 +1987,152 @@ impl Store {
             },
             move || it.kind().edit(&it, new_title.as_deref(), new_description.as_deref()),
         )
+    }
+}
+
+// MARK: Loading ahead
+
+/// How many requests load ahead at once.
+const AHEAD: usize = 2;
+
+/// How old threads loaded ahead can be when their request is opened before they load again.
+const AHEAD_FRESH_SECONDS: i64 = 120;
+
+/// Whether threads loaded ahead at `at` have aged past use by `now`.
+pub fn stale_ahead(at: Date, now: Date) -> bool {
+    (now - at).num_seconds() > AHEAD_FRESH_SECONDS
+}
+
+impl Store {
+    /// The requests to load ahead, so moving on through the list lands at once: once the
+    /// selection's own changes and threads are in, the one after it in the list, then the one
+    /// before; with nothing selected, the list's first. Leaves out what's loaded or loading, and
+    /// what's beyond `AHEAD` loads on their way.
+    pub fn ahead(&self) -> Vec<MergeRequest> {
+        fn settled<T>(l: Option<&Loadable<T>>) -> bool {
+            matches!(l, Some(Loadable::Loaded(_) | Loadable::Failed(_)))
+        }
+        let items = self.visible_items();
+        let near: Vec<usize> = match &self.selected_id {
+            None => vec![0],
+            Some(id) => {
+                if !settled(self.diffs.get(id)) || !settled(self.discussions.get(id)) {
+                    return Vec::new();
+                }
+                let Some(at) = items.iter().position(|m| &m.id == id) else { return Vec::new() };
+                [Some(at + 1), at.checked_sub(1)].into_iter().flatten().collect()
+            }
+        };
+        let loading = |id: &String| matches!(self.diffs.get(id), Some(Loadable::Loading)) || matches!(self.discussions.get(id), Some(Loadable::Loading));
+        let room = AHEAD.saturating_sub(self.fetched_ahead.keys().filter(|id| loading(id)).count());
+        near.into_iter()
+            .filter_map(|i| items.get(i))
+            .filter(|m| !self.diffs.contains_key(&m.id) && !self.discussions.contains_key(&m.id))
+            .take(room)
+            .cloned()
+            .collect()
+    }
+
+    /// Starts loading `ahead`'s requests. Never offline.
+    fn fetch_ahead(&mut self) {
+        if self.offline {
+            return;
+        }
+        for item in self.ahead() {
+            self.load_diffs(&item);
+            self.load_discussions(&item);
+            self.fetched_ahead.insert(item.id.clone(), Utc::now());
+        }
+    }
+}
+
+// MARK: Context
+
+/// The key of a file's text at a commit.
+fn text_key(sha: &str, path: &str) -> String {
+    format!("{sha}|{path}")
+}
+
+impl Store {
+    /// Whether a file's diff can show the unchanged lines around its hunks: it has a new side
+    /// with hunks, and the commit it was taken at is known.
+    pub fn expandable(&self, item: &MergeRequest, file: &FileDiff) -> bool {
+        !file.deleted_file && !file.new_file && !file.too_large && !file.lines.is_empty() && self.diff_refs.contains_key(&item.id)
+    }
+
+    /// The text of a file's new side at the head of its diff, as far as it has loaded.
+    pub fn file_text(&self, item: &MergeRequest, file: &FileDiff) -> Option<&Loadable<Rc<Vec<String>>>> {
+        let refs = self.diff_refs.get(&item.id)?;
+        self.file_texts.get(&text_key(&refs.head_sha, &file.new_path))
+    }
+
+    /// The unchanged stretches around a file's hunks; the one below the last has a length once
+    /// the file's text is in.
+    pub fn gaps(&self, item: &MergeRequest, file: &FileDiff) -> Vec<Gap> {
+        if !self.expandable(item, file) {
+            return Vec::new();
+        }
+        let len = self.file_text(item, file).and_then(Loadable::value).map(|t| t.len());
+        diff::gaps(&file.lines, len)
+    }
+
+    fn shown_key(item: &MergeRequest, file: &FileDiff) -> String {
+        format!("{}|{}|{}", item.id, file.id(), file.digest)
+    }
+
+    /// How much of `gap` shows.
+    pub fn shown(&self, item: &MergeRequest, file: &FileDiff, gap: &Gap) -> Shown {
+        self.shown.get(&Self::shown_key(item, file)).and_then(|g| g.get(&gap.new_start)).copied().unwrap_or_default()
+    }
+
+    /// Shows more of a gap, loading the file's text the first time.
+    pub fn reveal(&mut self, item: &MergeRequest, file: &FileDiff, gap: &Gap, how: Reveal) {
+        let now = self.shown(item, file, gap).reveal(how);
+        self.shown.entry(Self::shown_key(item, file)).or_default().insert(gap.new_start, now);
+        self.context_version += 1;
+        self.load_file_text(item, file);
+    }
+
+    /// Asks for a file's text at its diff's head, unless it's in or on its way. A failed load
+    /// is asked again.
+    pub fn load_file_text(&mut self, item: &MergeRequest, file: &FileDiff) {
+        let Some(sha) = self.diff_refs.get(&item.id).map(|r| r.head_sha.clone()) else { return };
+        let key = text_key(&sha, &file.new_path);
+        if self.offline || matches!(self.file_texts.get(&key), Some(Loadable::Loading | Loadable::Loaded(_))) {
+            return;
+        }
+        self.file_texts.insert(key.clone(), Loadable::Loading);
+        self.context_version += 1;
+        let request = self.start_request(format!("file {key}"));
+        let (item, path) = (item.clone(), file.new_path.clone());
+        self.bg.spawn(move || Msg::FileText { key, request, result: item.kind().file_at(&item, &path, &sha) });
+    }
+
+    fn landed_file_text(&mut self, key: String, request: u64, result: Result<String, String>) {
+        if self.requests.get(&format!("file {key}")) != Some(&request) {
+            return;
+        }
+        let value = match result {
+            Ok(text) => Loadable::Loaded(Rc::new(diff::text_lines(&text))),
+            Err(e) => Loadable::Failed(e),
+        };
+        self.file_texts.insert(key, value);
+        self.context_version += 1;
+    }
+
+    /// Line `new` of a file's new side where its diff leaves it out, as a context line with
+    /// both its numbers: what a comment on it is placed by.
+    pub fn context_line(&self, item: &MergeRequest, file: &FileDiff, new: i64) -> Option<DiffLine> {
+        let text = self.file_text(item, file)?.value()?;
+        let gap = self.gaps(item, file).into_iter().find(|g| g.len.is_some_and(|n| (g.new_start..g.new_start + n).contains(&new)))?;
+        let line = text.get(usize::try_from(new - 1).ok()?)?;
+        Some(DiffLine { kind: diff::LineKind::Context, text: line.clone(), old_number: Some(gap.old_number(new)), new_number: Some(new) })
+    }
+
+    /// Puts a file's text in place, for scenes and tests, which never ask a forge.
+    pub fn insert_file_text(&mut self, sha: &str, path: &str, text: &str) {
+        self.file_texts.insert(text_key(sha, path), Loadable::Loaded(Rc::new(diff::text_lines(text))));
+        self.context_version += 1;
     }
 }
 

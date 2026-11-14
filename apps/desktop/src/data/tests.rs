@@ -1039,6 +1039,148 @@ fn verdicts_name_githubs_events() {
     assert_eq!(Verdict::ALL.map(Verdict::event), ["COMMENT", "REQUEST_CHANGES", "APPROVE"]);
 }
 
+mod context {
+    use crate::data::diff::{self, DiffLine, Gap, Reveal, Shown};
+
+    /// A diff whose first hunk starts at line 1, then one further down.
+    const FROM_THE_TOP: &str = "@@ -1,3 +1,4 @@ fn main() {\n a\n+b\n c\n d\n@@ -10,2 +11,2 @@ fn other() {\n x\n-y\n+z\n";
+
+    #[test]
+    fn a_hunk_at_the_first_line_leaves_no_gap_above_it() {
+        let lines = DiffLine::parse(FROM_THE_TOP);
+        let gaps = diff::gaps(&lines, Some(20));
+        // Lines 5–10 of the new side between the hunks, then 13–20 under the last one.
+        assert_eq!(gaps, [Gap { at: 5, new_start: 5, old_start: 4, len: Some(6) }, Gap { at: lines.len(), new_start: 13, old_start: 12, len: Some(8) }]);
+        // The offset holds across the gap: the hunk under it starts at old 10, new 11.
+        assert_eq!(gaps[0].old_number(11), 10);
+        assert_eq!(gaps[1].old_number(20), 19);
+        assert!(!gaps[0].is_first() && gaps[1].is_last(lines.len()));
+    }
+
+    #[test]
+    fn the_gap_below_the_last_hunk_waits_for_the_file() {
+        let lines = DiffLine::parse(FROM_THE_TOP);
+        let gaps = diff::gaps(&lines, None);
+        assert_eq!(gaps.last(), Some(&Gap { at: lines.len(), new_start: 13, old_start: 12, len: None }));
+        // A file that ends with its last hunk has nothing below it.
+        assert_eq!(diff::gaps(&lines, Some(12)).len(), 1);
+    }
+
+    #[test]
+    fn a_gap_above_the_first_hunk_and_one_after_a_deletion() {
+        // Two lines removed after line 6, then one changed further down.
+        let lines = DiffLine::parse("@@ -5,4 +5,2 @@\n e\n-f\n-g\n h\n@@ -30 +28 @@\n-old\n+new\n");
+        let gaps = diff::gaps(&lines, Some(28));
+        assert_eq!(gaps[0], Gap { at: 0, new_start: 1, old_start: 1, len: Some(4) });
+        assert!(gaps[0].is_first());
+        assert_eq!(gaps[1], Gap { at: 5, new_start: 7, old_start: 9, len: Some(21) });
+        assert_eq!(gaps[1].old_number(27), 29, "the line above the second hunk sits two lower on the old side");
+        assert_eq!(gaps.len(), 2, "the file ends at the second hunk");
+        // A hunk with no new lines sits after the one its header names.
+        let removed = DiffLine::parse("@@ -3,2 +2,0 @@\n-a\n-b\n");
+        assert_eq!(
+            diff::gaps(&removed, Some(10)),
+            [Gap { at: 0, new_start: 1, old_start: 1, len: Some(2) }, Gap { at: removed.len(), new_start: 3, old_start: 5, len: Some(8) }]
+        );
+    }
+
+    #[test]
+    fn hunk_headers_without_counts_have_one_line() {
+        assert_eq!(diff::hunk_range("@@ -7 +7,2 @@ impl"), Some((7, 1, 7, 2)));
+        assert_eq!(diff::hunk_range("@@ -0,0 +1,6 @@"), Some((0, 0, 1, 6)));
+        assert_eq!(diff::hunk_range("not a hunk"), None);
+    }
+
+    #[test]
+    fn a_gap_shows_from_both_ends_until_they_meet() {
+        let gap = Gap { at: 9, new_start: 100, old_start: 90, len: Some(50) };
+        let shown = Shown::default().reveal(Reveal::Down).reveal(Reveal::Up);
+        assert_eq!(shown.split(&gap), (100..120, Some(10), 130..150));
+        let shown = shown.reveal(Reveal::Up);
+        assert_eq!(shown.split(&gap), (100..120, Some(0), 120..150), "the ends meet and stop there");
+        assert_eq!(Shown::default().reveal(Reveal::All).split(&gap), (100..150, Some(0), 150..150));
+        let unknown = Gap { len: None, ..gap };
+        assert_eq!(Shown::default().reveal(Reveal::Down).split(&unknown).1, None);
+    }
+
+    #[test]
+    fn a_files_text_splits_into_its_lines() {
+        assert_eq!(diff::text_lines("a\r\nb\n"), ["a", "b"]);
+        assert_eq!(diff::text_lines("a\n\nb"), ["a", "", "b"]);
+        assert!(diff::text_lines("").is_empty());
+    }
+}
+
+mod ahead {
+    use chrono::{Duration, Utc};
+
+    use crate::data::forge::Forge;
+    use crate::data::prefs;
+    use crate::data::store::{Loadable, QueueMode, Store, stale_ahead};
+
+    fn store() -> Store {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        store.forge = Forge::Gitlab;
+        store.mode = QueueMode::ToReview;
+        store
+    }
+
+    fn ids(store: &Store) -> Vec<String> {
+        store.ahead().into_iter().map(|m| m.id).collect()
+    }
+
+    #[test]
+    fn the_next_request_loads_ahead_then_the_one_before() {
+        let mut store = store();
+        let list: Vec<String> = store.visible_items().into_iter().map(|m| m.id).collect();
+        assert!(list.len() >= 3);
+        // The first is loaded (the fixture has its changes); nothing comes before it.
+        store.select(Some(list[0].clone()));
+        assert_eq!(ids(&store), [list[1].clone()]);
+
+        // From the second: the third, and not the first, which is in already.
+        store.select(Some(list[1].clone()));
+        assert!(ids(&store).is_empty(), "nothing loads ahead until the selection's own details are in");
+        store.diffs.insert(list[1].clone(), Loadable::Loaded(Default::default()));
+        store.discussions.insert(list[1].clone(), Loadable::Failed("offline".into()));
+        assert_eq!(ids(&store), [list[2].clone()]);
+        store.diffs.remove(&list[0]);
+        assert_eq!(ids(&store), [list[2].clone()], "its threads are in, so it isn't asked for again");
+        store.discussions.remove(&list[0]);
+        assert_eq!(ids(&store), [list[2].clone(), list[0].clone()], "the next first, then the one before");
+
+        // One that's loading isn't asked for again, and two on their way are the most.
+        store.diffs.insert(list[2].clone(), Loadable::Loading);
+        assert_eq!(ids(&store), [list[0].clone()]);
+        for id in ["elsewhere-1", "elsewhere-2"] {
+            store.fetched_ahead.insert(id.into(), Utc::now());
+            store.diffs.insert(id.into(), Loadable::Loading);
+        }
+        assert!(ids(&store).is_empty());
+    }
+
+    #[test]
+    fn with_nothing_selected_the_first_loads_ahead() {
+        let mut store = store();
+        let first = store.visible_items()[0].id.clone();
+        store.selected_id = None;
+        assert!(ids(&store).is_empty(), "the first is loaded already");
+        store.diffs.remove(&first);
+        store.discussions.remove(&first);
+        assert_eq!(ids(&store), [first]);
+    }
+
+    #[test]
+    fn threads_loaded_ahead_go_stale_after_two_minutes() {
+        let now = Utc::now();
+        assert!(!stale_ahead(now - Duration::seconds(90), now));
+        assert!(stale_ahead(now - Duration::minutes(3), now));
+    }
+}
+
 #[test]
 fn github_addresses_each_kind_of_comment_by_its_thread() {
     let reviews = r#"[{"id":300,"body":"Ship it.","user":{"login":"me"},"state":"APPROVED","submitted_at":"2026-01-03T00:00:00Z"}]"#;
