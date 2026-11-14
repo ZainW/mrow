@@ -714,3 +714,12 @@ pub fn submit_review(item: &MergeRequest, verdict: Verdict, body: &str) -> Resul
         }
     }
 }
+
+// MARK: Files
+
+/// A file's bytes at a commit. The commit can be on a fork's branch: the project keeps a ref to
+/// each merge request's head, so its commits are found here too.
+pub fn file_at(item: &MergeRequest, path: &str, sha: &str) -> Result<Vec<u8>, String> {
+    let path = super::forge::encode_path(path, false);
+    cli().api(&[format!("projects/{}/repository/files/{path}/raw?ref={sha}", item.project_id())], None)
+}

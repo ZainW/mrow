@@ -10,7 +10,7 @@ use rune::{El, Tx, el, icon, rich, row, text};
 use rune_kit::Kit;
 use rune_kit::syntax::{self, Paint, SyntaxTheme};
 
-use crate::app::App;
+use crate::app::{App, DraftKey};
 use crate::data::diff::{DiffLine, LineKind};
 use crate::data::models::FileDiff;
 use crate::data::styler::{self, LineStyle};
@@ -24,7 +24,12 @@ thread_local! {
     /// Styled files by "id|digest", most recent last; the oldest go past `LIMIT`.
     static STYLED: RefCell<(HashMap<String, Styles>, Vec<String>)> = RefCell::new((HashMap::new(), Vec::new()));
     static THEMES: RefCell<[Option<Rc<SyntaxTheme>>; 2]> = const { RefCell::new([None, None]) };
+    /// Files' texts styled whole, by "commit|path": the lines a diff's gaps show.
+    static TEXTS: RefCell<HashMap<String, Styles>> = RefCell::new(HashMap::new());
 }
+
+/// How many styled texts are kept before they're all let go.
+const TEXT_LIMIT: usize = 40;
 
 const LIMIT: usize = 400;
 
@@ -89,7 +94,9 @@ fn column(n: Option<i64>) -> String {
     }
 }
 
-pub fn line_view(p: &Pal, line: &DiffLine, spans: Vec<Span>, commentable: bool, item: String, file: String, l: usize) -> El {
+/// A diff line's row; `comment` is where its comment button's box writes, on a line that takes one.
+pub fn line_view(p: &Pal, line: &DiffLine, spans: Vec<Span>, comment: Option<DraftKey>) -> El {
+    let commentable = comment.is_some();
     let numbers = format!("{} {} ", column(line.old_number), column(line.new_number));
     let (sign, sign_color) = match line.kind {
         LineKind::Added => ("+", p.green),
@@ -99,7 +106,7 @@ pub fn line_view(p: &Pal, line: &DiffLine, spans: Vec<Span>, commentable: bool, 
     let gutter_text = format!("{numbers}{sign}");
     let gutter_spans = vec![Span::new(0, numbers.len()).size(11.0).color(p.tertiary), Span::new(numbers.len(), gutter_text.len()).color(sign_color)];
     let mut gutter = el().w(96.0).child(rich(gutter_text, gutter_spans).font(mono(12.0, 400.0)).single_line());
-    if commentable {
+    if let Some(key) = comment {
         gutter = gutter.child(
             el().key("comment")
                 .role("button")
@@ -112,7 +119,7 @@ pub fn line_view(p: &Pal, line: &DiffLine, spans: Vec<Span>, commentable: bool, 
                 .group_opacity(0.0, 1.0)
                 .help("Comment on this line")
                 .child(icon(&I::PLUS, 11.0).color(p.paper))
-                .on_press_tx(move |s: &mut App, tx: &mut Tx| crate::ui::detail::comment_on_line(s, tx, item.clone(), file.clone(), l)),
+                .on_press_tx(move |s: &mut App, tx: &mut Tx| crate::ui::detail::comment_on_line(s, tx, key.clone())),
         );
     }
     let code = match line.kind {
@@ -139,4 +146,33 @@ pub fn line_view(p: &Pal, line: &DiffLine, spans: Vec<Span>, commentable: bool, 
     // The comment button follows the pointer down the gutter line by line: it shows and hides at
     // once, as a cursor does, so sweeping across the code doesn't leave a trail of fading buttons.
     if commentable { r.hover_group().hover_motion(rune::Anim::INSTANT, rune::Anim::INSTANT) } else { r }
+}
+
+/// The spans for line `i` of a file's text (`lines`, by "commit|path" in `key`), lexed whole
+/// the first time, so a string or comment that spans lines colours right.
+pub fn text_spans(p: &Pal, k: &Kit, key: &str, path: &str, lines: &[String], i: usize) -> Vec<Span> {
+    if lines.get(i).is_none_or(|l| l.is_empty()) {
+        return Vec::new();
+    }
+    let styled = TEXTS.with(|t| t.borrow().get(key).cloned()).unwrap_or_else(|| {
+        // As added lines, so the text is lexed once, as the new side.
+        let as_diff: Vec<DiffLine> = lines.iter().map(|l| DiffLine { kind: LineKind::Added, text: l.clone(), old_number: None, new_number: None }).collect();
+        let lang = syntax::lang_for_path(path);
+        let lex = |code: &str| -> Vec<(std::ops::Range<usize>, Paint)> {
+            match lang {
+                Some(l) => syntax::highlight(Some(l), code).iter().cloned().collect(),
+                None => Vec::new(),
+            }
+        };
+        let styled: Styles = Rc::new(styler::styles(&as_diff, lex));
+        TEXTS.with(|t| {
+            let mut t = t.borrow_mut();
+            if t.len() >= TEXT_LIMIT {
+                t.clear();
+            }
+            t.insert(key.to_string(), styled.clone());
+        });
+        styled
+    });
+    styled.get(i).map_or_else(Vec::new, |style| theme(p, k).spans(&style.tokens, 0))
 }

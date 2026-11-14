@@ -227,6 +227,37 @@ impl Forge {
             Forge::Github => github::submit_review(item, verdict, body),
         }
     }
+
+    // A file as it stands at a commit, for the unchanged lines a diff leaves out.
+
+    /// The text of `path` at commit `sha`, in the merge request's project. A binary file is an error.
+    pub fn file_at(self, item: &MergeRequest, path: &str, sha: &str) -> Result<String, String> {
+        let raw = match self {
+            Forge::Gitlab => gitlab::file_at(item, path, sha),
+            Forge::Github => github::file_at(item, path, sha),
+        }?;
+        if raw.contains(&0) {
+            return Err("It's a binary file.".into());
+        }
+        String::from_utf8(raw).map_err(|_| "It isn't text.".into())
+    }
+
+    /// Whether a comment can go on a line the diff leaves out, once it's shown. GitHub takes
+    /// comments only on lines in the diff's hunks.
+    pub fn comments_outside_diff(self) -> bool {
+        self == Forge::Gitlab
+    }
+}
+
+/// Percent-encodes a file's path for a REST URL, keeping its slashes when `slashes`.
+pub fn encode_path(path: &str, slashes: bool) -> String {
+    path.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b'/' if slashes => "/".into(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// One forge's review queue, as fetched.

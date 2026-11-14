@@ -33,13 +33,21 @@ pub enum DraftKey {
     Edit(String, i64),
     /// The summary of the review I'm submitting.
     Summary(String),
+    /// A comment on a line the diff leaves out, shown from the file: (merge request, file id,
+    /// its line number on the new side).
+    Context(String, String, i64),
 }
 
 impl DraftKey {
     /// The merge request it's written on.
     pub fn item(&self) -> &str {
         match self {
-            DraftKey::Comment(id) | DraftKey::Reply(id, _) | DraftKey::Line(id, ..) | DraftKey::Edit(id, _) | DraftKey::Summary(id) => id,
+            DraftKey::Comment(id)
+            | DraftKey::Reply(id, _)
+            | DraftKey::Line(id, ..)
+            | DraftKey::Edit(id, _)
+            | DraftKey::Summary(id)
+            | DraftKey::Context(id, ..) => id,
         }
     }
 }
@@ -292,6 +300,14 @@ impl App {
             }
             // Sent with its verdict, by `submit_review`.
             DraftKey::Summary(_) => return,
+            DraftKey::Context(id, file, number) => {
+                let Some(item) = self.store.item(id).cloned() else { return };
+                let files = self.store.diffs.get(id).and_then(|l| l.value());
+                let Some(file) = files.and_then(|f| f.iter().find(|d| &d.id() == file)).cloned() else { return };
+                let Some(line) = self.store.context_line(&item, &file, *number) else { return };
+                let refs = self.store.diff_refs.get(id).cloned();
+                if hold { self.store.hold_on_line(&item, &file, &line, refs, body) } else { self.store.comment_on_line(&item, &file, &line, refs, body) }
+            }
         };
         self.posting.insert(ticket, key);
     }
@@ -406,7 +422,7 @@ impl App {
             }
             self.drafts.remove(&key);
             match &key {
-                DraftKey::Line(..) => {
+                DraftKey::Line(..) | DraftKey::Context(..) => {
                     if self.line_comment.as_ref() == Some(&key) {
                         self.line_comment = None;
                     }

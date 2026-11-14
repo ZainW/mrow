@@ -8,7 +8,7 @@ use std::rc::Rc;
 use chrono::{Local, Utc};
 
 use super::bg::Bg;
-use super::diff::DiffLine;
+use super::diff::{self, DiffLine, Gap, Reveal, Shown};
 use super::forge::{Forge, QueueResult};
 use super::inbox::{self, Event, Notice};
 use super::mine::{self, Stack, Standing, Status, WalkStep};
@@ -177,6 +177,12 @@ pub enum Msg {
         reload: Option<MergeRequest>,
         ticket: Option<u64>,
     },
+    /// A file's text at a commit, by `text_key`, for the lines its diff leaves out.
+    FileText {
+        key: String,
+        request: u64,
+        result: Result<String, String>,
+    },
 }
 
 pub struct Store {
@@ -231,6 +237,12 @@ pub struct Store {
     pub bg: Bg<Msg>,
     /// Asked to show a toast at the next `poll`, with the clock.
     pending_toast: Option<String>,
+    /// Files' texts at a commit, by `text_key`, as lines: what a diff's gaps show.
+    pub file_texts: HashMap<String, Loadable<Rc<Vec<String>>>>,
+    /// How much of each gap shows, by "merge request id|file id|digest", then the gap's first line.
+    pub shown: HashMap<String, BTreeMap<i64, Shown>>,
+    /// Counts changes to `file_texts` and `shown`, so a view knows when to list its rows again.
+    pub context_version: u64,
 }
 
 impl Default for Store {
@@ -267,6 +279,9 @@ impl Default for Store {
             next_ticket: 0,
             bg: Bg::default(),
             pending_toast: None,
+            file_texts: HashMap::new(),
+            shown: HashMap::new(),
+            context_version: 0,
         }
     }
 }
@@ -1246,6 +1261,7 @@ impl Store {
                         self.finished.insert(t, ok);
                     }
                 }
+                Msg::FileText { key, request, result } => self.landed_file_text(key, request, result),
             }
         }
         if let Some(message) = self.pending_toast.take() {
@@ -1414,6 +1430,96 @@ impl Store {
         self.accounts = accounts;
         self.diffs = diffs.into_iter().map(|(k, v)| (k, Loadable::Loaded(Rc::new(v)))).collect();
         self.discussions = threads.into_iter().map(|(k, v)| (k, Loadable::Loaded(Rc::new(v)))).collect();
+    }
+}
+
+// MARK: Context
+
+/// The key of a file's text at a commit.
+fn text_key(sha: &str, path: &str) -> String {
+    format!("{sha}|{path}")
+}
+
+impl Store {
+    /// Whether a file's diff can show the unchanged lines around its hunks: it has a new side
+    /// with hunks, and the commit it was taken at is known.
+    pub fn expandable(&self, item: &MergeRequest, file: &FileDiff) -> bool {
+        !file.deleted_file && !file.new_file && !file.too_large && !file.lines.is_empty() && self.diff_refs.contains_key(&item.id)
+    }
+
+    /// The text of a file's new side at the head of its diff, as far as it has loaded.
+    pub fn file_text(&self, item: &MergeRequest, file: &FileDiff) -> Option<&Loadable<Rc<Vec<String>>>> {
+        let refs = self.diff_refs.get(&item.id)?;
+        self.file_texts.get(&text_key(&refs.head_sha, &file.new_path))
+    }
+
+    /// The unchanged stretches around a file's hunks; the one below the last has a length once
+    /// the file's text is in.
+    pub fn gaps(&self, item: &MergeRequest, file: &FileDiff) -> Vec<Gap> {
+        if !self.expandable(item, file) {
+            return Vec::new();
+        }
+        let len = self.file_text(item, file).and_then(Loadable::value).map(|t| t.len());
+        diff::gaps(&file.lines, len)
+    }
+
+    fn shown_key(item: &MergeRequest, file: &FileDiff) -> String {
+        format!("{}|{}|{}", item.id, file.id(), file.digest)
+    }
+
+    /// How much of `gap` shows.
+    pub fn shown(&self, item: &MergeRequest, file: &FileDiff, gap: &Gap) -> Shown {
+        self.shown.get(&Self::shown_key(item, file)).and_then(|g| g.get(&gap.new_start)).copied().unwrap_or_default()
+    }
+
+    /// Shows more of a gap, loading the file's text the first time.
+    pub fn reveal(&mut self, item: &MergeRequest, file: &FileDiff, gap: &Gap, how: Reveal) {
+        let now = self.shown(item, file, gap).reveal(how);
+        self.shown.entry(Self::shown_key(item, file)).or_default().insert(gap.new_start, now);
+        self.context_version += 1;
+        self.load_file_text(item, file);
+    }
+
+    /// Asks for a file's text at its diff's head, unless it's in or on its way. A failed load
+    /// is asked again.
+    pub fn load_file_text(&mut self, item: &MergeRequest, file: &FileDiff) {
+        let Some(sha) = self.diff_refs.get(&item.id).map(|r| r.head_sha.clone()) else { return };
+        let key = text_key(&sha, &file.new_path);
+        if self.offline || matches!(self.file_texts.get(&key), Some(Loadable::Loading | Loadable::Loaded(_))) {
+            return;
+        }
+        self.file_texts.insert(key.clone(), Loadable::Loading);
+        self.context_version += 1;
+        let request = self.start_request(format!("file {key}"));
+        let (item, path) = (item.clone(), file.new_path.clone());
+        self.bg.spawn(move || Msg::FileText { key, request, result: item.kind().file_at(&item, &path, &sha) });
+    }
+
+    fn landed_file_text(&mut self, key: String, request: u64, result: Result<String, String>) {
+        if self.requests.get(&format!("file {key}")) != Some(&request) {
+            return;
+        }
+        let value = match result {
+            Ok(text) => Loadable::Loaded(Rc::new(diff::text_lines(&text))),
+            Err(e) => Loadable::Failed(e),
+        };
+        self.file_texts.insert(key, value);
+        self.context_version += 1;
+    }
+
+    /// Line `new` of a file's new side where its diff leaves it out, as a context line with
+    /// both its numbers: what a comment on it is placed by.
+    pub fn context_line(&self, item: &MergeRequest, file: &FileDiff, new: i64) -> Option<DiffLine> {
+        let text = self.file_text(item, file)?.value()?;
+        let gap = self.gaps(item, file).into_iter().find(|g| g.len.is_some_and(|n| (g.new_start..g.new_start + n).contains(&new)))?;
+        let line = text.get(usize::try_from(new - 1).ok()?)?;
+        Some(DiffLine { kind: diff::LineKind::Context, text: line.clone(), old_number: Some(gap.old_number(new)), new_number: Some(new) })
+    }
+
+    /// Puts a file's text in place, for scenes and tests, which never ask a forge.
+    pub fn insert_file_text(&mut self, sha: &str, path: &str, text: &str) {
+        self.file_texts.insert(text_key(sha, path), Loadable::Loaded(Rc::new(diff::text_lines(text))));
+        self.context_version += 1;
     }
 }
 

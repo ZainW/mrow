@@ -910,3 +910,14 @@ pub fn submit_review(item: &MergeRequest, verdict: Verdict, body: &str) -> Resul
         }
     }
 }
+
+// MARK: Files
+
+/// A file's bytes at a commit, as they are: the raw media type skips the JSON and its base64.
+/// The commit can be on a fork's branch: the base repository keeps each pull request's head.
+pub fn file_at(item: &MergeRequest, path: &str, sha: &str) -> Result<Vec<u8>, String> {
+    let path = super::forge::encode_path(path, true);
+    let args: Vec<String> =
+        ["-H", "Accept: application/vnd.github.raw", &format!("repos/{}/contents/{path}?ref={sha}", item.project_path)].into_iter().map(String::from).collect();
+    cli().api(&args, None)
+}

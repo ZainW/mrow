@@ -21,7 +21,7 @@ use rune::{Align, El, GrowthSpec, PointerPress, PopupAnchor, PopupItem, PopupMen
 use rune_kit::{Kit, Spinner, TextArea};
 
 use crate::app::{App, DraftKey};
-use crate::data::diff::LineKind;
+use crate::data::diff::{DiffLine, Gap, LineKind, REVEAL_STEP, Reveal};
 use crate::data::models::{Discussion, FileDiff, MergeRequest, Note, Verdict};
 use crate::data::store::{Loadable, Viewed, relative};
 use crate::ui::components::{
@@ -161,13 +161,17 @@ enum Row {
     Footer(usize),
     Thread(usize),
     Composer,
+    /// Unchanged lines a file's diff leaves out, with the ways to show them.
+    Gap(usize, Gap),
+    /// One of those lines, shown: its file, and its numbers on the new and old sides.
+    Shown(usize, i64, i64),
 }
 
 impl Row {
     /// The file a row of the changes belongs to.
     fn file(&self) -> Option<usize> {
         match self {
-            Row::FileHeader(f) | Row::Notice(f, ..) | Row::Top(f) | Row::Line(f, _) | Row::Footer(f) => Some(*f),
+            Row::FileHeader(f) | Row::Notice(f, ..) | Row::Top(f) | Row::Line(f, _) | Row::Footer(f) | Row::Gap(f, _) | Row::Shown(f, ..) => Some(*f),
             _ => None,
         }
     }
@@ -188,6 +192,8 @@ impl Row {
             Row::Footer(f) => format!("footer:{}", files[*f].id()),
             Row::Thread(t) => format!("thread:{}", threads[*t].id),
             Row::Composer => "composer".into(),
+            Row::Gap(f, gap) => format!("gap:{}:{}", files[*f].id(), gap.new_start),
+            Row::Shown(f, new, _) => format!("shown:{}:{new}", files[*f].id()),
         }
     }
 }
@@ -549,6 +555,8 @@ struct Inputs {
     head: Option<String>,
     /// How each file is folded: 0 open, 1 collapsed, 2 a large file expanded.
     folds: Vec<u8>,
+    /// The store's `context_version`: how much of the files' gaps shows, and their texts.
+    context: u64,
 }
 
 impl Inputs {
@@ -567,6 +575,7 @@ impl Inputs {
             && same(&self.talk, &other.talk)
             && self.head == other.head
             && self.folds == other.folds
+            && self.context == other.context
     }
 }
 
@@ -604,7 +613,15 @@ fn page_rows(
             })
             .collect()
     };
-    let inputs = Inputs { item: item.id.clone(), seen: s.store.seen_before.get(&item.id).copied(), diffs: diffs.cloned(), talk: talk.cloned(), head, folds };
+    let inputs = Inputs {
+        item: item.id.clone(),
+        seen: s.store.seen_before.get(&item.id).copied(),
+        diffs: diffs.cloned(),
+        talk: talk.cloned(),
+        head,
+        folds,
+        context: s.store.context_version,
+    };
     let cached = PAGE_ROWS.with(|c| c.borrow().as_ref().and_then(|(was, rows)| was.same(&inputs).then(|| rows.clone())));
     if let Some(rows) = cached {
         return rows;
@@ -630,7 +647,7 @@ fn page_rows(
                     rows.push(Row::Notice(f, format!("{} lines. Show the diff", file.lines.len()), true));
                 } else {
                     rows.push(Row::Top(f));
-                    rows.extend((0..file.lines.len()).map(|l| Row::Line(f, l)));
+                    context_rows(s, item, f, file, &mut rows);
                 }
                 rows.push(Row::Footer(f));
             }
@@ -657,6 +674,39 @@ fn page_rows(
     };
     PAGE_ROWS.with(|c| *c.borrow_mut() = Some((inputs, made.clone())));
     made
+}
+
+/// A file's lines with the gaps around its hunks: the lines shown from each gap's ends, the
+/// gap's row while some of it is hidden, and a hunk's header until the gap above it is all shown.
+fn context_rows(s: &App, item: &MergeRequest, f: usize, file: &FileDiff, rows: &mut Vec<Row>) {
+    let gaps = s.store.gaps(item, file);
+    let has_text = s.store.file_text(item, file).is_some_and(|t| t.value().is_some());
+    let push_gap = |gap: &Gap, rows: &mut Vec<Row>| -> bool {
+        if !has_text {
+            rows.push(Row::Gap(f, *gap));
+            return false;
+        }
+        let (top, hidden, bottom) = s.store.shown(item, file, gap).split(gap);
+        rows.extend(top.map(|n| Row::Shown(f, n, gap.old_number(n))));
+        if hidden != Some(0) {
+            rows.push(Row::Gap(f, *gap));
+        }
+        rows.extend(bottom.map(|n| Row::Shown(f, n, gap.old_number(n))));
+        hidden == Some(0)
+    };
+    let mut gaps = gaps.iter().peekable();
+    for l in 0..file.lines.len() {
+        let mut whole = false;
+        while let Some(gap) = gaps.next_if(|g| g.at == l) {
+            whole = push_gap(gap, rows);
+        }
+        if !(whole && file.lines[l].kind == LineKind::Hunk) {
+            rows.push(Row::Line(f, l));
+        }
+    }
+    for gap in gaps {
+        push_gap(gap, rows);
+    }
 }
 
 /// A long or generated file, whose lines wait for a click.
@@ -797,6 +847,8 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
         Row::Notice(f, message, expands) => notice(p, page, *f, message, *expands),
         Row::Top(_) => el().w_full().h(4.0).fill(p.paper).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line),
         Row::Line(f, l) => line_row(s, p, k, page, *f, *l),
+        Row::Gap(f, gap) => gap_row(s, p, k, page, *f, gap),
+        Row::Shown(f, new, old) => shown_row(s, p, k, page, *f, *new, *old),
         Row::Footer(_) => {
             el().w_full().pb(14.0).child(el().w_full().h(10.0).fill(p.paper).corners([0.0, 0.0, 10.0, 10.0]).border_sides([0.0, 1.0, 1.0, 1.0], p.strong_line))
         }
@@ -1291,15 +1343,8 @@ fn line_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, l: usize) -> El {
     let line = &file.lines[l];
     let commentable = item.is_open() && matches!(line.kind, LineKind::Context | LineKind::Added | LineKind::Removed);
     let styled = diff::line_spans(p, k, file, l);
-    let mut c = col().w_full().fill(p.paper).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line).child(diff::line_view(
-        p,
-        line,
-        styled,
-        commentable,
-        item.id.clone(),
-        file.id(),
-        l,
-    ));
+    let comment = commentable.then(|| DraftKey::Line(item.id.clone(), file.id(), l));
+    let mut c = col().w_full().fill(p.paper).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line).child(diff::line_view(p, line, styled, comment));
     for &thread in page.placed.on(f, l) {
         c = c.child(el().w_full().px(14.0).py(8.0).fill(p.well).child(thread_card(s, p, k, item, &page.threads[thread], Head::Bare).max_w(760.0)));
     }
@@ -1312,6 +1357,106 @@ fn line_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, l: usize) -> El {
                 .py(10.0)
                 .fill(p.well)
                 .child(composer(s, p, k, key, &format!("Comment on line {number}. Markdown works."), "Comment", true).max_w(760.0)),
+        );
+    }
+    c
+}
+
+// MARK: Context
+
+/// A gap of this many lines or fewer shows whole with one click.
+const SMALL_GAP: i64 = 20;
+
+/// A gap's row: the ways to show its lines, or the file loading for them. Clicks land at once.
+fn gap_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, gap: &Gap) -> El {
+    let item = &page.item;
+    let file = &page.files[f];
+    let source = s.store.file_text(item, file);
+    let hidden = match source.and_then(Loadable::value) {
+        Some(_) => s.store.shown(item, file, gap).split(gap).1,
+        None => gap.len,
+    };
+    let lines = file.lines.len();
+    let reveal = |how: Reveal, glyph: &'static rune::Icon, title: String, help: &str| -> El {
+        let (mr, fid, gap) = (item.id.clone(), file.id(), *gap);
+        row()
+            .key(format!("reveal-{how:?}"))
+            .role("button")
+            .label(format!("{title}: {help}"))
+            .help(help.to_string())
+            .h(22.0)
+            .pl(6.0)
+            .pr(8.0)
+            .gap(4.0)
+            .center_y()
+            .radius(6.0)
+            .hover(p.hover)
+            .child(icon(glyph, 12.0).color(p.accent))
+            .child(text(title).font(ui(12.0, MEDIUM)).color(p.accent).single_line())
+            .on_press(move |s: &mut App| {
+                let Some(file) = s.store.diffs.get(&mr).and_then(Loadable::value).and_then(|f| f.iter().find(|d| d.id() == fid)).cloned() else { return };
+                let Some(item) = s.store.item(&mr).cloned() else { return };
+                s.store.reveal(&item, &file, &gap, how);
+            })
+    };
+    let noun = |n: i64| if n == 1 { "line" } else { "lines" };
+    let mut controls = row().gap(2.0).center_y().grow(1.0).shrink().min_w(0.0);
+    match source {
+        Some(Loadable::Loading) => {
+            controls = controls
+                .gap(8.0)
+                .pl(6.0)
+                .child(Spinner::new().size(12.0).build(k))
+                .child(text("Loading the file…").font(ui(12.0, 400.0)).color(p.secondary).single_line());
+        }
+        Some(Loadable::Failed(e)) => {
+            controls = controls
+                .gap(6.0)
+                .pl(6.0)
+                .child(icon(&I::WARNING, 12.0).color(p.red))
+                .child(text(format!("Couldn’t load the file: {e}")).font(ui(12.0, 400.0)).color(p.red).single_line().shrink().min_w(0.0))
+                .child(reveal(Reveal::Down, &I::REFRESH, "Try again".into(), "Load the file again"));
+        }
+        _ => match hidden {
+            Some(n) if n <= SMALL_GAP => {
+                controls = controls.child(reveal(Reveal::All, &I::CHEVRON_UP_DOWN, format!("Show {n} hidden {}", noun(n)), "Show the unchanged lines here"));
+            }
+            Some(n) => {
+                if !gap.is_first() {
+                    controls = controls.child(reveal(Reveal::Down, &I::CHEVRON_DOWN, format!("{REVEAL_STEP} more"), "Show more lines under the change above"));
+                }
+                if !gap.is_last(lines) {
+                    controls = controls.child(reveal(Reveal::Up, &I::CHEVRON_UP, format!("{REVEAL_STEP} more"), "Show more lines over the change below"));
+                }
+                controls = controls.child(reveal(Reveal::All, &I::CHEVRON_UP_DOWN, format!("Show all {n}"), "Show every unchanged line here"));
+            }
+            None => {
+                controls = controls.child(reveal(Reveal::Down, &I::CHEVRON_DOWN, "Show more".into(), "Show the lines under the last change"));
+            }
+        },
+    }
+    row().w_full().h(30.0).center_y().fill(p.well).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line).child(el().w(90.0)).child(controls)
+}
+
+/// A line from a gap, shown: a context line with both its numbers, coloured with the whole file.
+fn shown_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, new: i64, old: i64) -> El {
+    let item = &page.item;
+    let file = &page.files[f];
+    let lines = s.store.file_text(item, file).and_then(Loadable::value).cloned().unwrap_or_default();
+    let i = (new - 1).max(0) as usize;
+    let line = DiffLine { kind: LineKind::Context, text: lines.get(i).cloned().unwrap_or_default(), old_number: Some(old), new_number: Some(new) };
+    let head = s.store.diff_refs.get(&item.id).map_or("", |r| r.head_sha.as_str());
+    let spans = diff::text_spans(p, k, &format!("{head}|{}", file.new_path), &file.new_path, &lines, i);
+    let key = DraftKey::Context(item.id.clone(), file.id(), new);
+    let comment = (item.is_open() && item.kind().comments_outside_diff()).then(|| key.clone());
+    let mut c = col().w_full().fill(p.paper).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line).child(diff::line_view(p, &line, spans, comment));
+    if s.line_comment.as_ref() == Some(&key) {
+        c = c.child(
+            el().w_full()
+                .px(14.0)
+                .py(10.0)
+                .fill(p.well)
+                .child(composer(s, p, k, key, &format!("Comment on line {new}. Markdown works."), "Comment", true).max_w(760.0)),
         );
     }
     c
@@ -1560,6 +1705,7 @@ fn composer_key(key: &DraftKey) -> String {
         DraftKey::Line(id, file, line) => format!("line-{id}-{}-{line}", crate::data::models::fnv1a(file)),
         DraftKey::Edit(id, note) => format!("edit-{id}-{note}"),
         DraftKey::Summary(id) => format!("summary-{id}"),
+        DraftKey::Context(id, file, number) => format!("context-{id}-{}-{number}", crate::data::models::fnv1a(file)),
     }
 }
 
@@ -1574,7 +1720,7 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
     let holds = item.is_some_and(|m| {
         m.is_open()
             && match &key {
-                DraftKey::Line(..) => true,
+                DraftKey::Line(..) | DraftKey::Context(..) => true,
                 DraftKey::Comment(_) => m.kind().drafts_general_comments(),
                 _ => false,
             }
@@ -1653,7 +1799,7 @@ fn cancel(s: &mut App, key: &DraftKey) {
         DraftKey::Reply(id, thread) => {
             s.replying.remove(&format!("{id}|{thread}"));
         }
-        DraftKey::Line(..) => {
+        DraftKey::Line(..) | DraftKey::Context(..) => {
             if s.line_comment.as_ref() == Some(key) {
                 s.line_comment = None;
             }
@@ -1670,9 +1816,8 @@ impl TextEditHolder {
     }
 }
 
-/// Opens the comment box under a diff line and puts the caret in it.
-pub fn comment_on_line(s: &mut App, tx: &mut Tx, item: String, file: String, line: usize) {
-    let key = DraftKey::Line(item, file, line);
+/// Opens the comment box under a diff line (a `DraftKey::Line` or `Context`) and puts the caret in it.
+pub fn comment_on_line(s: &mut App, tx: &mut Tx, key: DraftKey) {
     tx.focus(draft_field_key(&key), false);
     s.line_comment = Some(key);
 }
