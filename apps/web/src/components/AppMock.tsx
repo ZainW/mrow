@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode, RefObject } from 'react'
 import { highlight } from '../lib/highlight'
 import { useKeyLabel } from '../lib/keys'
@@ -338,7 +338,6 @@ export function AppMock() {
             review={selected}
             all={all}
             account={accounts[provider]}
-            rail={!chatOpen}
             approved={approved.has(selected.id)}
             onApprove={() =>
               setApproved((prev) => {
@@ -587,13 +586,36 @@ export function InboxList({
   )
 }
 
-type Part = { id: string; label: string; file?: DiffFile; note?: ReactNode }
+export type ReviewTab = 'overview' | 'changes' | 'conversation'
+export type Verdict = 'Comment' | 'Request Changes' | 'Approve'
+/** A thread on a line of a file, or a comment on the whole request. */
+export type Thread = { id: string; file?: string; fileIndex?: number; line?: number; comments: Comment[]; resolvable: boolean; resolved: boolean }
+
+const TABS: [ReviewTab, string][] = [
+  ['overview', 'Overview'],
+  ['changes', 'Changes'],
+  ['conversation', 'Conversation'],
+]
+const VERDICTS: Verdict[] = ['Comment', 'Request Changes', 'Approve']
+
+/** A review's threads, those on lines first, as the Conversation tab lists them. */
+export function threadsOf(r: Review): Thread[] {
+  const out: Thread[] = []
+  r.files.forEach((f, fi) =>
+    f.lines.forEach((l, li) => {
+      if (l.thread) out.push({ id: `${fi}-${li}`, file: f.path, fileIndex: fi, line: l.new ?? l.old, comments: l.thread, resolvable: true, resolved: !!l.resolved })
+    }),
+  )
+  r.conversation.forEach((c, i) => out.push({ id: `c${i}`, comments: [c], resolvable: false, resolved: false }))
+  return out
+}
+export const pendingIn = (threads: Thread[]) => threads.reduce((n, t) => n + t.comments.filter((c) => c.pending).length, 0)
+const fileName = (path: string) => path.split('/').pop() ?? path
 
 function Detail({
   review,
   all,
   account,
-  rail,
   approved,
   onApprove,
   confirm,
@@ -609,7 +631,6 @@ function Detail({
   review: Review
   all: Review[]
   account: Account
-  rail: boolean
   approved: boolean
   onApprove: () => void
   confirm?: Confirm['kind']
@@ -622,267 +643,288 @@ function Detail({
   onReady: () => void
   onGo: (r: Review) => void
 }) {
-  const pageRef = useRef<HTMLDivElement>(null)
-  const keyLabel = useKeyLabel()
+  const id = useId()
+  const [tab, setTab] = useState<ReviewTab>('overview')
   const [viewed, setViewed] = useState<Set<string>>(() => new Set())
-  const [current, setCurrent] = useState('top')
-  const mine = review.list === 'mine'
-  const threads = review.files.flatMap((f) => f.lines.filter((l) => l.thread))
-  const parts: Part[] = [
-    { id: 'top', label: mine ? 'Where it stands' : 'The ask' },
-    { id: 'description', label: 'Description' },
-    { id: 'changes', label: 'The changes', note: `${viewed.size} of ${review.files.length}` },
-    ...review.files.map((file, i): Part => ({ id: `file-${i}`, label: file.path.split('/').pop() ?? file.path, file })),
-    { id: 'conversation', label: 'Conversation', note: review.conversation.length || undefined },
-    { id: 'end', label: mine ? 'Before it merges' : 'Your verdict' },
-  ]
+  const [threads, setThreads] = useState(() => threadsOf(review))
+  const [panel, setPanel] = useState(false)
+  const [summary, setSummary] = useState('')
+  const [askedChanges, setAskedChanges] = useState(false)
+  // The file J and K are on, and a jump to make once the Changes tab is showing.
+  const [file, setFile] = useState<number>()
+  const [jump, setJump] = useState<{ file: number }>()
+  const changesRef = useRef<HTMLDivElement>(null)
+  const reviewRef = useRef<HTMLButtonElement>(null)
 
-  // A jump names the part it went to; the scroll it causes shouldn't rename it.
-  const jumped = useRef(0)
-  function jump(id: string) {
-    const page = pageRef.current
-    const el = page?.querySelector<HTMLElement>(`[data-part="${id}"]`)
-    if (page && el) {
-      jumped.current = performance.now()
-      page.scrollTop = el.offsetTop - 12
-      setCurrent(id)
-    }
+  const mine = review.list === 'mine'
+  const open = review.list !== 'done' && review.standing !== 'merged'
+  const pending = pendingIn(threads)
+  const reviews = open && (!mine || pending > 0)
+  const approves = open && !mine
+
+  useEffect(() => {
+    const pane = changesRef.current
+    const el = jump && pane?.querySelector<HTMLElement>(`[data-file="${jump.file}"]`)
+    if (pane && el) pane.scrollTop = el.offsetTop - 12
+  }, [jump])
+
+  function goFile(i: number) {
+    setTab('changes')
+    setFile(i)
+    setJump({ file: i })
   }
-  function onScroll() {
-    const page = pageRef.current
-    if (!page || performance.now() - jumped.current < 150) return
-    if (page.scrollTop + page.clientHeight >= page.scrollHeight - 4) return setCurrent('end')
-    let at = 'top'
-    for (const el of page.querySelectorAll<HTMLElement>('[data-part]')) {
-      if (el.offsetTop - page.scrollTop <= 40) at = el.dataset.part ?? at
-    }
-    setCurrent(at)
+  function closePanel(refocus: boolean) {
+    setPanel(false)
+    if (refocus) reviewRef.current?.focus()
   }
+  function approve() {
+    if (pending > 0) setPanel(true)
+    else onApprove()
+  }
+  function edit(threadId: string, fn: (t: Thread) => Thread | undefined) {
+    setThreads((prev) => prev.flatMap((t) => (t.id === threadId ? (fn(t) ?? []) : [t])))
+  }
+  function add(body: string, held: boolean) {
+    setThreads((prev) => [...prev, { id: `n${prev.length}`, comments: [{ author: 'You', when: held ? '' : 'just now', body, pending: held }], resolvable: false, resolved: false }])
+  }
+  function submit(verdict: Verdict) {
+    const said = summary.trim()
+    setThreads((prev) => {
+      const sent = prev.map((t) => ({ ...t, comments: t.comments.map((c) => (c.pending ? { ...c, pending: false, when: 'just now' } : c)) }))
+      return said ? [...sent, { id: `n${sent.length}`, comments: [{ author: 'You', when: 'just now', body: said }], resolvable: false, resolved: false }] : sent
+    })
+    if (verdict === 'Approve' && !approved) onApprove()
+    if (verdict === 'Request Changes') setAskedChanges(true)
+    setSummary('')
+    closePanel(true)
+  }
+
   function onKey(e: KeyboardEvent<HTMLDivElement>) {
-    if (e.metaKey || e.ctrlKey || e.altKey || (e.target as HTMLElement).closest('button, input')) return
+    const digit = ['Digit1', 'Digit2', 'Digit3'].indexOf(e.code)
+    if (e.altKey && (e.metaKey || e.ctrlKey) && digit >= 0) {
+      e.preventDefault()
+      setTab(TABS[digit]?.[0] ?? 'overview')
+      return
+    }
+    if (e.key === 'Escape' && panel) return closePanel(true)
+    if (tab !== 'changes' || e.metaKey || e.ctrlKey || e.altKey || (e.target as HTMLElement).closest('button, input, textarea')) return
     const step = e.key === 'j' ? 1 : e.key === 'k' ? -1 : 0
     if (!step) return
     e.preventDefault()
-    const next = parts[parts.findIndex((p) => p.id === current) + step]
-    if (next) jump(next.id)
+    const next = Math.min(Math.max((file ?? -1) + step, 0), review.files.length - 1)
+    setFile(next)
+    setJump({ file: next })
   }
 
   const stack = review.stack ? all.filter((r) => r.stack === review.stack) : []
   const below = stack[stack.findIndex((r) => r.id === review.id) - 1]
   const above = stack[stack.findIndex((r) => r.id === review.id) + 1]
-  const firstThread = review.files.findIndex((f) => f.lines.some((l) => l.thread))
   const adds = review.files.reduce((n, f) => n + f.lines.filter((l) => l.kind === 'add').length, 0)
   const dels = review.files.reduce((n, f) => n + f.lines.filter((l) => l.kind === 'del').length, 0)
+  const unviewed = review.files.findIndex((f) => !viewed.has(f.path))
+  const openThreads = threads.filter((t) => t.resolvable && !t.resolved).length
+  const toggleViewed = (path: string) =>
+    setViewed((prev) => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  const threadProps = (t: Thread) => ({
+    thread: t,
+    live: open,
+    onResolve: () => edit(t.id, (x) => ({ ...x, resolved: !x.resolved })),
+    onDelete: (j: number) => edit(t.id, (x) => (x.comments.length > 1 ? { ...x, comments: x.comments.filter((_, k) => k !== j) } : undefined)),
+    onSave: (j: number, body: string) => edit(t.id, (x) => ({ ...x, comments: x.comments.map((c, k) => (k === j ? { ...c, body } : c)) })),
+  })
+  const pane = (t: ReviewTab) => ({ id: `${id}-${t}`, role: 'tabpanel', 'aria-labelledby': `${id}-${t}-tab`, hidden: tab !== t, tabIndex: 0, className: 'pane' })
 
   return (
-    <div className="detail">
-      <article className={rail ? 'card with-rail' : 'card'}>
-        {rail && (
-          <nav className="rail" aria-label="Contents">
-            <p className="rail-title">Contents</p>
-            {parts.map((p) => {
-              const count = p.file?.lines.filter((l) => l.thread).length
-              const unseen = p.file?.lines.some((l) => l.thread?.some((c) => c.unseen))
-              return (
-                <button
-                  key={p.id}
-                  className={`rail-item${p.file ? ' file' : ''}`}
-                  aria-current={current === p.id ? 'location' : undefined}
-                  onClick={() => jump(p.id)}
-                >
-                  <span className="rail-label">{p.label}</span>
-                  {!!count && (
-                    <span className={unseen ? 'rail-threads unseen' : 'rail-threads'} title={unseen ? 'A reply you haven’t seen' : undefined}>
-                      <BubbleIcon filled={unseen} />
-                      {count}
-                    </span>
-                  )}
-                  {p.file && <span className={viewed.has(p.file.path) ? 'rail-viewed on' : 'rail-viewed'} aria-hidden="true" />}
-                  {p.note !== undefined && <span className="rail-note">{p.note}</span>}
-                </button>
-              )
-            })}
-            {!mine && review.list === 'review' && (
-              <button className={approved ? 'act ok' : 'act'} onClick={onApprove}>
-                <CheckIcon /> {approved ? 'Approved' : 'Approve'}
-              </button>
-            )}
-          </nav>
+    <div className="detail" onKeyDown={onKey}>
+      <article className="card" aria-label={`${review.number} ${review.title}`}>
+        <ReviewBar
+          id={id}
+          tab={tab}
+          onTab={setTab}
+          files={review.files.length}
+          threads={threads.length}
+          unseen={threads.some((t) => t.comments.some((c) => c.unseen))}
+          account={account}
+          pending={pending}
+          reviews={reviews}
+          approves={approves}
+          approved={approved}
+          panelOpen={panel}
+          onReview={() => setPanel((v) => !v)}
+          onApprove={approve}
+          reviewRef={reviewRef}
+        />
+        {panel && (
+          <ReviewPanel
+            pending={pending}
+            mine={mine}
+            noun={account.noun}
+            summary={summary}
+            onSummary={setSummary}
+            onSubmit={submit}
+            onClose={closePanel}
+            anchor={reviewRef}
+          />
         )}
 
-        <div className="page" ref={pageRef} onScroll={onScroll} onKeyDown={onKey} tabIndex={0} aria-label={`${review.number} ${review.title}`}>
-          <section data-part="top" className="page-top">
-            <p className="page-ref">
-              {review.project} <b>{review.number}</b>
-            </p>
-            <h3 className="page-title">{review.title}</h3>
-            <p className="byline">
-              <Avatar name={review.author} />
-              <span>
-                <strong>{review.author}</strong>{' '}
-                {mine
-                  ? 'opened this'
-                  : review.list === 'done'
-                    ? `${review.outcome === 'Closed' ? 'closed' : 'merged'} ${review.age} ago`
-                    : review.list === 'reviewed'
-                      ? `opened this · ${lower(review.reason ?? '')}`
-                      : `${review.again ? 'asked again' : 'asked for your review'} ${review.age} ago`}
-              </span>
-            </p>
-            <p className="chips">
-              <span className="chip mono">
-                {review.source} → {review.target}
-              </span>
-              <span className="chip mono">
-                {adds > 0 && <span className="plus">+{adds}</span>} {dels > 0 && <span className="minus">−{dels}</span>} · {review.files.length}{' '}
-                {review.files.length === 1 ? 'file' : 'files'}
-              </span>
-              <span className="chip">
-                <PipelineDot pipeline={review.pipeline} /> Pipeline {review.pipeline}
-              </span>
-            </p>
+        <div {...pane('overview')}>
+          <p className="page-ref">
+            {review.project} <b>{review.number}</b>
+          </p>
+          <h3 className="page-title">{review.title}</h3>
+          <p className="byline">
+            <Avatar name={review.author} />
+            <span>
+              <strong>{review.author}</strong>{' '}
+              {mine
+                ? 'opened this'
+                : review.list === 'done'
+                  ? `${review.outcome === 'Closed' ? 'closed' : 'merged'} ${review.age} ago`
+                  : review.list === 'reviewed'
+                    ? `opened this · ${lower(review.reason ?? '')}`
+                    : `${review.again ? 'asked again' : 'asked for your review'} ${review.age} ago`}
+            </span>
+          </p>
+          <p className="chips">
+            <span className="chip mono">
+              {review.source} → {review.target}
+            </span>
+            <span className="chip mono">
+              {adds > 0 && <span className="plus">+{adds}</span>} {dels > 0 && <span className="minus">−{dels}</span>} · {review.files.length}{' '}
+              {review.files.length === 1 ? 'file' : 'files'}
+            </span>
+            <span className="chip">
+              <PipelineDot pipeline={review.pipeline} /> Pipeline {review.pipeline}
+            </span>
+          </p>
 
-            {mine && review.standing && (
-              <NextStep
-                review={review}
-                above={above}
-                below={below}
-                confirm={confirm}
-                walking={walking}
-                account={account}
-                onAsk={onAsk}
-                onCancel={onCancel}
-                onMerge={onMerge}
-                onStopWalk={onStopWalk}
-                onAutoMerge={onAutoMerge}
-                onReady={onReady}
-                onGo={onGo}
-                onThreads={() => jump(`file-${firstThread}`)}
-              />
-            )}
+          {mine && review.standing && (
+            <NextStep
+              review={review}
+              above={above}
+              below={below}
+              confirm={confirm}
+              walking={walking}
+              account={account}
+              onAsk={onAsk}
+              onCancel={onCancel}
+              onMerge={onMerge}
+              onStopWalk={onStopWalk}
+              onAutoMerge={onAutoMerge}
+              onReady={onReady}
+              onGo={onGo}
+              onThreads={() => setTab('conversation')}
+            />
+          )}
 
-            {stack.length > 0 && (
-              <div className="stack-card">
-                <p className="stack-card-title">Stack · {review.stack}</p>
-                <div className="stack-card-list">
-                  <span className="stack-card-base">{stack[0]?.target}</span>
-                  {stack.map((r) => (
-                    <button key={r.id} className={r.id === review.id ? 'stack-line here' : 'stack-line'} onClick={() => r.id !== review.id && onGo(r)}>
-                      {r.standing && <StandingMark standing={r.standing} />}
-                      <span className="mono quiet">{r.number}</span>
-                      <span className="stack-line-title">{r.title}</span>
-                      <span className="quiet">{r.id === review.id ? 'This one' : cap(word[r.standing ?? 'waiting'])}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {review.reviewers.length > 0 && (
-              <p className="reviewers">
-                <span className="quiet">Reviewers</span>
-                {review.reviewers.map((p) => (
-                  <span key={p.name} className="reviewer">
-                    <Avatar name={p.name} />
-                    {p.name}
-                    {p.state === 'approved' || (p.name === 'You' && approved) ? (
-                      <StandingMark standing="ready" />
-                    ) : p.state === 'changes' ? (
-                      <StandingMark standing="needs" />
-                    ) : (
-                      <span className="ring" aria-label="hasn’t reviewed yet" />
-                    )}
-                  </span>
+          {stack.length > 0 && (
+            <div className="stack-card">
+              <p className="stack-card-title">Stack · {review.stack}</p>
+              <div className="stack-card-list">
+                <span className="stack-card-base">{stack[0]?.target}</span>
+                {stack.map((r) => (
+                  <button key={r.id} className={r.id === review.id ? 'stack-line here' : 'stack-line'} onClick={() => r.id !== review.id && onGo(r)}>
+                    {r.standing && <StandingMark standing={r.standing} />}
+                    <span className="mono quiet">{r.number}</span>
+                    <span className="stack-line-title">{r.title}</span>
+                    <span className="quiet">{r.id === review.id ? 'This one' : cap(word[r.standing ?? 'waiting'])}</span>
+                  </button>
                 ))}
-              </p>
-            )}
-
-            {review.list === 'review' && (
-              <div className="actions top-actions">
-                <button className={approved ? 'act ok' : 'act primary'} onClick={onApprove}>
-                  <CheckIcon /> {approved ? 'Approved' : 'Approve'}
-                </button>
-                <span className="act static">Open in {account.name}</span>
               </div>
-            )}
-          </section>
+            </div>
+          )}
 
-          <section data-part="description" className="page-desc">
+          {review.reviewers.length > 0 && (
+            <p className="reviewers">
+              <span className="quiet">Reviewers</span>
+              {review.reviewers.map((p) => (
+                <span key={p.name} className="reviewer">
+                  <Avatar name={p.name} />
+                  {p.name}
+                  {p.state === 'approved' || (p.name === 'You' && approved) ? (
+                    <StandingMark standing="ready" />
+                  ) : p.state === 'changes' || (p.name === 'You' && askedChanges) ? (
+                    <StandingMark standing="needs" />
+                  ) : (
+                    <span className="ring" aria-label="hasn’t reviewed yet" />
+                  )}
+                </span>
+              ))}
+            </p>
+          )}
+
+          <div className="page-desc">
             {review.description.map((p) => (
               <p key={p}>{p}</p>
             ))}
-          </section>
+          </div>
 
-          <section data-part="changes" className="page-section">
-            <h4>The changes</h4>
-            <p className="page-sub">
-              {review.files.length === 1 ? '1 file. Mark it viewed when you finish it.' : `${review.files.length} files. Mark each one as you finish it.`}
-            </p>
-          </section>
+          {!open ? (
+            <section className="page-section">
+              <h4>How it ended</h4>
+              <p className="page-end-text">
+                This {account.noun} {review.outcome === 'Closed' ? 'was closed without merging' : 'was merged'}.
+              </p>
+            </section>
+          ) : mine ? (
+            review.checks && (
+              <section className="page-section">
+                <h4>Before it merges</h4>
+                <Checklist
+                  checks={review.checks}
+                  onGo={(c) => {
+                    if (c.label === 'Threads') setTab('conversation')
+                    if (c.label === 'Stack' && below) onGo(below)
+                  }}
+                />
+              </section>
+            )
+          ) : (
+            <div className="standing">
+              <p>{sumUp(review.files.length - viewed.size, openThreads)}</p>
+              <button className="act" onClick={() => (unviewed >= 0 ? goFile(unviewed) : setTab('changes'))}>
+                {unviewed >= 0 ? `Start with ${fileName(review.files[unviewed]?.path ?? '')}` : 'See the Changes'}
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div {...pane('changes')} ref={changesRef}>
+          <FileList files={review.files} viewed={viewed} onGo={goFile} />
           {review.files.map((f, i) => (
-            <div key={f.path} data-part={`file-${i}`} className="page-file">
+            <div key={f.path} data-file={i} className="page-file">
               <DiffView
                 file={f.path}
                 lines={f.lines}
                 viewed={viewed.has(f.path)}
-                onToggleViewed={() =>
-                  setViewed((prev) => {
-                    const next = new Set(prev)
-                    if (next.has(f.path)) next.delete(f.path)
-                    else next.add(f.path)
-                    return next
-                  })
-                }
+                onToggleViewed={() => toggleViewed(f.path)}
+                threadAt={(li) => {
+                  const t = threads.find((x) => x.id === `${i}-${li}`)
+                  return t && <ThreadView {...threadProps(t)} />
+                }}
               />
             </div>
           ))}
+        </div>
 
-          <section data-part="conversation" className="page-section">
-            <h4>Conversation</h4>
-            {review.conversation.length > 0 ? (
-              <div className="thread flat">
-                {review.conversation.map((c, i) => (
-                  <CommentView key={i} comment={c} />
-                ))}
-              </div>
-            ) : (
-              <p className="page-sub">{threads.length ? 'Nothing outside the threads on the changes.' : 'No comments yet.'}</p>
-            )}
-            <div className="reply" aria-hidden="true">
-              <span>Comment on this {account.noun}</span>
-              <kbd>{keyLabel('⌘↩')}</kbd>
-            </div>
-          </section>
-
-          <section data-part="end" className="page-section page-end">
-            <h4>{mine ? 'Before it merges' : 'Your verdict'}</h4>
-            {mine && review.checks ? (
-              <Checklist
-                checks={review.checks}
-                onGo={(c) => {
-                  if (c.label === 'Threads') jump(`file-${firstThread}`)
-                  if (c.label === 'Stack' && below) onGo(below)
-                }}
-              />
-            ) : review.list === 'done' ? (
-              <p className="page-sub">
-                {review.outcome} {review.age} ago. You approved it.
-              </p>
-            ) : review.list === 'reviewed' ? (
-              <p className="page-sub">{review.reason}. It stays here until it merges or closes.</p>
-            ) : (
-              <div className="actions">
-                <button className={approved ? 'act ok' : 'act primary'} onClick={onApprove}>
-                  <CheckIcon /> {approved ? 'Approved' : 'Approve'}
-                </button>
-                {approved && (
-                  <button className="act" onClick={onApprove}>
-                    Revoke
-                  </button>
-                )}
-              </div>
-            )}
-          </section>
+        <div {...pane('conversation')}>
+          {threads.length === 0 && <p className="page-sub">No comments yet.</p>}
+          {threads.map((t) => (
+            <ThreadView key={t.id} {...threadProps(t)} flat onWhere={t.fileIndex !== undefined ? () => goFile(t.fileIndex ?? 0) : undefined} />
+          ))}
+          {open && (
+            <Composer
+              holds={account.provider === 'gitlab'}
+              reviewing={account.provider === 'gitlab' && pending > 0}
+              onPost={(body) => add(body, false)}
+              onHold={(body) => add(body, true)}
+            />
+          )}
         </div>
       </article>
     </div>
@@ -890,6 +932,339 @@ function Detail({
 }
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+
+/** Where the review stands, in one sentence, as the end of the Overview says it. */
+function sumUp(files: number, threads: number) {
+  const f = files === 0 ? 'You’ve viewed every file' : files === 1 ? '1 file still to view' : `${files} files still to view`
+  const t = threads === 0 ? 'no threads are open' : threads === 1 ? '1 thread is open' : `${threads} threads are open`
+  return `${f}, and ${t}.`
+}
+
+/** The bar over a review: its three tabs, then Open in the forge, Review and Approve. */
+export function ReviewBar({
+  id,
+  tab,
+  onTab,
+  files,
+  threads,
+  unseen,
+  account,
+  pending,
+  reviews,
+  approves,
+  approved,
+  panelOpen,
+  onReview,
+  onApprove,
+  reviewRef,
+}: {
+  id: string
+  tab: ReviewTab
+  onTab?: (t: ReviewTab) => void
+  files: number
+  threads: number
+  unseen: boolean
+  account: Account
+  pending: number
+  reviews: boolean
+  approves: boolean
+  approved: boolean
+  panelOpen: boolean
+  onReview?: () => void
+  onApprove?: () => void
+  reviewRef?: RefObject<HTMLButtonElement | null>
+}) {
+  const keyLabel = useKeyLabel()
+  const counts: Record<ReviewTab, number | undefined> = { overview: undefined, changes: files, conversation: threads }
+  const reviewLabel = pending === 0 ? 'Review' : pending === 1 ? 'Review, 1 pending comment' : `Review, ${pending} pending comments`
+  return (
+    <div className="review-bar">
+      <div className="review-tabs" role="tablist" aria-label="Parts of the review">
+        {TABS.map(([t, label], i) => (
+          <button
+            key={t}
+            id={`${id}-${t}-tab`}
+            role="tab"
+            aria-selected={tab === t}
+            aria-controls={`${id}-${t}`}
+            tabIndex={tab === t ? 0 : -1}
+            className="review-tab"
+            title={`${label} (${keyLabel(`⌥⌘${i + 1}`)})`}
+            onClick={() => onTab?.(t)}
+          >
+            {label}
+            {counts[t] !== undefined && <span className="tab-count">{counts[t]}</span>}
+            {t === 'conversation' && unseen && <span className="tab-dot" title="A reply you haven’t seen" />}
+          </button>
+        ))}
+      </div>
+      <div className="bar-actions">
+        <span className="act static forge-btn" aria-label={`Open in ${account.name}`} title={`Open in ${account.name} (${keyLabel('⌘O')})`}>
+          <OutIcon /> <span className="act-label">Open in {account.name}</span>
+        </span>
+        {reviews && (
+          <button
+            ref={reviewRef}
+            className={panelOpen ? 'act review-btn on' : 'act review-btn'}
+            aria-label={reviewLabel}
+            aria-expanded={panelOpen}
+            aria-haspopup="dialog"
+            title={`Review (${keyLabel('⇧⌘R')})`}
+            onClick={onReview}
+          >
+            <ChatIcon /> <span className="act-label">Review</span>
+            {pending > 0 && <span className="pending-count">{pending}</span>}
+          </button>
+        )}
+        {approves && (
+          <button
+            className={approved ? 'act approve-btn' : 'act primary approve-btn'}
+            aria-label={approved ? 'Revoke Approval' : 'Approve'}
+            title={approved ? 'Revoke Approval' : `Approve (${keyLabel('⇧⌘A')})`}
+            onClick={onApprove}
+          >
+            {approved ? <UndoIcon /> : <CheckIcon />}{' '}
+            <span className="act-label">{approved ? <>Revoke<span className="act-label-more"> Approval</span></> : 'Approve'}</span>
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** "Finish your review": a summary, then Comment, Request Changes or Approve. */
+export function ReviewPanel({
+  pending,
+  mine,
+  noun,
+  summary,
+  onSummary,
+  onSubmit,
+  onClose,
+  anchor,
+}: {
+  pending: number
+  mine: boolean
+  noun: string
+  summary: string
+  onSummary?: (s: string) => void
+  onSubmit?: (v: Verdict) => void
+  onClose?: (refocus: boolean) => void
+  anchor?: RefObject<HTMLButtonElement | null>
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const close = useRef(onClose)
+  useEffect(() => {
+    close.current = onClose
+  })
+  useEffect(() => {
+    if (!onClose) return
+    ref.current?.querySelector('textarea')?.focus()
+    const away = (e: PointerEvent) => {
+      const t = e.target as Node
+      if (!ref.current?.contains(t) && !anchor?.current?.contains(t)) close.current?.(false)
+    }
+    document.addEventListener('pointerdown', away)
+    return () => document.removeEventListener('pointerdown', away)
+    // Only on opening: the panel focuses its summary once.
+  }, [])
+  const said = pending > 0 || summary.trim() !== ''
+  const held = pending === 0 ? 'Nothing held yet. Your summary and verdict post on their own.' : pending === 1 ? '1 pending comment posts with it.' : `${pending} pending comments post with it.`
+  return (
+    <div className="review-panel" role="dialog" aria-label="Finish your review" ref={ref}>
+      <div className="review-panel-body">
+        <h4>Finish your review</h4>
+        <p className="review-panel-note">{held}</p>
+        <textarea
+          aria-label="Summary"
+          placeholder="Sum up your review, if you like. Markdown works."
+          rows={3}
+          value={summary}
+          readOnly={!onSummary}
+          onChange={(e) => onSummary?.(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && said) {
+              e.preventDefault()
+              onSubmit?.('Comment')
+            }
+          }}
+        />
+        {mine && <p className="review-panel-note quiet">This {noun} is yours, so you can only comment on it.</p>}
+      </div>
+      <div className="review-panel-foot">
+        {VERDICTS.map((v) => (
+          <button
+            key={v}
+            className={v === 'Approve' ? 'act primary' : 'act'}
+            disabled={v === 'Approve' ? mine : v === 'Request Changes' ? !said || mine : !said}
+            onClick={() => onSubmit?.(v)}
+          >
+            {v}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** The top of the Changes tab: every file, how many are viewed, and a way to each. */
+export function FileList({ files, viewed, onGo }: { files: DiffFile[]; viewed: Set<string>; onGo?: (i: number) => void }) {
+  return (
+    <div className="files">
+      <p className="files-head">
+        <span>
+          {files.filter((f) => viewed.has(f.path)).length} of {files.length} viewed
+        </span>
+        <span className="files-progress" aria-hidden="true">
+          <i style={{ width: `${(100 * files.filter((f) => viewed.has(f.path)).length) / Math.max(files.length, 1)}%` }} />
+        </span>
+      </p>
+      {files.map((f, i) => {
+        const adds = f.lines.filter((l) => l.kind === 'add').length
+        const dels = f.lines.filter((l) => l.kind === 'del').length
+        return (
+          <button key={f.path} className="file-row" onClick={() => onGo?.(i)}>
+            <span className="file-path">{f.path}</span>
+            <span className="diff-stat">
+              {adds > 0 && <span className="plus">+{adds}</span>} {dels > 0 && <span className="minus">−{dels}</span>}
+            </span>
+            <span className={viewed.has(f.path) ? 'file-viewed on' : 'file-viewed'} role="img" aria-label={viewed.has(f.path) ? 'Viewed' : 'Not viewed yet'} />
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/** The comment box at the end of the conversation. Once a review is started, ⌘↩ adds to it. */
+function Composer({ holds, reviewing, onPost, onHold }: { holds: boolean; reviewing: boolean; onPost: (b: string) => void; onHold: (b: string) => void }) {
+  const keyLabel = useKeyLabel()
+  const [text, setText] = useState('')
+  const ready = text.trim() !== ''
+  const send = (held: boolean) => {
+    if (!ready) return
+    if (held) onHold(text.trim())
+    else onPost(text.trim())
+    setText('')
+  }
+  return (
+    <div className="composer">
+      <textarea
+        aria-label="Comment"
+        placeholder="Leave a comment. Markdown works."
+        rows={3}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault()
+            send(reviewing)
+          }
+        }}
+      />
+      <div className="composer-foot">
+        <span className="composer-hint">{keyLabel('⌘↩')} {reviewing ? 'to add to your review' : 'to post'}</span>
+        {holds && reviewing ? (
+          <>
+            <button className="act" disabled={!ready} onClick={() => send(false)}>
+              Comment Now
+            </button>
+            <button className="act primary" disabled={!ready} onClick={() => send(true)}>
+              <ChatIcon /> Add to Review
+            </button>
+          </>
+        ) : (
+          <>
+            {holds && (
+              <button className="act" disabled={!ready} onClick={() => send(true)}>
+                Start a Review
+              </button>
+            )}
+            <button className="act primary" disabled={!ready} onClick={() => send(false)}>
+              <ChatIcon /> Comment
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** A thread: its comments, then Reply and Resolve. In Conversation it starts with its file and line. */
+export function ThreadView({
+  thread,
+  live,
+  flat,
+  onWhere,
+  onResolve,
+  onDelete,
+  onSave,
+}: {
+  thread: Thread
+  /** The request is open, so the thread can be resolved and drafts edited. */
+  live?: boolean
+  flat?: boolean
+  onWhere?: () => void
+  onResolve?: () => void
+  onDelete?: (j: number) => void
+  onSave?: (j: number, body: string) => void
+}) {
+  const started = thread.comments.some((c) => !c.pending)
+  const head = flat && thread.file
+  return (
+    <div className={`thread${flat ? ' flat' : ''}${thread.resolved ? ' resolved' : ''}`}>
+      {head && (
+        <div className="thread-head">
+          {onWhere ? (
+            <button className="thread-where" onClick={onWhere} title="Show this line in the changes">
+              {thread.file}:{thread.line}
+            </button>
+          ) : (
+            <span className="thread-where">
+              {thread.file}:{thread.line}
+            </span>
+          )}
+          {thread.resolved && (
+            <span className="resolved-chip">
+              <CheckIcon /> Resolved
+            </span>
+          )}
+        </div>
+      )}
+      {thread.comments.map((c, j) => (
+        <CommentView
+          key={`${j}-${c.body}`}
+          comment={c}
+          onDelete={live && onDelete ? () => onDelete(j) : undefined}
+          onSave={live && onSave ? (body) => onSave(j, body) : undefined}
+        />
+      ))}
+      {started && thread.resolvable && (
+        <div className="thread-foot">
+          <span className="thread-btn static">
+            <ReplyIcon /> Reply
+          </span>
+          <span className="spacer" />
+          {live !== false && (
+            <>
+              {!head && thread.resolved && <span className="thread-state">Resolved</span>}
+              {onResolve ? (
+                <button className="thread-btn" onClick={onResolve} aria-label={thread.resolved ? 'Unresolve Thread' : 'Resolve Thread'}>
+                  {thread.resolved ? <UndoIcon /> : <CheckIcon />} {thread.resolved ? 'Unresolve' : 'Resolve'}
+                </button>
+              ) : (
+                <span className="thread-btn static">
+                  {thread.resolved ? <UndoIcon /> : <CheckIcon />} {thread.resolved ? 'Unresolve' : 'Resolve'}
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 
 export function NextStep({
   review,
@@ -1083,11 +1458,14 @@ export function DiffView({
   lines,
   viewed,
   onToggleViewed,
+  threadAt,
 }: {
   file: string
   lines: Line2[]
   viewed?: boolean
   onToggleViewed?: () => void
+  /** The thread under a line, drawn by the review it's in; without it, the line's own, as a still. */
+  threadAt?: (line: number) => ReactNode
 }) {
   const adds = lines.filter((l) => l.kind === 'add').length
   const dels = lines.filter((l) => l.kind === 'del').length
@@ -1125,13 +1503,9 @@ export function DiffView({
                 </span>
                 <code>{highlight(l.code)}</code>
               </div>
-              {l.thread && (
-                <div className="thread">
-                  {l.thread.map((c, j) => (
-                    <CommentView key={j} comment={c} />
-                  ))}
-                </div>
-              )}
+              {threadAt
+                ? threadAt(i)
+                : l.thread && <ThreadView thread={{ id: `${i}`, comments: l.thread, resolvable: true, resolved: !!l.resolved }} />}
             </div>
           ))}
         </div>
@@ -1141,16 +1515,75 @@ export function DiffView({
 }
 type Line2 = Review['files'][number]['lines'][number]
 
-function CommentView({ comment }: { comment: Comment }) {
+function CommentView({ comment, onDelete, onSave }: { comment: Comment; onDelete?: () => void; onSave?: (body: string) => void }) {
+  const [editing, setEditing] = useState<string>()
+  const tools = comment.pending && (onDelete || onSave)
   return (
-    <div className="comment">
+    <div className={comment.pending ? 'comment pending' : 'comment'}>
       <Avatar name={comment.author} />
-      <div>
+      <div className="comment-main">
         <p className="comment-meta">
-          <strong>{comment.author}</strong> <span>{comment.when}</span>
-          {comment.unseen && <span className="new"> · New</span>}
+          <strong>{comment.author}</strong>
+          {comment.pending ? (
+            <span className="pending-mark" title="Only you can see this until you submit your review">
+              Pending
+            </span>
+          ) : (
+            <span>{comment.when}</span>
+          )}
+          {comment.unseen && <span className="new">· New</span>}
+          {tools && editing === undefined && (
+            <span className="comment-tools">
+              {onSave && (
+                <button className="icon-btn small" aria-label="Edit" title="Edit" onClick={() => setEditing(comment.body)}>
+                  <PencilIcon />
+                </button>
+              )}
+              {onDelete && (
+                <button className="icon-btn small" aria-label="Delete from Review" title="Delete from Review" onClick={onDelete}>
+                  <TrashIcon />
+                </button>
+              )}
+            </span>
+          )}
         </p>
-        <p className="comment-body">{comment.body}</p>
+        {editing !== undefined ? (
+          <div className="composer">
+            <textarea
+              aria-label="Edit your comment"
+              rows={2}
+              value={editing}
+              autoFocus
+              onChange={(e) => setEditing(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setEditing(undefined)
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && editing.trim()) {
+                  e.preventDefault()
+                  onSave?.(editing.trim())
+                  setEditing(undefined)
+                }
+              }}
+            />
+            <div className="composer-foot">
+              <span className="spacer" />
+              <button className="act" onClick={() => setEditing(undefined)}>
+                Cancel
+              </button>
+              <button
+                className="act primary"
+                disabled={!editing.trim()}
+                onClick={() => {
+                  onSave?.(editing.trim())
+                  setEditing(undefined)
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p className="comment-body">{comment.body}</p>
+        )}
       </div>
     </div>
   )
@@ -1331,7 +1764,7 @@ export function ChatIcon() {
   )
 }
 
-export function BubbleIcon({ filled }: { filled?: boolean }) {
+function BubbleIcon({ filled }: { filled?: boolean }) {
   return (
     <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
       <path
@@ -1390,6 +1823,46 @@ function CheckIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" className={className}>
       <path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function OutIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <path d="M5 11l6-6M6 4.5h5.5V10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function ReplyIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
+      <path d="M6.5 4L3 7.5 6.5 11M3.5 7.5H10a3 3 0 0 1 3 3V12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function UndoIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <path d="M5 3.5L2.5 6 5 8.5M3 6h6.5a3.5 3.5 0 0 1 0 7H6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function PencilIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+      <path d="M10.5 3l2.5 2.5L6 12.5H3.5V10z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+      <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }

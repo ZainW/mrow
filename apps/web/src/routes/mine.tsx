@@ -51,12 +51,12 @@ function Mine() {
 
       <Chapter id="merge" title="What’s left before it merges" figure={<MergeFigure />}>
         <p>
-          Open one of your requests and it starts on that next step, with the button for it. <strong>Merge</strong> asks
+          Open one of your requests and its Overview starts on that next step, with the button for it. <strong>Merge</strong> asks
           once more before it does anything. <strong>Merge When Ready</strong> turns on the forge’s own auto-merge, so
           GitLab or GitHub merges it once everything passes. <strong>Mark Ready</strong> marks a draft ready for review.
         </p>
         <p>
-          The page ends with what’s left before it can merge: approvals, the pipeline, open threads, conflicts, and the
+          The Overview ends with what’s left before it can merge: approvals, the pipeline, open threads, conflicts, and the
           request below it if it’s part of a stack. Each line that names something goes to it.
         </p>
       </Chapter>

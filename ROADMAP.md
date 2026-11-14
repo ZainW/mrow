@@ -20,8 +20,7 @@ roughly by value.
 
 Loose ends from these:
 
-- The site (`apps/web`: keys, reviewing, the app mock) still describes the one-page review. It
-  should change with the release that ships the tabs, not before.
+- The site describes the tabs and finishing a review ahead of the release that ships them.
 - Resolving, pending reviews and submitting haven't been run against either forge. GitLab's
   Request Changes needs 17.x; GitHub can't hold a comment on the whole pull request in a
   review, so there the summary stands in. Replies still post at once.
