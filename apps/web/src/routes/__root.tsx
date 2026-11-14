@@ -1,29 +1,23 @@
 /// <reference types="vite/client" />
 import type { ReactNode } from 'react'
-import { createRootRoute, HeadContent, Outlet, Scripts } from '@tanstack/react-router'
+import { createRootRoute, HeadContent, Link, Outlet, Scripts } from '@tanstack/react-router'
+import { Page } from '../components/Layout'
 import appCss from '../styles.css?url'
 
-const SITE = 'https://mrow.wania.app'
-
-const description =
-  'Mrow is a small desktop app for the pull and merge requests waiting on your review. GitLab through glab, GitHub through gh, nothing else.'
-
+// Each page sets its own title, description and canonical address (`seo` in lib/site.ts).
 export const Route = createRootRoute({
   head: () => ({
     meta: [
       { charSet: 'utf-8' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { title: 'Mrow: your review queue, on your desktop' },
-      { name: 'description', content: description },
+      { title: 'Mrow' },
       { name: 'color-scheme', content: 'light dark' },
-      { property: 'og:title', content: 'Mrow' },
-      { property: 'og:description', content: description },
-      { property: 'og:url', content: SITE },
+      { property: 'og:site_name', content: 'Mrow' },
     ],
     links: [
       { rel: 'preload', href: '/fonts/InterVariable.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
+      { rel: 'preload', href: '/fonts/MrowReading-Regular.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
       { rel: 'stylesheet', href: appCss },
-      { rel: 'canonical', href: SITE },
       { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
     ],
   }),
@@ -55,11 +49,13 @@ function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
 
 function NotFound() {
   return (
-    <main className="not-found">
-      <h1>Nothing waiting here.</h1>
-      <p>
-        This page doesn't exist. <a href="/">Go back to the Mrow home page</a>.
-      </p>
-    </main>
+    <Page>
+      <div className="not-found">
+        <h1>Nothing waiting here.</h1>
+        <p>
+          This page doesn’t exist. <Link to="/">Go back to the Mrow home page</Link>.
+        </p>
+      </div>
+    </Page>
   )
 }
