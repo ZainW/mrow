@@ -13,8 +13,9 @@ export const DOWNLOADS: { build: Build; system: string; arch: string; file: stri
     build: 'macos-aarch64',
     system: 'macOS',
     arch: 'Apple silicon',
-    file: 'mrow-macos-aarch64.dmg',
-    how: 'Open it and drag Mrow into Applications.',
+    // The disk image, zipped under a name that carries the version.
+    file: `mrow-${VERSION}-macos-aarch64.zip`,
+    how: 'Unzip it, open the disk image and drag Mrow into Applications.',
   },
   {
     build: 'linux-x86_64',
@@ -32,7 +33,8 @@ export const DOWNLOADS: { build: Build; system: string; arch: string; file: stri
   },
 ]
 
-export const downloadUrl = (file: string) => `${RELEASES}/latest/download/${file}`
+/** A file in the release this site was built for (VERSION), which is the latest. */
+export const downloadUrl = (file: string) => `${RELEASES}/download/v${VERSION}/${file}`
 
 /** A page's title, description and canonical address. */
 export function seo({ path, title, description }: { path: string; title: string; description: string }) {

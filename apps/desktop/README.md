@@ -35,7 +35,7 @@ Run these from `apps/desktop`.
 ```sh
 scripts/install.sh       # release build into ~/Applications/Mrow.app, then opens it
 scripts/bundle.sh        # dist/Mrow.app, without installing
-scripts/dmg.sh           # dist/mrow-macos-aarch64.dmg from that bundle
+scripts/dmg.sh           # dist/mrow-macos-aarch64.dmg from that bundle (releases zip it as mrow-<version>-macos-aarch64.zip)
 ```
 
 **Linux** (X11 or Wayland, with a Vulkan driver)

@@ -12,11 +12,12 @@ import { CopyButton } from './CopyButton'
 export function GetMrow() {
   const local = useLocalBuild()
   const archive = DOWNLOADS.find((d) => d.build === local)
+  const mac = DOWNLOADS.find((d) => d.build === 'macos-aarch64')!
   return (
     <div className="get">
       <div className="get-main">
         {local === 'macos-aarch64' ? (
-          <a className="btn btn-big" href={downloadUrl('mrow-macos-aarch64.dmg')}>
+          <a className="btn btn-big" href={downloadUrl(mac.file)}>
             <DownloadIcon /> Download for macOS
           </a>
         ) : local && archive ? (

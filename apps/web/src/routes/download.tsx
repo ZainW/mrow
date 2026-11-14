@@ -30,10 +30,6 @@ function Download() {
           <DownloadList />
         </div>
         <aside className="note">
-          <p>
-            The Mac build isn’t notarized. Installed with the command below it opens normally. A downloaded copy is
-            blocked the first time you open it: allow it under System Settings → Privacy &amp; Security → Open Anyway.
-          </p>
           <p>There’s no build for Intel Macs.</p>
         </aside>
       </section>
