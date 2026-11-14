@@ -48,18 +48,16 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: pnpm --filter @mrow/web run deploy
-      - name: The live download links work
+      # The deployed pages, read from the build: Cloudflare turns GitHub's runners away (403) from
+      # the live site, but wrangler only reports success once these files are being served.
+      - name: The download links work
         run: |
-          # The new version can take a few seconds to reach every edge.
-          for attempt in 1 2 3 4 5 6; do
-            links="$(curl -fsSL "https://mrow.wania.app/download?deploy=$GITHUB_RUN_ID" | grep -o 'https://github.com/ZainW/mrow/releases/download/[^"]*' | sort -u)"
-            version="$(sed -n 's/^version = "\(.*\)"/\1/p' apps/desktop/Cargo.toml | head -1)"
-            if grep -q "/v$version/mrow-$version-macos-aarch64.zip" <<<"$links"; then
-              break
-            fi
-            [[ "$attempt" -lt 6 ]] || { echo "::error::The live site doesn't link to $version's Mac download."; exit 1; }
-            sleep 10
-          done
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' apps/desktop/Cargo.toml | head -1)"
+          links="$(grep -oh 'https://github.com/ZainW/mrow/releases/download/[^"]*' apps/web/dist/client/*.html | sort -u)"
+          if ! grep -q "/v$version/mrow-$version-macos-aarch64.zip" <<<"$links"; then
+            echo "::error::The site doesn't link to $version's Mac download."
+            exit 1
+          fi
           while read -r url; do
             code="$(curl -sIL -o /dev/null -w '%{http_code}' "$url")"
             echo "$code $url"
