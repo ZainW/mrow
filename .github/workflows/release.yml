@@ -129,15 +129,61 @@ jobs:
           workspaces: apps/desktop
           shared-key: release
       - run: scripts/set-version.sh "$VERSION"
+      - name: Developer ID certificate (macOS)
+        if: runner.os == 'macOS'
+        env:
+          # The same five secrets as the other Mac apps; macos-sign's bin/set-secrets copies them
+          # from 1Password. (That action is private, so this public repository can't use it.)
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # A browser marks what it downloads, and Gatekeeper then opens only apps signed with a
+          # Developer ID and notarized by Apple: an ad hoc signature gets "couldn't verify".
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::The $name secret isn't set."
+              exit 1
+            fi
+          done
+          umask 077
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "$CSC_LINK" | base64 --decode >"$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)"
+          if [[ -z "$identity" ]]; then
+            echo "::error::CSC_LINK holds no Developer ID Application identity."
+            exit 1
+          fi
+          echo "MROW_SIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
       - name: Bundle (macOS)
         if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           scripts/bundle.sh
           test "$(dist/Mrow.app/Contents/MacOS/Mrow --version)" = "mrow $VERSION"
+          # Notarizes the image and staples the ticket to it and to dist/Mrow.app.
+          scripts/dmg.sh "dist/mrow-${{ matrix.key }}.dmg"
           # The archive is what installed copies and the install script fetch; the disk image
           # is the same app for people who download it in a browser.
           COPYFILE_DISABLE=1 tar -C dist -czf "dist/mrow-${{ matrix.key }}.tar.gz" Mrow.app
-          scripts/dmg.sh "dist/mrow-${{ matrix.key }}.dmg"
+      - name: Forget the certificate (macOS)
+        if: always() && runner.os == 'macOS'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/certificate.p12"
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |

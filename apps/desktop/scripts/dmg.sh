@@ -3,6 +3,11 @@
 # /Applications, to drag across. Nothing is uploaded anywhere.
 #   scripts/dmg.sh [out.dmg]         # default dist/mrow-macos-aarch64.dmg
 #   APP=path/to/Mrow.app             # wrap another copy of the app
+#   MROW_SIGN_IDENTITY="Developer ID Application: …"
+#                                    # sign the image too (the app should be signed with the same)
+#   APPLE_ID=… APPLE_APP_SPECIFIC_PASSWORD=… APPLE_TEAM_ID=…
+#                                    # and have Apple notarize it, then staple the ticket to both the
+#                                    # image and $APP, so Gatekeeper opens them offline
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,6 +30,25 @@ for attempt in 1 2 3; do
   [[ "$attempt" -lt 3 ]] || { echo "hdiutil couldn't make $OUT" >&2; exit 1; }
   sleep 5
 done
+
+if [[ -n "${MROW_SIGN_IDENTITY:-}" ]]; then
+  codesign --force --timestamp --sign "$MROW_SIGN_IDENTITY" "$OUT"
+fi
+if [[ -n "${APPLE_ID:-}" ]]; then
+  # Notarizing the image covers the app inside it, so one submission staples both.
+  notary=(--apple-id "$APPLE_ID" --password "${APPLE_APP_SPECIFIC_PASSWORD:?needed to notarize}" --team-id "${APPLE_TEAM_ID:?needed to notarize}")
+  result="$(xcrun notarytool submit "$OUT" "${notary[@]}" --wait --timeout 30m --output-format json)"
+  if [[ "$(plutil -extract status raw -o - - <<<"$result")" != "Accepted" ]]; then
+    echo "Apple didn't accept $OUT: $result" >&2
+    # Apple's log names the file and the rule it broke.
+    xcrun notarytool log "$(plutil -extract id raw -o - - <<<"$result")" "${notary[@]}" >&2 || true
+    exit 1
+  fi
+  xcrun stapler staple "$OUT"
+  xcrun stapler staple "$APP"
+  spctl --assess --type open --context context:primary-signature -v "$OUT"
+  spctl --assess --type execute -v "$APP"
+fi
 
 # The image opens, and the app inside still carries its signature.
 hdiutil attach -quiet -nobrowse -readonly -mountpoint "$MOUNT" "$OUT"
