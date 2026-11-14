@@ -15,8 +15,13 @@ const BUILD_STEPS = ['git clone https://github.com/ZainW/mrow.git', 'cd mrow/app
 
 type Build = 'macos-aarch64' | 'linux-x86_64' | 'linux-aarch64'
 
-const DOWNLOADS: { build: Build; system: string; arch: string; file: string }[] = [
-  { build: 'macos-aarch64', system: 'macOS', arch: 'Apple silicon', file: 'mrow-macos-aarch64.dmg' },
+// The Mac disk image ships zipped under a versioned name (mrow-0.1.1-macos-aarch64.zip), so its
+// link is looked up from the latest release; until then, or if GitHub doesn't answer, it opens
+// the latest release's page.
+const MAC_ZIP = /^mrow-\d+\.\d+\.\d+-macos-aarch64\.zip$/
+
+const DOWNLOADS: { build: Build; system: string; arch: string; file?: string }[] = [
+  { build: 'macos-aarch64', system: 'macOS', arch: 'Apple silicon' },
   { build: 'linux-x86_64', system: 'Linux', arch: 'x86_64', file: 'mrow-linux-x86_64.tar.gz' },
   { build: 'linux-aarch64', system: 'Linux', arch: 'arm64', file: 'mrow-linux-aarch64.tar.gz' },
 ]
@@ -472,6 +477,22 @@ function Keys() {
  * The build that fits the visitor's computer, worked out after hydration so the server render stays
  * neutral. Undefined on phones, Windows, or when we can't tell; an Intel Mac reads as Apple silicon.
  */
+function useMacDownload() {
+  const [asset, setAsset] = useState<{ name: string; url: string }>()
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('https://api.github.com/repos/ZainW/mrow/releases/latest', { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : undefined))
+      .then((release?: { assets?: { name: string; browser_download_url: string }[] }) => {
+        const zip = release?.assets?.find((a) => MAC_ZIP.test(a.name))
+        if (zip) setAsset({ name: zip.name, url: zip.browser_download_url })
+      })
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
+  return asset
+}
+
 function useLocalBuild() {
   const [build, setBuild] = useState<Build>()
   useEffect(() => {
@@ -501,6 +522,7 @@ function useLocalBuild() {
 
 function Install() {
   const local = useLocalBuild()
+  const mac = useMacDownload()
   return (
     <Chapter
       id="install"
@@ -510,11 +532,6 @@ function Install() {
           <p>
             Mrow keeps itself up to date. It checks for a new release every few hours and asks you to Restart to
             Update. Turn that off in Settings → Updates.
-          </p>
-          <p>
-            The Mac build isn’t notarized. Installed with the command it opens normally. A downloaded copy is
-            blocked the first time you open it: allow it under System Settings → Privacy &amp; Security → Open
-            Anyway.
           </p>
         </>
       }
@@ -538,22 +555,26 @@ function Install() {
 
           <h3 className="install-sub">Or download it</h3>
           <ul className="downloads">
-            {DOWNLOADS.map((d) => (
-              <li key={d.build}>
-                <a
-                  className={d.build === local ? 'download is-local' : 'download'}
-                  href={`${RELEASES}/latest/download/${d.file}`}
-                >
-                  <span className="download-system">{d.system}</span>
-                  <span className="download-arch">{d.arch}</span>
-                  {d.build === local && <span className="download-local">Your computer</span>}
-                  <span className="download-file">{d.file}</span>
-                </a>
-              </li>
-            ))}
+            {DOWNLOADS.map((d) => {
+              const link = d.build === 'macos-aarch64' ? mac : undefined
+              return (
+                <li key={d.build}>
+                  <a
+                    className={d.build === local ? 'download is-local' : 'download'}
+                    href={link?.url ?? (d.file ? `${RELEASES}/latest/download/${d.file}` : `${RELEASES}/latest`)}
+                  >
+                    <span className="download-system">{d.system}</span>
+                    <span className="download-arch">{d.arch}</span>
+                    {d.build === local && <span className="download-local">Your computer</span>}
+                    <span className="download-file">{link?.name ?? d.file ?? 'Zipped disk image'}</span>
+                  </a>
+                </li>
+              )
+            })}
           </ul>
           <p className="build-after">
-            On a Mac, open the disk image and drag Mrow into Applications. The latest release; older ones, and what changed in each, are on the{' '}
+            On a Mac, unzip it, open the disk image and drag Mrow into Applications. The latest release; older
+            ones, and what changed in each, are on the{' '}
             <a className="text-link inline" href={RELEASES}>
               releases page
             </a>
