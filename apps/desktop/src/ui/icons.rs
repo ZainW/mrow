@@ -245,6 +245,11 @@ icon!(
     "bell",
     r#"<path d="M4.2 10.4V7.3a3.8 3.8 0 0 1 7.6 0v3.1l1.3 1.7H2.9z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M6.6 13.8c.3.5.8.8 1.4.8s1.1-.3 1.4-.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/>"#
 );
+icon!(
+    TRASH,
+    "trash",
+    r#"<path d="M2.8 4.4h10.4M6.3 4.4V2.8h3.4v1.6M4.4 4.4l.6 8.3a1.4 1.4 0 0 0 1.4 1.3h3.2a1.4 1.4 0 0 0 1.4-1.3l.6-8.3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#
+);
 icon!(BUBBLE_12, "bubble-12", 12.0, r#"<path d="M3 1h6a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6l-3 2V9a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2z" fill="currentColor"/>"#);
 icon!(
     BUBBLE_LINE_12,

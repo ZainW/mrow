@@ -1,7 +1,7 @@
 //! GitLab through `glab`: one GraphQL query for the queue, REST for diffs, threads and actions.
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::cli::{Cli, paged_rest, parallel};
 use super::diff::{DiffLine, LineKind};
@@ -512,9 +512,63 @@ struct RestAuthor {
     avatar_url: Option<String>,
 }
 
+/// A comment held in my review until I submit it. Only its author sees it, so it names nobody.
+#[derive(Deserialize)]
+struct RestDraft {
+    id: i64,
+    note: String,
+    /// The thread it replies to.
+    discussion_id: Option<String>,
+    position: Option<Position>,
+}
+
+/// The threads, with my pending drafts in place: a reply in its thread, the rest as threads of
+/// their own at the end.
 pub fn discussions(item: &MergeRequest) -> Result<Vec<Discussion>, String> {
+    let drafts_path = format!("{}/draft_notes", base(item));
+    let drafts = std::thread::spawn(move || paged_rest::<RestDraft>(&cli(), &drafts_path, 5));
     let threads: Vec<RestDiscussion> = paged_rest(&cli(), &format!("{}/discussions", base(item)), 10)?;
-    Ok(threads.into_iter().map(discussion).collect())
+    // Without drafts (a GitLab too old for them) the threads still show, just none of mine pending.
+    let drafts = drafts.join().unwrap().unwrap_or_default();
+    let threads = threads.into_iter().map(discussion).collect();
+    if drafts.is_empty() {
+        return Ok(threads);
+    }
+    let me: RestAuthor = cli().api_json("user")?;
+    Ok(with_drafts(threads, drafts, &Person { username: me.username, name: me.name, avatar_url: me.avatar_url }, chrono::Utc::now()))
+}
+
+/// Recorded `/discussions` and `/draft_notes` responses, for the self-tests.
+#[cfg(test)]
+pub fn discussions_with_drafts_from_json(threads: &str, drafts: &str, me: &Person, now: Date) -> Result<Vec<Discussion>, String> {
+    let threads: Vec<RestDiscussion> = serde_json::from_str(threads).map_err(|e| e.to_string())?;
+    let drafts: Vec<RestDraft> = serde_json::from_str(drafts).map_err(|e| e.to_string())?;
+    Ok(with_drafts(threads.into_iter().map(discussion).collect(), drafts, me, now))
+}
+
+/// GitLab keeps no date on a draft; `now` stands in, so new ones sort last.
+fn with_drafts(mut threads: Vec<Discussion>, drafts: Vec<RestDraft>, me: &Person, now: Date) -> Vec<Discussion> {
+    for draft in drafts {
+        // A draft on the whole merge request comes with a position of nulls.
+        let position = draft.position.filter(|p| p.new_path.is_some() || p.old_path.is_some());
+        let note = Note {
+            id: draft.id,
+            body: draft.note,
+            author: me.clone(),
+            created_at: now,
+            system: false,
+            resolvable: None,
+            resolved: None,
+            position: position.clone(),
+            pending: true,
+            node_id: None,
+        };
+        match draft.discussion_id.as_ref().and_then(|id| threads.iter_mut().find(|t| &t.id == id)) {
+            Some(thread) => thread.notes.push(note),
+            None => threads.push(Discussion { id: format!("draft-{}", draft.id), individual_note: position.is_none(), notes: vec![note], node_id: None }),
+        }
+    }
+    threads
 }
 
 /// A recorded `/discussions` response, for the benchmark.
@@ -539,8 +593,11 @@ fn discussion(d: RestDiscussion) -> Discussion {
                 resolvable: n.resolvable,
                 resolved: n.resolved,
                 position: n.position,
+                pending: false,
+                node_id: None,
             })
             .collect(),
+        node_id: None,
     }
 }
 
@@ -571,20 +628,14 @@ pub fn set_auto_merge(item: &MergeRequest, on: bool) -> Result<(), String> {
 
 pub fn mark_ready(item: &MergeRequest) -> Result<(), String> {
     let query = "mutation($path: ID!, $iid: String!) { mergeRequestSetDraft(input: { projectPath: $path, iid: $iid, draft: false }) { errors } }";
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Payload {
-        merge_request_set_draft: Option<Outcome>,
-    }
-    #[derive(Deserialize)]
-    struct Outcome {
-        errors: Vec<String>,
-    }
-    let payload: Payload = cli().graphql(query, &[("path", Some(item.project_path.clone())), ("iid", Some(item.iid.clone()))], &[])?;
-    match payload.merge_request_set_draft.map(|o| o.errors) {
-        Some(errors) if !errors.is_empty() => Err(errors.join("\n")),
-        _ => Ok(()),
-    }
+    mutate(item, query, "mergeRequestSetDraft")
+}
+
+/// Runs a mutation on the merge request that answers with a list of `errors` under `field`.
+fn mutate(item: &MergeRequest, query: &str, field: &str) -> Result<(), String> {
+    let payload: Value = cli().graphql(query, &[("path", Some(item.project_path.clone())), ("iid", Some(item.iid.clone()))], &[])?;
+    let errors: Vec<&str> = payload[field]["errors"].as_array().map(|e| e.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) }
 }
 
 /// Points it at another branch: what a stacked merge request needs once the one below it merged.
@@ -597,6 +648,10 @@ pub fn comment(item: &MergeRequest, body: &str) -> Result<(), String> {
 }
 
 pub fn comment_on_line(item: &MergeRequest, file: &FileDiff, line: &DiffLine, refs: &DiffRefs, body: &str) -> Result<(), String> {
+    cli().send(&format!("{}/discussions", base(item)), "POST", &json!({ "body": body, "position": line_position(file, line, refs) })).map(drop)
+}
+
+fn line_position(file: &FileDiff, line: &DiffLine, refs: &DiffRefs) -> Value {
     let mut position = json!({
         "position_type": "text", "base_sha": refs.base_sha, "start_sha": refs.start_sha, "head_sha": refs.head_sha,
         "old_path": file.old_path, "new_path": file.new_path,
@@ -608,9 +663,54 @@ pub fn comment_on_line(item: &MergeRequest, file: &FileDiff, line: &DiffLine, re
     if let (Some(old), true) = (line.old_number, line.kind != LineKind::Added) {
         position["old_line"] = json!(old);
     }
-    cli().send(&format!("{}/discussions", base(item)), "POST", &json!({ "body": body, "position": position })).map(drop)
+    position
 }
 
 pub fn reply(item: &MergeRequest, thread: &Discussion, body: &str) -> Result<(), String> {
     cli().send(&format!("{}/discussions/{}/notes", base(item), thread.id), "POST", &json!({ "body": body })).map(drop)
+}
+
+pub fn set_resolved(item: &MergeRequest, thread: &Discussion, resolved: bool) -> Result<(), String> {
+    cli().send(&format!("{}/discussions/{}", base(item), thread.id), "PUT", &json!({ "resolved": resolved })).map(drop)
+}
+
+// MARK: Reviews
+
+pub fn draft_comment(item: &MergeRequest, body: &str) -> Result<(), String> {
+    cli().send(&format!("{}/draft_notes", base(item)), "POST", &json!({ "note": body })).map(drop)
+}
+
+pub fn draft_on_line(item: &MergeRequest, file: &FileDiff, line: &DiffLine, refs: &DiffRefs, body: &str) -> Result<(), String> {
+    cli().send(&format!("{}/draft_notes", base(item)), "POST", &json!({ "note": body, "position": line_position(file, line, refs) })).map(drop)
+}
+
+pub fn edit_draft(item: &MergeRequest, note: &Note, body: &str) -> Result<(), String> {
+    cli().send(&format!("{}/draft_notes/{}", base(item), note.id), "PUT", &json!({ "note": body })).map(drop)
+}
+
+pub fn delete_draft(item: &MergeRequest, note: &Note) -> Result<(), String> {
+    cli().send(&format!("{}/draft_notes/{}", base(item), note.id), "DELETE", &json!({})).map(drop)
+}
+
+/// Publishes my drafts, then the summary as a comment, then the verdict: Approve approves, and
+/// Request Changes sets my reviewer state with `mergeRequestRequestChanges` (GitLab 17.x; an
+/// older GitLab answers that it has no such mutation, after the comments are already out).
+/// Comment sets no state of its own: GitLab's API has no call to mark me Reviewed, so it stands
+/// wherever posting the comments left it.
+pub fn submit_review(item: &MergeRequest, verdict: Verdict, body: &str) -> Result<(), String> {
+    let drafts: Vec<RestDraft> = paged_rest(&cli(), &format!("{}/draft_notes", base(item)), 5)?;
+    if !drafts.is_empty() {
+        cli().send(&format!("{}/draft_notes/bulk_publish", base(item)), "POST", &json!({}))?;
+    }
+    if !body.trim().is_empty() {
+        comment(item, body)?;
+    }
+    match verdict {
+        Verdict::Comment => Ok(()),
+        Verdict::Approve => approve(item),
+        Verdict::RequestChanges => {
+            let query = "mutation($path: ID!, $iid: String!) { mergeRequestRequestChanges(input: { projectPath: $path, iid: $iid }) { errors } }";
+            mutate(item, query, "mergeRequestRequestChanges")
+        }
+    }
 }

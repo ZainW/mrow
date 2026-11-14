@@ -861,3 +861,74 @@ mod inbox_store {
         assert_eq!(store.news_count(), 0);
     }
 }
+
+const GITLAB_THREADS: &str = r#"[
+  {"id":"d1","individual_note":false,"notes":[
+    {"id":1,"body":"Why a mutex?","author":{"username":"ann","name":"Ann"},"created_at":"2026-01-01T00:00:00Z","system":false,
+     "resolvable":true,"resolved":false,"position":{"new_path":"a.rs","old_path":"a.rs","new_line":4,"old_line":null,"head_sha":"h"}}]}]"#;
+
+const GITLAB_DRAFTS: &str = r#"[
+  {"id":7,"author_id":3,"merge_request_id":9,"resolve_discussion":false,"discussion_id":"d1","note":"Because of the cache.","commit_id":null,"line_code":null,
+   "position":null},
+  {"id":8,"author_id":3,"merge_request_id":9,"resolve_discussion":false,"discussion_id":null,"note":"Rename this?","commit_id":null,"line_code":null,
+   "position":{"base_sha":"b","start_sha":"b","head_sha":"h","old_path":"a.rs","new_path":"a.rs","position_type":"text","old_line":null,"new_line":9,"line_range":null}},
+  {"id":9,"author_id":3,"merge_request_id":9,"resolve_discussion":false,"discussion_id":null,"note":"Looks good overall.","commit_id":null,"line_code":null,
+   "position":{"base_sha":null,"start_sha":null,"head_sha":null,"old_path":null,"new_path":null,"position_type":"text","old_line":null,"new_line":null,"line_range":null}}]"#;
+
+#[test]
+fn gitlab_drafts_land_in_place_as_pending() {
+    let me = Person::new("me", "Me");
+    let threads = super::gitlab::discussions_with_drafts_from_json(GITLAB_THREADS, GITLAB_DRAFTS, &me, Utc::now()).expect("drafts decode");
+    assert_eq!(threads.len(), 3, "a reply joins its thread; the others are threads of their own");
+    let reply = &threads[0].notes[1];
+    assert!(reply.pending && reply.body == "Because of the cache." && reply.author == me);
+    assert!(!threads[0].notes[0].pending);
+    let on_line = &threads[1];
+    assert_eq!(on_line.id, "draft-8");
+    assert_eq!(on_line.position().and_then(|p| p.new_line), Some(9));
+    assert!(!on_line.individual_note);
+    let general = &threads[2];
+    assert!(general.individual_note && general.position().is_none(), "a position of nulls is no position");
+    assert_eq!(threads.iter().flat_map(|t| &t.notes).filter(|n| n.pending).count(), 3);
+}
+
+const GH_LINES: &str = r#"[
+  {"id":10,"body":"Off by one?","user":{"login":"ann"},"created_at":"2026-01-01T00:00:00Z","path":"a.rs","line":5,"side":"RIGHT",
+   "pull_request_review_id":100,"node_id":"PRRC_10"},
+  {"id":11,"body":"Yes, fixed.","user":{"login":"bob"},"created_at":"2026-01-01T01:00:00Z","path":"a.rs","line":5,"side":"RIGHT",
+   "in_reply_to_id":10,"pull_request_review_id":101,"node_id":"PRRC_11"},
+  {"id":21,"body":"Held reply","user":{"login":"me"},"created_at":"2026-01-02T00:00:00Z","path":"a.rs","line":5,"side":"RIGHT",
+   "in_reply_to_id":10,"pull_request_review_id":200,"node_id":"PRRC_21"}]"#;
+
+const GH_REVIEWS: &str = r#"[
+  {"id":100,"body":"","user":{"login":"ann"},"state":"COMMENTED","submitted_at":"2026-01-01T00:00:00Z"},
+  {"id":200,"body":"","user":{"login":"me"},"state":"PENDING"}]"#;
+
+const GH_PENDING: &str = r#"[
+  {"id":21,"body":"Held reply","user":{"login":"me"},"created_at":"2026-01-02T00:00:00Z","path":"a.rs","line":5,"side":"RIGHT",
+   "in_reply_to_id":10,"pull_request_review_id":200,"node_id":"PRRC_21"},
+  {"id":22,"body":"Held thread","user":{"login":"me"},"created_at":"2026-01-02T00:01:00Z","path":"b.rs","line":3,"side":"LEFT",
+   "pull_request_review_id":200,"node_id":"PRRC_22"}]"#;
+
+#[test]
+fn github_pending_review_comments_land_in_place_and_threads_keep_their_node() {
+    let resolved = std::collections::HashMap::from([(10, ("PRRT_1".to_string(), true))]);
+    let threads = super::github::discussions_from_json("[]", GH_LINES, GH_REVIEWS, resolved, Some(GH_PENDING)).expect("comments decode");
+    assert_eq!(threads.len(), 2, "the pending reply joins its thread once, and the new one stands alone");
+    let thread = &threads[0];
+    assert_eq!(thread.id, "rc-10");
+    assert_eq!(thread.node_id.as_deref(), Some("PRRT_1"), "resolving needs the thread's node id");
+    assert_eq!(thread.notes.len(), 3);
+    assert!(thread.notes[..2].iter().all(|n| !n.pending && n.resolved == Some(true)));
+    let held = &thread.notes[2];
+    assert!(held.pending && held.node_id.as_deref() == Some("PRRC_21") && held.author.username == "me");
+    let new = &threads[1];
+    assert_eq!(new.id, "pc-22");
+    assert!(new.notes[0].pending);
+    assert_eq!(new.position().map(|p| (p.new_line, p.old_line)), Some((None, Some(3))), "a comment on the left is on the old line");
+}
+
+#[test]
+fn verdicts_name_githubs_events() {
+    assert_eq!(Verdict::ALL.map(Verdict::event), ["COMMENT", "REQUEST_CHANGES", "APPROVE"]);
+}

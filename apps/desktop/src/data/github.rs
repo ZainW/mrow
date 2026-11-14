@@ -65,7 +65,7 @@ fn search_query(mine: bool) -> String {
 const REVIEW_THREADS: &str = "query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) {
         pullRequest(number: $number) {
-          reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { databaseId } } } }
+          reviewThreads(first: 100) { nodes { id isResolved comments(first: 1) { nodes { databaseId } } } }
         }
       }
     }";
@@ -534,6 +534,8 @@ struct GhComment {
     side: Option<String>,
     original_commit_id: Option<String>,
     in_reply_to_id: Option<i64>,
+    pull_request_review_id: Option<i64>,
+    node_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -561,12 +563,54 @@ pub fn discussions(item: &MergeRequest) -> Result<Vec<Discussion>, String> {
     let reviews = std::thread::spawn(move || paged_rest::<GhReview>(&cli(), &review_path, 5));
     let resolution = std::thread::spawn(move || resolved_threads(&item2));
     let comments = issue.join().unwrap()?;
-    let mut lines = lines.join().unwrap()?;
+    let lines = lines.join().unwrap()?;
     let summaries = reviews.join().unwrap()?;
     let resolved = resolution.join().unwrap();
+    // My pending review, which only I can see: its comments come from the review itself.
+    let pending = match summaries.iter().find(|r| r.state == "PENDING") {
+        Some(review) => {
+            let comments: Vec<GhComment> = paged_rest(&cli(), &format!("{}/reviews/{}/comments", base(item), review.id), 5)?;
+            Some((review.id, comments))
+        }
+        None => None,
+    };
+    Ok(threads_of(comments, lines, summaries, resolved, pending))
+}
+
+/// Recorded REST responses (and the review threads' resolution), for the self-tests.
+#[cfg(test)]
+pub fn discussions_from_json(
+    issue: &str,
+    lines: &str,
+    reviews: &str,
+    resolved: HashMap<i64, (String, bool)>,
+    pending: Option<&str>,
+) -> Result<Vec<Discussion>, String> {
+    let parse = |raw: &str| serde_json::from_str::<Vec<GhComment>>(raw).map_err(|e| e.to_string());
+    let summaries: Vec<GhReview> = serde_json::from_str(reviews).map_err(|e| e.to_string())?;
+    let pending = match (pending, summaries.iter().find(|r| r.state == "PENDING")) {
+        (Some(raw), Some(review)) => Some((review.id, parse(raw)?)),
+        _ => None,
+    };
+    Ok(threads_of(parse(issue)?, parse(lines)?, summaries, Some(resolved), pending))
+}
+
+/// Pieces the threads together: conversation comments, review summaries, line threads, and my
+/// pending review's comments in place (a reply in its thread, a new one as a thread of its own).
+fn threads_of(
+    comments: Vec<GhComment>,
+    mut lines: Vec<GhComment>,
+    summaries: Vec<GhReview>,
+    resolved: Option<HashMap<i64, (String, bool)>>,
+    pending: Option<(i64, Vec<GhComment>)>,
+) -> Vec<Discussion> {
+    // The pull request's comments may list my pending ones too; they're taken from the review.
+    if let Some((review, _)) = &pending {
+        lines.retain(|c| c.pull_request_review_id != Some(*review));
+    }
 
     let mut threads: Vec<Discussion> =
-        comments.iter().map(|c| Discussion { id: format!("ic-{}", c.id), individual_note: true, notes: vec![note(c, None)] }).collect();
+        comments.iter().map(|c| Discussion { id: format!("ic-{}", c.id), individual_note: true, notes: vec![note(c, None)], node_id: None }).collect();
     for review in &summaries {
         let body = review.body.as_deref().unwrap_or("").trim();
         let Some(at) = review.submitted_at else { continue };
@@ -590,7 +634,10 @@ pub fn discussions(item: &MergeRequest) -> Result<Vec<Discussion>, String> {
                 resolvable: None,
                 resolved: None,
                 position: None,
+                pending: false,
+                node_id: None,
             }],
+            node_id: None,
         });
     }
     // Replies point at the thread's first comment.
@@ -606,26 +653,40 @@ pub fn discussions(item: &MergeRequest) -> Result<Vec<Discussion>, String> {
     }
     for root in order {
         let notes = &grouped[&root];
-        let first = notes[0];
-        let left = first.side.as_deref() == Some("LEFT");
-        let position = Position {
-            new_path: first.path.clone(),
-            old_path: first.path.clone(),
-            new_line: if first.line.is_some() { if left { None } else { first.line } } else { first.original_line },
-            old_line: if first.line.is_some() && left { first.line } else { None },
-            // A thread whose line is gone (outdated) is pinned to the commit it was written on,
-            // which isn't the head any more, so it isn't placed in the diff.
-            head_sha: if first.line.is_none() { Some(first.original_commit_id.clone().unwrap_or("outdated".into())) } else { None },
-        };
-        let is_resolved = resolved.as_ref().and_then(|r| r.get(&root).copied());
+        let position = line_position(notes[0]);
+        let thread = resolved.as_ref().and_then(|r| r.get(&root));
+        let is_resolved = thread.map(|t| t.1);
         threads.push(Discussion {
             id: format!("rc-{root}"),
             individual_note: false,
             notes: notes.iter().map(|c| Note { resolvable: Some(is_resolved.is_some()), resolved: is_resolved, ..note(c, Some(position.clone())) }).collect(),
+            node_id: thread.map(|t| t.0.clone()),
         });
     }
     threads.sort_by_key(|t| t.notes.first().map(|n| n.created_at));
-    Ok(threads)
+    let Some((_, drafts)) = pending else { return threads };
+    for c in &drafts {
+        let draft = Note { pending: true, node_id: c.node_id.clone(), ..note(c, Some(line_position(c))) };
+        let home = c.in_reply_to_id.and_then(|to| threads.iter_mut().find(|t| t.id.starts_with("rc-") && t.notes.iter().any(|n| n.id == to)));
+        match home {
+            Some(thread) => thread.notes.push(draft),
+            None => threads.push(Discussion { id: format!("pc-{}", c.id), individual_note: false, notes: vec![draft], node_id: None }),
+        }
+    }
+    threads
+}
+
+/// Where a line comment sits. A thread whose line is gone (outdated) is pinned to the commit it
+/// was written on, which isn't the head any more, so it isn't placed in the diff.
+fn line_position(c: &GhComment) -> Position {
+    let left = c.side.as_deref() == Some("LEFT");
+    Position {
+        new_path: c.path.clone(),
+        old_path: c.path.clone(),
+        new_line: if c.line.is_some() { if left { None } else { c.line } } else { c.original_line },
+        old_line: if c.line.is_some() && left { c.line } else { None },
+        head_sha: if c.line.is_none() { Some(c.original_commit_id.clone().unwrap_or("outdated".into())) } else { None },
+    }
 }
 
 fn note(c: &GhComment, position: Option<Position>) -> Note {
@@ -638,12 +699,14 @@ fn note(c: &GhComment, position: Option<Position>) -> Note {
         resolvable: None,
         resolved: None,
         position,
+        pending: false,
+        node_id: None,
     }
 }
 
-/// Whether each line thread is resolved, by its first comment's ID. REST doesn't say, so it's
-/// one GraphQL query; without it threads just show no resolved state.
-fn resolved_threads(item: &MergeRequest) -> Option<HashMap<i64, bool>> {
+/// Each line thread's node id and whether it's resolved, by its first comment's ID. REST doesn't
+/// say, so it's one GraphQL query; without it threads show no resolved state and can't be resolved.
+fn resolved_threads(item: &MergeRequest) -> Option<HashMap<i64, (String, bool)>> {
     #[derive(Deserialize)]
     struct Payload {
         repository: Option<RepoT>,
@@ -661,6 +724,7 @@ fn resolved_threads(item: &MergeRequest) -> Option<HashMap<i64, bool>> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct ThreadT {
+        id: String,
         is_resolved: bool,
         comments: Nodes<CommentT>,
     }
@@ -673,7 +737,7 @@ fn resolved_threads(item: &MergeRequest) -> Option<HashMap<i64, bool>> {
     let number: i64 = item.iid.parse().ok()?;
     let payload: Payload = cli().graphql(REVIEW_THREADS, &[("owner", Some(owner.into())), ("name", Some(name.into()))], &[("number", number)]).ok()?;
     let threads = payload.repository?.pull_request?.review_threads.nodes;
-    Some(threads.into_iter().filter_map(|t| Some((t.comments.nodes.first()?.database_id?, t.is_resolved))).collect())
+    Some(threads.into_iter().filter_map(|t| Some((t.comments.nodes.first()?.database_id?, (t.id, t.is_resolved)))).collect())
 }
 
 // MARK: Actions
@@ -727,16 +791,21 @@ pub fn comment(item: &MergeRequest, body: &str) -> Result<(), String> {
 }
 
 pub fn comment_on_line(item: &MergeRequest, file: &FileDiff, line: &DiffLine, refs: &DiffRefs, body: &str) -> Result<(), String> {
-    // A removed line lives on the left (old) side, everything else on the right.
-    let left = line.kind == LineKind::Removed;
-    let number = if left { line.old_number } else { line.new_number }.ok_or("GitHub can't place a comment on that line.")?;
+    let (number, side) = side_of(line)?;
     cli()
         .send(
             &format!("{}/comments", base(item)),
             "POST",
-            &json!({ "body": body, "commit_id": refs.head_sha, "path": file.new_path, "line": number, "side": if left { "LEFT" } else { "RIGHT" } }),
+            &json!({ "body": body, "commit_id": refs.head_sha, "path": file.new_path, "line": number, "side": side }),
         )
         .map(drop)
+}
+
+/// A line's number and side: a removed line lives on the left (old) side, everything else on the right.
+fn side_of(line: &DiffLine) -> Result<(i64, &'static str), String> {
+    let left = line.kind == LineKind::Removed;
+    let number = if left { line.old_number } else { line.new_number }.ok_or("GitHub can't place a comment on that line.")?;
+    Ok((number, if left { "LEFT" } else { "RIGHT" }))
 }
 
 pub fn reply(item: &MergeRequest, thread: &Discussion, body: &str) -> Result<(), String> {
@@ -744,5 +813,100 @@ pub fn reply(item: &MergeRequest, thread: &Discussion, body: &str) -> Result<(),
         (Some(_), Some(root)) => cli().send(&format!("{}/comments/{}/replies", base(item), root.id), "POST", &json!({ "body": body })).map(drop),
         // Conversation comments aren't threaded on GitHub; a reply is a new comment.
         _ => comment(item, body),
+    }
+}
+
+pub fn set_resolved(thread: &Discussion, resolved: bool) -> Result<(), String> {
+    let id = thread.node_id.clone().ok_or("GitHub didn't say which thread this is. Refresh, then try again.")?;
+    let query = if resolved {
+        "mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { clientMutationId } }"
+    } else {
+        "mutation($id: ID!) { unresolveReviewThread(input: { threadId: $id }) { clientMutationId } }"
+    };
+    cli().graphql::<Value>(query, &[("id", Some(id))], &[]).map(drop)
+}
+
+// MARK: Reviews
+//
+// A review in progress is GitHub's one PENDING review per person per pull request: comments go
+// into it, and submitting it posts them all with the verdict.
+
+/// The node id of my pending review on it, if I have one.
+fn pending_review(item: &MergeRequest) -> Result<Option<String>, String> {
+    #[derive(Deserialize)]
+    struct Payload {
+        node: Option<PullT>,
+    }
+    #[derive(Deserialize)]
+    struct PullT {
+        reviews: Option<Nodes<ReviewT>>,
+    }
+    #[derive(Deserialize)]
+    struct ReviewT {
+        id: String,
+    }
+    // Only its author sees a pending review, so the first is mine.
+    let query = "query($id: ID!) { node(id: $id) { ... on PullRequest { reviews(states: PENDING, first: 1) { nodes { id } } } } }";
+    let payload: Payload = cli().graphql(query, &[("id", Some(item.id.clone()))], &[])?;
+    Ok(payload.node.and_then(|p| p.reviews).and_then(|r| r.nodes.into_iter().next()).map(|r| r.id))
+}
+
+/// Adds a thread on a line to my pending review, starting one if there's none.
+pub fn draft_on_line(item: &MergeRequest, file: &FileDiff, line: &DiffLine, refs: &DiffRefs, body: &str) -> Result<(), String> {
+    let (number, side) = side_of(line)?;
+    let vars = [("path", Some(file.new_path.clone())), ("side", Some(side.to_string())), ("body", Some(body.to_string()))];
+    match pending_review(item)? {
+        Some(review) => {
+            let query = "mutation($review: ID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
+                addPullRequestReviewThread(input: { pullRequestReviewId: $review, path: $path, line: $line, side: $side, body: $body }) { clientMutationId }
+            }";
+            let mut all = vars.to_vec();
+            all.push(("review", Some(review)));
+            cli().graphql::<Value>(query, &all, &[("line", number)]).map(drop)
+        }
+        None => {
+            let query = "mutation($pull: ID!, $commit: GitObjectID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
+                addPullRequestReview(input: { pullRequestId: $pull, commitOID: $commit, threads: [{ path: $path, line: $line, side: $side, body: $body }] }) { clientMutationId }
+            }";
+            let mut all = vars.to_vec();
+            all.push(("pull", Some(item.id.clone())));
+            all.push(("commit", Some(refs.head_sha.clone())));
+            cli().graphql::<Value>(query, &all, &[("line", number)]).map(drop)
+        }
+    }
+}
+
+pub fn edit_draft(note: &Note, body: &str) -> Result<(), String> {
+    let id = note.node_id.clone().ok_or("GitHub didn't say which comment this is. Refresh, then try again.")?;
+    let query =
+        "mutation($id: ID!, $body: String!) { updatePullRequestReviewComment(input: { pullRequestReviewCommentId: $id, body: $body }) { clientMutationId } }";
+    cli().graphql::<Value>(query, &[("id", Some(id)), ("body", Some(body.to_string()))], &[]).map(drop)
+}
+
+pub fn delete_draft(note: &Note) -> Result<(), String> {
+    let id = note.node_id.clone().ok_or("GitHub didn't say which comment this is. Refresh, then try again.")?;
+    let query = "mutation($id: ID!) { deletePullRequestReviewComment(input: { id: $id }) { clientMutationId } }";
+    cli().graphql::<Value>(query, &[("id", Some(id))], &[]).map(drop)
+}
+
+/// Submits my pending review with the verdict, or with none pending, posts a review that's
+/// only the verdict and the summary.
+pub fn submit_review(item: &MergeRequest, verdict: Verdict, body: &str) -> Result<(), String> {
+    let body = body.trim();
+    match pending_review(item)? {
+        Some(review) => {
+            let query = "mutation($review: ID!, $event: PullRequestReviewEvent!, $body: String) {
+                submitPullRequestReview(input: { pullRequestReviewId: $review, event: $event, body: $body }) { clientMutationId }
+            }";
+            let body = (!body.is_empty()).then(|| body.to_string());
+            cli().graphql::<Value>(query, &[("review", Some(review)), ("event", Some(verdict.event().into())), ("body", body)], &[]).map(drop)
+        }
+        None => {
+            let mut review = json!({ "event": verdict.event() });
+            if !body.is_empty() {
+                review["body"] = json!(body);
+            }
+            cli().send(&format!("{}/reviews", base(item)), "POST", &review).map(drop)
+        }
     }
 }

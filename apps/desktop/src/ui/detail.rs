@@ -17,12 +17,12 @@ use std::rc::Rc;
 
 use crate::ui::smooth_scroll::{smooth_wheel, smooth_wheel_watching};
 use rune::text::Span;
-use rune::{El, GrowthSpec, PointerPress, PopupAnchor, PopupItem, PopupMenu, ScrollSpec, Tx, col, el, icon, rich, row, text};
+use rune::{Align, El, GrowthSpec, PointerPress, PopupAnchor, PopupItem, PopupMenu, ScrollSpec, Side, Tx, col, el, icon, rich, row, text};
 use rune_kit::{Kit, Spinner, TextArea};
 
 use crate::app::{App, DraftKey};
 use crate::data::diff::LineKind;
-use crate::data::models::{Discussion, FileDiff, MergeRequest, Note};
+use crate::data::models::{Discussion, FileDiff, MergeRequest, Note, Verdict};
 use crate::data::store::{Loadable, Viewed, relative};
 use crate::ui::components::{
     Chrome, ChromeButton, action_button, action_icon_button, avatar, chip, comment_count, filled_mark, keys, long_date, month_day, pipeline_dot, progress_bar,
@@ -32,7 +32,7 @@ use crate::ui::diff;
 use crate::ui::icons as I;
 use crate::ui::markdown::{self, Doc};
 use crate::ui::theme::LineHeight as _;
-use crate::ui::theme::{MEDIUM, Pal, READING_WIDTH, SEMIBOLD, mono, serif, ui};
+use crate::ui::theme::{MEDIUM, Pal, READING_WIDTH, SEMIBOLD, mono, serif, shade, ui};
 use crate::ui::{Look, actions, look};
 
 /// Files longer than this wait for a click before their lines are drawn.
@@ -365,6 +365,10 @@ fn bar(s: &App, page: &Page, open: Tab, room: Room) -> El {
     if room > Room::Tight {
         r = r.child(forge_button(p, item, narrow));
     }
+    let pending = s.store.pending_count(item);
+    if reviews(item, page.mine, pending) {
+        r = r.child(review_button(s, p, item, room, pending));
+    }
     if approves(item, page.mine) {
         r = r.child(approval_button(s, p, item, room));
     }
@@ -375,6 +379,139 @@ fn bar(s: &App, page: &Page, open: Tab, room: Room) -> El {
 /// own), whichever tab is open.
 fn approves(item: &MergeRequest, mine: bool) -> bool {
     item.is_open() && !mine
+}
+
+/// Whether the bar offers to finish a review: where it offers Approve, and on my own once I've
+/// held comments there.
+fn reviews(item: &MergeRequest, mine: bool, pending: usize) -> bool {
+    item.is_open() && (!mine || pending > 0)
+}
+
+/// Whether the selected merge request's bar has the review button, which its panel hangs from.
+pub fn offers_review(s: &App, item: &MergeRequest) -> bool {
+    reviews(item, s.store.is_mine(item), s.store.pending_count(item))
+}
+
+/// The key of the review button, which the review panel hangs from and hands focus back to.
+const REVIEW_BUTTON: &str = "review-button";
+
+/// Review, with the number of comments held in it: it opens the panel that submits them. On a
+/// narrow card its icon alone, the count on its corner.
+fn review_button(s: &App, p: &Pal, item: &MergeRequest, room: Room, pending: usize) -> El {
+    let open = s.review_panel.as_deref() == Some(item.id.as_str());
+    let label = match pending {
+        0 => "Review".to_string(),
+        1 => "Review, 1 pending comment".to_string(),
+        n => format!("Review, {n} pending comments"),
+    };
+    let count = |size: f32| {
+        el().h(size)
+            .min_w(size)
+            .px(4.0)
+            .radius(size / 2.0)
+            .fill(p.accent)
+            .center()
+            .child(text(pending.to_string()).font(ui(11.0, SEMIBOLD).features("'tnum' 1")).color(p.paper).single_line())
+    };
+    let mut b = if room == Room::Wide {
+        let b = action_button(p, REVIEW_BUTTON, Some(&I::BUBBLE_TEXT), "Review", false, true);
+        if pending > 0 { b.child(count(17.0)) } else { b }
+    } else {
+        let b = action_icon_button(p, REVIEW_BUTTON, &I::BUBBLE_TEXT, "Review", false, true);
+        // A ring of the bar's colour keeps the count off the button's outline.
+        if pending > 0 { b.child(el().pin(None, Some(-6.0), Some(-6.0), None).padding(1.5).radius(9.0).fill(p.paper).inert().child(count(15.0))) } else { b }
+    };
+    if open {
+        b = b.fill(p.hover);
+    }
+    b.label(label).expanded(open).help(keys("Review  ⇧⌘R")).on_press_tx(actions::review)
+}
+
+/// The panel under the review button: the summary, and the three ways to end the review.
+/// Approve and Request Changes aren't mine to give on my own request.
+pub fn review_panel(s: &App, p: &Pal, k: &Kit) -> Option<El> {
+    let id = s.review_panel.as_ref()?;
+    let item = s.store.selected().filter(|m| &m.id == id && offers_review(s, m))?;
+    let pending = s.store.pending_count(item);
+    let mine = s.store.is_mine(item);
+    let key = DraftKey::Summary(id.clone());
+    let empty = TextEditHolder::empty();
+    let summary = s.draft(&key).unwrap_or(&empty.0);
+    let idle = s.store.busy.is_none();
+    // A review needs something in it: a held comment, a summary, or a verdict that says enough.
+    let said = pending > 0 || !summary.text.trim().is_empty();
+    let edit_key = key.clone();
+    let field = TextArea::new(summary)
+        .width(None)
+        .placeholder("Sum up your review, if you like. Markdown works.")
+        .auto_grow(4, 10)
+        .on_edit(move |s: &mut App| s.draft_mut(&edit_key))
+        .on_key({
+            let id = id.clone();
+            move |s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx| match ev.key {
+                rune::Key::Escape => {
+                    tx.instant();
+                    s.review_panel = None;
+                    true
+                }
+                rune::Key::Enter if ev.mods.cmd => {
+                    s.submit_review(&id, Verdict::Comment);
+                    true
+                }
+                _ => false,
+            }
+        })
+        .build(k)
+        .border(1.0, p.line)
+        .radius(8.0)
+        .padding(10.0);
+    let held = match pending {
+        0 => "Nothing held yet. Your summary and verdict post on their own.".to_string(),
+        1 => "1 pending comment posts with it.".to_string(),
+        n => format!("{n} pending comments post with it."),
+    };
+    let mut verdicts = row().w_full().gap(8.0).center_y().justify_end();
+    for verdict in Verdict::ALL {
+        let enabled = idle
+            && match verdict {
+                Verdict::Comment => said,
+                Verdict::RequestChanges => said && !mine,
+                Verdict::Approve => !mine,
+            };
+        let id = id.clone();
+        let button = action_button(p, format!("verdict-{}", verdict.event()), None, verdict.title(), verdict == Verdict::Approve, enabled);
+        verdicts = verdicts.child(button.on_press(move |s: &mut App| s.submit_review(&id, verdict)));
+    }
+    let mut body = col()
+        .w_full()
+        .padding(14.0)
+        .gap(10.0)
+        .child(text("Finish your review").font(ui(13.0, SEMIBOLD)).color(p.text).single_line())
+        .child(text(held).font(ui(12.0, 400.0)).color(p.secondary).wrap())
+        .child(col().key("review-summary").w_full().child(field));
+    if mine {
+        body = body.child(text(format!("This {} is yours, so you can only comment on it.", item.kind().noun())).font(ui(12.0, 400.0)).color(p.tertiary).wrap());
+    }
+    let panel = col()
+        .key("review-panel")
+        .role("dialog")
+        .label("Finish your review")
+        .w(400.0)
+        .radius(10.0)
+        .fill(p.elevated)
+        .border(1.0, p.line)
+        .shadow(8.0, 28.0, shade(if p.dark { 0.45 } else { 0.14 }))
+        .instant_changes()
+        .child(body)
+        .child(rule(p))
+        .child(row().w_full().padding(12.0).child(verdicts))
+        .focus_return(REVIEW_BUTTON)
+        .modal_tx(true, |s: &mut App, tx: &mut Tx| {
+            tx.instant();
+            s.review_panel = None;
+        })
+        .anchored_fit(REVIEW_BUTTON, Side::Bottom, Align::End, 6.0);
+    Some(panel)
 }
 
 /// The way out to the forge; on a narrow card its icon alone, named in its label and tip.
@@ -759,7 +896,7 @@ pub fn jump_to_open_thread(s: &mut App, tx: &mut Tx) {
 
 /// Whether a thread that can be resolved has been; none for one that can't (a plain comment).
 fn resolved(thread: &Discussion) -> Option<bool> {
-    let mut notes = thread.notes.iter().filter(|n| !n.system).peekable();
+    let mut notes = thread.notes.iter().filter(|n| !n.system && !n.pending).peekable();
     (notes.peek()?.resolvable == Some(true)).then(|| notes.all(|n| n.resolved == Some(true)))
 }
 
@@ -789,6 +926,7 @@ fn approval_button(s: &App, p: &Pal, item: &MergeRequest, room: Room) -> El {
             Room::Tight => action_icon_button(p, "approve", &I::CHECK, "Approve", true, idle),
             _ => action_button(p, "approve", Some(&I::CHECK), "Approve", true, idle),
         };
+        // With comments held, it opens the review panel, where they go out with the approval.
         approve.help(keys("Approve  ⇧⌘A")).on_press_tx(actions::approve)
     }
 }
@@ -1289,45 +1427,70 @@ fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussi
         }
         c = c.child(note_view(s, p, k, item, note));
     }
-    if !thread.individual_note || notes.first().and_then(|n| n.position.as_ref()).is_some() {
+    // A thread of my pending comments alone has nothing to reply to or resolve yet.
+    let started = notes.iter().any(|n| !n.pending);
+    if started && (!thread.individual_note || notes.first().and_then(|n| n.position.as_ref()).is_some()) {
         c = c.child(rule(p));
         let key = DraftKey::Reply(item.id.clone(), thread.id.clone());
         if s.is_replying(item, thread) {
             c = c.child(el().w_full().padding(10.0).child(composer(s, p, k, key, "Reply…", "Reply", true)));
         } else {
             let open = format!("{}|{}", item.id, thread.id);
-            let mut reply = row()
+            let focus_key = draft_field_key(&key);
+            let reply = row()
                 .key("reply")
                 .role("button")
                 .label("Reply")
-                .w_full()
                 .h(32.0)
                 .px(14.0)
                 .gap(6.0)
                 .center_y()
+                .grow(1.0)
                 .hover(p.hover)
                 .child(icon(&I::UNDO, 11.0).color(p.secondary))
                 .child(text("Reply").font(ui(12.0, MEDIUM)).color(p.secondary))
-                .child(el().grow(1.0));
-            if shows == Head::Bare && resolved {
-                reply = reply.child(text("Resolved").font(ui(12.0, 400.0)).color(p.secondary));
+                .on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                    s.replying.insert(open.clone());
+                    tx.focus(focus_key.clone(), false);
+                });
+            let mut foot = row().w_full().center_y().child(reply);
+            if let Some(done) = self::resolved(thread).filter(|_| item.is_open()) {
+                if shows == Head::Bare && done {
+                    foot = foot.child(text("Resolved").font(ui(12.0, 400.0)).color(p.secondary).pr(4.0));
+                }
+                foot = foot.child(resolve_button(p, item, thread, done));
             }
-            let focus_key = draft_field_key(&key);
-            c = c.child(reply.on_press_tx(move |s: &mut App, tx: &mut Tx| {
-                s.replying.insert(open.clone());
-                tx.focus(focus_key.clone(), false);
-            }));
+            c = c.child(foot);
         }
     }
     if resolved { c.opacity(0.7) } else { c }
 }
 
-fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, note: &Note) -> El {
-    let mut meta = row()
+/// Resolves the thread, or reopens a resolved one. It reads so at once.
+fn resolve_button(p: &Pal, item: &MergeRequest, thread: &Discussion, resolved: bool) -> El {
+    let (it, th) = (item.clone(), thread.clone());
+    let title = if resolved { "Unresolve" } else { "Resolve" };
+    row()
+        .key("resolve")
+        .role("button")
+        .label(format!("{title} Thread"))
+        .h(32.0)
+        .px(14.0)
         .gap(6.0)
         .center_y()
-        .child(text(note.author.name.clone()).font(ui(13.0, SEMIBOLD)).color(p.text).single_line())
-        .child(text(relative(note.created_at)).font(ui(12.0, 400.0)).color(p.tertiary).single_line().help(long_date(note.created_at)));
+        .hover(p.hover)
+        .child(icon(if resolved { &I::UNDO_CIRCLE } else { &I::CHECK }, 11.0).color(p.secondary))
+        .child(text(title).font(ui(12.0, MEDIUM)).color(p.secondary))
+        .on_press(move |s: &mut App| s.store.set_resolved(&it, &th, !resolved))
+}
+
+fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, note: &Note) -> El {
+    let mut meta = row().w_full().gap(6.0).center_y().child(text(note.author.name.clone()).font(ui(13.0, SEMIBOLD)).color(p.text).single_line());
+    meta = if note.pending {
+        meta.child(pending_mark(p))
+    } else {
+        meta.child(text(relative(note.created_at)).font(ui(12.0, 400.0)).color(p.tertiary).single_line().help(long_date(note.created_at)))
+    };
     if s.store.is_fresh(item, note) {
         // A word as well as the dot, so it isn't told by colour alone.
         meta = meta.child(
@@ -1339,14 +1502,50 @@ fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, note: &Note) -> El 
                 .child(text("New").font(ui(12.0, SEMIBOLD)).color(p.accent).single_line()),
         );
     }
-    row().w_full().padding(14.0).gap(10.0).items_start().child(avatar(s, p, &note.author, 22.0)).child(
-        col().gap(6.0).grow(1.0).shrink().min_w(0.0).child(meta).child(markdown::markdown(
-            s,
-            p,
-            k,
-            Doc { key: &format!("note-{}", note.id), source: &note.body, base: item.project_url(), size: 14.0, serif: false },
-        )),
-    )
+    let edit = DraftKey::Edit(item.id.clone(), note.id);
+    let editing = note.pending && s.editing.as_ref() == Some(&edit);
+    if note.pending && item.is_open() && !editing {
+        meta = meta.child(el().grow(1.0)).child(draft_buttons(s, p, item, note));
+    }
+    let body = if editing {
+        composer(s, p, k, edit, "Edit your comment…", "Save", true)
+    } else {
+        markdown::markdown(s, p, k, Doc { key: &format!("note-{}", note.id), source: &note.body, base: item.project_url(), size: 14.0, serif: false })
+    };
+    let r = row().w_full().padding(14.0).gap(10.0).items_start().child(avatar(s, p, &note.author, 22.0));
+    let r = r.child(col().gap(6.0).grow(1.0).shrink().min_w(0.0).child(meta).child(body));
+    if note.pending { r.fill(p.accent.alpha(0.05)) } else { r }
+}
+
+/// "Pending": a comment held in my review, which nobody else sees until it's submitted.
+fn pending_mark(p: &Pal) -> El {
+    el().h(18.0)
+        .px(6.0)
+        .radius(5.0)
+        .center()
+        .fill(p.accent_soft)
+        .help("Only you can see this until you submit your review")
+        .child(text("Pending").font(ui(11.0, SEMIBOLD)).color(p.accent).single_line())
+}
+
+/// Edit and Delete on a pending comment of mine.
+fn draft_buttons(s: &App, p: &Pal, item: &MergeRequest, note: &Note) -> El {
+    let idle = s.store.busy.is_none();
+    let (id, editing) = (item.id.clone(), note.clone());
+    let (it, deleting) = (item.clone(), note.clone());
+    let edit = ChromeButton::new(format!("edit-{}", note.id), "Edit").icon(&I::PENCIL_SQUARE, 13.0).enabled(idle).build(p).on_press_tx(
+        move |s: &mut App, tx: &mut Tx| {
+            s.edit_pending(&id, &editing);
+            tx.focus(draft_field_key(&DraftKey::Edit(id.clone(), editing.id)), false);
+        },
+    );
+    let delete =
+        ChromeButton::new(format!("delete-{}", note.id), "Delete from Review").icon(&I::TRASH, 13.0).enabled(idle).build(p).on_press(move |s: &mut App| {
+            if s.store.busy.is_none() {
+                s.store.delete_draft(&it, &deleting);
+            }
+        });
+    row().gap(2.0).mt(-6.0).mb(-6.0).child(edit).child(delete)
 }
 
 /// The key path of a draft's text field, for focusing it.
@@ -1359,16 +1558,31 @@ fn composer_key(key: &DraftKey) -> String {
         DraftKey::Comment(id) => format!("compose-{id}"),
         DraftKey::Reply(id, thread) => format!("reply-{id}-{thread}"),
         DraftKey::Line(id, file, line) => format!("line-{id}-{}-{line}", crate::data::models::fnv1a(file)),
+        DraftKey::Edit(id, note) => format!("edit-{id}-{note}"),
+        DraftKey::Summary(id) => format!("summary-{id}"),
     }
 }
 
-/// A comment box: the text, "⌘↩ to post", and Cancel (for replies and line comments) and post.
+/// A comment box: the text, "⌘↩ to post", and Cancel (for all but the comment at the end) and
+/// post. Where a review in progress can hold the comment, it offers that too, and once a review
+/// is under way, holding it is what ⌘↩ does.
 pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, submit: &str, compact: bool) -> El {
     let empty = TextEditHolder::empty();
     let edit = s.draft(&key).unwrap_or(&empty.0);
     let can_post = !edit.text.trim().is_empty() && s.store.busy.is_none();
+    let item = s.store.item(key.item());
+    let holds = item.is_some_and(|m| {
+        m.is_open()
+            && match &key {
+                DraftKey::Line(..) => true,
+                DraftKey::Comment(_) => m.kind().drafts_general_comments(),
+                _ => false,
+            }
+    });
+    let reviewing = holds && item.is_some_and(|m| s.store.pending_count(m) > 0);
     let edit_key = key.clone();
     let post_key = key.clone();
+    let hold_key = key.clone();
     let key_key = key.clone();
     let field = TextArea::new(edit)
         .width(None)
@@ -1377,7 +1591,11 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
         .on_edit(move |s: &mut App| s.draft_mut(&edit_key))
         .on_key(move |s: &mut App, ev: &rune::KeyEvent, _: &mut Tx| match ev.key {
             rune::Key::Enter if ev.mods.cmd => {
-                s.post(key_key.clone());
+                if reviewing {
+                    s.hold(key_key.clone());
+                } else {
+                    s.post(key_key.clone());
+                }
                 true
             }
             rune::Key::Escape => {
@@ -1391,19 +1609,47 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
         .border(1.0, p.line)
         .radius(10.0)
         .padding(if compact { 8.0 } else { 12.0 });
-    let mut buttons =
-        row().w_full().gap(8.0).center_y().child(text(crate::ui::components::keys("⌘↩ to post")).font(ui(12.0, 400.0)).color(p.tertiary)).child(el().grow(1.0));
+    let hint = match &key {
+        DraftKey::Edit(..) => "⌘↩ to save",
+        _ if reviewing => "⌘↩ to add to your review",
+        _ => "⌘↩ to post",
+    };
+    let mut buttons = row()
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(text(keys(hint)).font(ui(12.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0))
+        .child(el().grow(1.0));
     if !matches!(key, DraftKey::Comment(_)) {
         let cancel_key = key.clone();
         buttons = buttons.child(action_button(p, "cancel", None, "Cancel", false, true).on_press(move |s: &mut App| cancel(s, &cancel_key)));
     }
-    buttons = buttons.child(action_button(p, "post", Some(&I::BUBBLE_TEXT), submit, true, can_post).on_press(move |s: &mut App| s.post(post_key.clone())));
+    let post = move |s: &mut App| s.post(post_key.clone());
+    let hold = move |s: &mut App| s.hold(hold_key.clone());
+    buttons = match (holds, reviewing) {
+        (true, true) => buttons
+            .child(action_button(p, "post", None, &format!("{submit} Now"), false, can_post).on_press(post))
+            .child(action_button(p, "hold", Some(&I::BUBBLE_TEXT), "Add to Review", true, can_post).on_press(hold)),
+        (true, false) => buttons
+            .child(action_button(p, "hold", None, "Start a Review", false, can_post).on_press(hold))
+            .child(action_button(p, "post", Some(&I::BUBBLE_TEXT), submit, true, can_post).on_press(post)),
+        _ => {
+            let glyph = (!matches!(key, DraftKey::Edit(..))).then_some(&I::BUBBLE_TEXT);
+            buttons.child(action_button(p, "post", glyph, submit, true, can_post).on_press(post))
+        }
+    };
     col().key(composer_key(&key)).w_full().gap(8.0).child(field).child(buttons)
 }
 
 fn cancel(s: &mut App, key: &DraftKey) {
     match key {
-        DraftKey::Comment(_) => {}
+        DraftKey::Comment(_) | DraftKey::Summary(_) => {}
+        DraftKey::Edit(..) => {
+            s.drafts.remove(key);
+            if s.editing.as_ref() == Some(key) {
+                s.editing = None;
+            }
+        }
         DraftKey::Reply(id, thread) => {
             s.replying.remove(&format!("{id}|{thread}"));
         }
@@ -1468,14 +1714,37 @@ mod tests {
         assert_eq!(conversation_rows(talk.as_ref(), 0)[0], Row::Empty("No comments yet."));
 
         let placed = Placed::new(threads, None, &files);
-        // One on a line of job.rs; a general note, and one on a file the diff doesn't have.
-        assert_eq!(placed.at.iter().flatten().count(), 1);
-        assert_eq!(placed.by_file[0].len(), 1);
+        // Two on lines of job.rs (one a pending draft) and one on exports.ts; general notes, and
+        // one on a file the diff doesn't have, sit nowhere.
+        assert_eq!(placed.at.iter().flatten().count(), 3);
+        assert_eq!(placed.by_file[0].len(), 2);
         let lines: Vec<usize> = (0..files[0].lines.len()).filter(|&l| !placed.on(0, l).is_empty()).collect();
-        assert_eq!(lines.len(), 1, "under one line only");
+        assert_eq!(lines.len(), 2, "each under its own line");
         assert_eq!(placed.at[placed.on(0, lines[0])[0]], Some((0, lines[0])), "a jump to its line finds the row it's under");
         // The fixture's positions name no commit, so they hold for any head.
         assert_eq!(Placed::new(threads, Some("abc"), &files).at, placed.at);
+    }
+
+    #[test]
+    fn pending_comments_neither_resolve_nor_reopen_a_thread() {
+        let (_, _, threads) = crate::fixtures::load();
+        let all: Vec<&Discussion> = threads.values().flatten().collect();
+        let find = |id: &str| *all.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(resolved(find("t1")), Some(false), "a held reply leaves the thread open");
+        assert_eq!(resolved(find("t4")), Some(true));
+        assert_eq!(resolved(find("draft-22")), None, "a thread that's only a draft can't be resolved yet");
+        assert!(!is_open(find("draft-22")));
+    }
+
+    #[test]
+    fn review_shows_where_approve_does_and_on_my_own_with_comments_held() {
+        let (accounts, ..) = crate::fixtures::load();
+        let open = accounts.values().next().unwrap().open[0].clone();
+        assert!(reviews(&open, false, 0));
+        assert!(!reviews(&open, true, 0), "nothing to finish on my own");
+        assert!(reviews(&open, true, 2));
+        let merged = MergeRequest { state: "merged".into(), ..open };
+        assert!(!reviews(&merged, false, 2));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use rune::TextEdit;
 
 use crate::data::ask::proposals::Proposal;
 use crate::data::diff::DiffLine;
-use crate::data::models::{Discussion, FileDiff, MergeRequest};
+use crate::data::models::{Discussion, FileDiff, MergeRequest, Note, Verdict};
 use crate::data::prefs;
 use crate::data::store::{Loadable, Store};
 
@@ -29,6 +29,19 @@ pub enum DraftKey {
     Reply(String, String),
     /// A comment on a diff line: (merge request, file id, line index).
     Line(String, String, usize),
+    /// A pending comment of mine being edited: (merge request, note id).
+    Edit(String, i64),
+    /// The summary of the review I'm submitting.
+    Summary(String),
+}
+
+impl DraftKey {
+    /// The merge request it's written on.
+    pub fn item(&self) -> &str {
+        match self {
+            DraftKey::Comment(id) | DraftKey::Reply(id, _) | DraftKey::Line(id, ..) | DraftKey::Edit(id, _) | DraftKey::Summary(id) => id,
+        }
+    }
 }
 
 pub struct App {
@@ -54,6 +67,10 @@ pub struct App {
     pub line_comment: Option<DraftKey>,
     /// Threads with their reply box open: "merge request id|thread id".
     pub replying: HashSet<String>,
+    /// The pending comment open for editing, as a `DraftKey::Edit`.
+    pub editing: Option<DraftKey>,
+    /// The merge request whose review panel is open, under the bar's review button.
+    pub review_panel: Option<String>,
     /// What was posted and is waiting on its ticket, so the draft clears only when it lands.
     pub posting: HashMap<u64, DraftKey>,
     /// A copy button's "copied" check, and when it goes back.
@@ -156,6 +173,8 @@ impl Default for App {
             drafts: HashMap::new(),
             line_comment: None,
             replying: HashSet::new(),
+            editing: None,
+            review_panel: None,
             posting: HashMap::new(),
             copied: None,
             bench: None,
@@ -234,6 +253,15 @@ impl App {
 
     /// Posts the draft under `key`. The box keeps its text until the forge takes it.
     pub fn post(&mut self, key: DraftKey) {
+        self.send(key, false);
+    }
+
+    /// Adds the draft under `key` to my review instead, held until the review is submitted.
+    pub fn hold(&mut self, key: DraftKey) {
+        self.send(key, true);
+    }
+
+    fn send(&mut self, key: DraftKey, hold: bool) {
         let body = self.draft_text(&key);
         if body.is_empty() || self.store.busy.is_some() {
             return;
@@ -241,7 +269,7 @@ impl App {
         let ticket = match &key {
             DraftKey::Comment(id) => {
                 let Some(item) = self.store.item(id).cloned() else { return };
-                self.store.comment(&item, body)
+                if hold { self.store.hold(&item, body) } else { self.store.comment(&item, body) }
             }
             DraftKey::Reply(id, thread) => {
                 let Some(item) = self.store.item(id).cloned() else { return };
@@ -255,9 +283,41 @@ impl App {
                 let Some(file) = files.and_then(|f| f.iter().find(|d| &d.id() == file)).cloned() else { return };
                 let Some(line) = file.lines.get(*line).cloned() else { return };
                 let refs = self.store.diff_refs.get(id).cloned();
-                self.store.comment_on_line(&item, &file, &line, refs, body)
+                if hold { self.store.hold_on_line(&item, &file, &line, refs, body) } else { self.store.comment_on_line(&item, &file, &line, refs, body) }
             }
+            DraftKey::Edit(id, note) => {
+                let Some(item) = self.store.item(id).cloned() else { return };
+                let Some(note) = self.pending_note(id, *note) else { return };
+                self.store.edit_draft(&item, &note, body)
+            }
+            // Sent with its verdict, by `submit_review`.
+            DraftKey::Summary(_) => return,
         };
+        self.posting.insert(ticket, key);
+    }
+
+    /// One of my pending comments on `id`, as last loaded.
+    pub fn pending_note(&self, id: &str, note: i64) -> Option<Note> {
+        let threads = self.store.discussions.get(id).and_then(|l| l.value())?;
+        threads.iter().flat_map(|t| &t.notes).find(|n| n.pending && n.id == note).cloned()
+    }
+
+    /// Opens a pending comment for editing, its text in the box.
+    pub fn edit_pending(&mut self, id: &str, note: &Note) {
+        let key = DraftKey::Edit(id.to_string(), note.id);
+        self.drafts.insert(key.clone(), TextEdit::new(note.body.clone()));
+        self.editing = Some(key);
+    }
+
+    /// Submits my review of `id` with `verdict` and the summary written in the panel. The panel
+    /// closes once the forge takes it.
+    pub fn submit_review(&mut self, id: &str, verdict: Verdict) {
+        let Some(item) = self.store.item(id).cloned() else { return };
+        if self.store.busy.is_some() {
+            return;
+        }
+        let key = DraftKey::Summary(id.to_string());
+        let ticket = self.store.submit_review(&item, verdict, self.draft_text(&key));
         self.posting.insert(ticket, key);
     }
 
@@ -353,6 +413,16 @@ impl App {
                 }
                 DraftKey::Reply(id, thread) => {
                     self.replying.remove(&format!("{id}|{thread}"));
+                }
+                DraftKey::Edit(..) => {
+                    if self.editing.as_ref() == Some(&key) {
+                        self.editing = None;
+                    }
+                }
+                DraftKey::Summary(id) => {
+                    if self.review_panel.as_ref() == Some(id) {
+                        self.review_panel = None;
+                    }
                 }
                 DraftKey::Comment(_) => {}
             }

@@ -214,6 +214,24 @@ fn scene_thread_line(s: &mut App) {
     s.pending_jump = Some(Jump::Line("t1".into()));
 }
 
+/// The review panel open over the conversation, a summary written, two comments held.
+fn scene_submit_review(s: &mut App) {
+    scene_discussion(s);
+    let Some(id) = s.store.selected_id.clone() else { return };
+    let summary = "Nice work. Two small things inline; neither blocks.";
+    s.drafts.insert(app::DraftKey::Summary(id.clone()), rune::TextEdit::new(summary));
+    s.review_panel = Some(id);
+}
+
+/// A pending comment open for editing, in the conversation.
+fn scene_edit_draft(s: &mut App) {
+    scene_discussion(s);
+    let Some(id) = s.store.selected_id.clone() else { return };
+    if let Some(note) = s.pending_note(&id, 21) {
+        s.edit_pending(&id, &note);
+    }
+}
+
 fn scene_tabs(s: &mut App) {
     fixture(s);
     let ids: Vec<String> = s.store.visible_items().iter().take(2).map(|m| m.id.clone()).collect();
@@ -410,6 +428,8 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("discussion", scene_discussion),
     ("start-file", scene_start_file),
     ("thread-line", scene_thread_line),
+    ("submit-review", scene_submit_review),
+    ("edit-draft", scene_edit_draft),
     ("tabs", scene_tabs),
     ("line-comment", scene_line_comment),
     ("reviewed", scene_reviewed),
