@@ -618,8 +618,8 @@ fn threads_of(
             continue;
         }
         let verdict = match review.state.as_str() {
-            "APPROVED" => "**Approved**\n\n",
-            "CHANGES_REQUESTED" => "**Requested changes**\n\n",
+            "APPROVED" => APPROVED,
+            "CHANGES_REQUESTED" => CHANGES_REQUESTED,
             _ => "",
         };
         threads.push(Discussion {
@@ -909,4 +909,243 @@ pub fn submit_review(item: &MergeRequest, verdict: Verdict, body: &str) -> Resul
             cli().send(&format!("{}/reviews", base(item)), "POST", &review).map(drop)
         }
     }
+}
+
+// MARK: Files
+
+/// A file's bytes at a commit, as they are: the raw media type skips the JSON and its base64.
+/// The commit can be on a fork's branch: the base repository keeps each pull request's head.
+pub fn file_at(item: &MergeRequest, path: &str, sha: &str) -> Result<Vec<u8>, String> {
+    let path = super::forge::encode_path(path, true);
+    let args: Vec<String> =
+        ["-H", "Accept: application/vnd.github.raw", &format!("repos/{}/contents/{path}?ref={sha}", item.project_path)].into_iter().map(String::from).collect();
+    cli().api(&args, None)
+}
+
+// MARK: Managing my own
+
+const PEOPLE: &str = "query($owner: String!, $name: String!, $query: String) {
+      repository(owner: $owner, name: $name) {
+        assignableUsers(query: $query, first: 100) { nodes { login name avatarUrl } }
+      }
+    }";
+
+#[derive(Deserialize)]
+struct PeoplePayload {
+    repository: Option<PeopleRepo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PeopleRepo {
+    assignable_users: Nodes<Option<Actor>>,
+}
+
+/// The people who can be asked to review: the repository's assignable users, matching `query`.
+pub fn find_people(item: &MergeRequest, query: &str) -> Result<Vec<Person>, String> {
+    let (owner, name) = item.project_path.split_once('/').ok_or("GitHub didn't say whose repository this is.")?;
+    let query = query.trim();
+    let vars = [("owner", Some(owner.to_string())), ("name", Some(name.to_string())), ("query", (!query.is_empty()).then(|| query.to_string()))];
+    let payload: PeoplePayload = cli().graphql(PEOPLE, &vars, &[])?;
+    Ok(people_of(payload))
+}
+
+fn people_of(payload: PeoplePayload) -> Vec<Person> {
+    let users = payload.repository.map(|r| r.assignable_users.nodes).unwrap_or_default();
+    users.into_iter().flatten().map(|a| person(Some(&a))).collect()
+}
+
+/// A recorded `assignableUsers` answer (its `data`), for the self-tests.
+#[cfg(test)]
+pub fn people_from_json(json: &str) -> Result<Vec<Person>, String> {
+    let payload: PeoplePayload = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    Ok(people_of(payload))
+}
+
+fn requested_reviewers(item: &MergeRequest, method: &str, login: &str) -> Result<(), String> {
+    cli().send(&format!("{}/requested_reviewers", base(item)), method, &json!({ "reviewers": [login] })).map(drop)
+}
+
+pub fn add_reviewer(item: &MergeRequest, login: &str) -> Result<(), String> {
+    requested_reviewers(item, "POST", login)
+}
+
+/// Withdraws a pending request. Someone who already reviewed stays listed whatever is sent, so
+/// that's said rather than seeming to work.
+pub fn remove_reviewer(item: &MergeRequest, reviewer: &Reviewer) -> Result<(), String> {
+    if reviewer.state != ReviewState::Unreviewed {
+        return Err(format!("{} already reviewed it, and GitHub keeps everyone who reviewed on the list.", reviewer.person.name));
+    }
+    requested_reviewers(item, "DELETE", &reviewer.person.username)
+}
+
+/// Requests another review. Asking someone whose request is still pending changes nothing on
+/// GitHub, so that request is withdrawn and made again, which notifies them.
+pub fn ask_again(item: &MergeRequest, reviewer: &Reviewer) -> Result<(), String> {
+    if reviewer.state == ReviewState::Unreviewed {
+        requested_reviewers(item, "DELETE", &reviewer.person.username)?;
+    }
+    requested_reviewers(item, "POST", &reviewer.person.username)
+}
+
+/// Merges the base branch into the head. GitHub does it in the background; a short wait lets
+/// the refresh after it see the new commit more often than not.
+pub fn update_branch(item: &MergeRequest) -> Result<(), String> {
+    cli().send(&format!("{}/update-branch", base(item)), "PUT", &json!({}))?;
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    Ok(())
+}
+
+pub fn set_open(item: &MergeRequest, open: bool) -> Result<(), String> {
+    cli().send(&base(item), "PATCH", &json!({ "state": if open { "open" } else { "closed" } })).map(drop)
+}
+
+pub fn edit(item: &MergeRequest, title: Option<&str>, description: Option<&str>) -> Result<(), String> {
+    let mut body = json!({});
+    if let Some(title) = title {
+        body["title"] = json!(title);
+    }
+    if let Some(description) = description {
+        body["body"] = json!(description);
+    }
+    cli().send(&base(item), "PATCH", &body).map(drop)
+}
+
+// MARK: My comments
+//
+// A comment's kind is in its thread's id, as `threads_of` names them: `ic-` a conversation
+// comment, `rc-` a thread of comments on lines, `rv-` a review's summary. Each kind is its own
+// REST resource, addressed by the database id every note already carries.
+
+/// What `threads_of` puts in front of a review's summary to say its verdict.
+const APPROVED: &str = "**Approved**\n\n";
+const CHANGES_REQUESTED: &str = "**Requested changes**\n\n";
+
+/// Where a posted comment lives, and the method that edits it.
+pub fn note_endpoint(item: &MergeRequest, thread: &Discussion, note: &Note) -> Result<(String, &'static str), String> {
+    let repo = format!("repos/{}", item.project_path);
+    match thread.id.split('-').next().unwrap_or_default() {
+        "ic" => Ok((format!("{repo}/issues/comments/{}", note.id), "PATCH")),
+        "rc" => Ok((format!("{repo}/pulls/comments/{}", note.id), "PATCH")),
+        "rv" => Ok((format!("{}/reviews/{}", base(item), note.id), "PUT")),
+        _ => Err("GitHub didn't say what kind of comment this is. Refresh, then try again.".into()),
+    }
+}
+
+pub fn edit_note(item: &MergeRequest, thread: &Discussion, note: &Note, body: &str) -> Result<(), String> {
+    let (path, method) = note_endpoint(item, thread, note)?;
+    cli().send(&path, method, &json!({ "body": body })).map(drop)
+}
+
+pub fn delete_note(item: &MergeRequest, thread: &Discussion, note: &Note) -> Result<(), String> {
+    if !deletes_note(thread) {
+        return Err("GitHub can't delete a review's summary. Edit it instead.".into());
+    }
+    let (path, _) = note_endpoint(item, thread, note)?;
+    cli().api(&["-X".into(), "DELETE".into(), path], None).map(drop)
+}
+
+/// A review's summary stays: GitHub only lets it be edited.
+pub fn deletes_note(thread: &Discussion) -> bool {
+    !thread.id.starts_with("rv-")
+}
+
+/// The verdict in front of a review's summary, and the summary I wrote.
+pub fn written(thread: &Discussion, note: &Note) -> (String, String) {
+    if thread.id.starts_with("rv-") {
+        for verdict in [APPROVED, CHANGES_REQUESTED] {
+            if let Some(rest) = note.body.strip_prefix(verdict) {
+                return (verdict.to_string(), rest.to_string());
+            }
+        }
+    }
+    (String::new(), note.body.clone())
+}
+
+// MARK: Checks
+
+#[derive(Deserialize)]
+struct CheckRuns {
+    check_runs: Vec<CheckRun>,
+}
+
+#[derive(Deserialize)]
+struct CheckRun {
+    id: i64,
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    html_url: Option<String>,
+    details_url: Option<String>,
+    started_at: Option<Date>,
+    completed_at: Option<Date>,
+    app: Option<CheckApp>,
+}
+
+#[derive(Deserialize)]
+struct CheckApp {
+    slug: Option<String>,
+    name: Option<String>,
+}
+
+/// The check runs on the pull request's head commit, grouped by the app that ran them.
+pub fn jobs(item: &MergeRequest) -> Result<Vec<Job>, String> {
+    let head = refs(item)?.head_sha;
+    let mut runs = Vec::new();
+    for page in 1..=5 {
+        let path = format!("repos/{}/commits/{head}/check-runs?per_page=100&page={page}", item.project_path);
+        let batch: CheckRuns = cli().api_json(&path)?;
+        let n = batch.check_runs.len();
+        runs.extend(batch.check_runs);
+        if n < 100 {
+            break;
+        }
+    }
+    Ok(check_jobs(runs))
+}
+
+/// A recorded `check-runs` response, for the self-tests.
+#[cfg(test)]
+pub fn jobs_from_json(raw: &str) -> Result<Vec<Job>, String> {
+    let batch: CheckRuns = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    Ok(check_jobs(batch.check_runs))
+}
+
+/// Only GitHub Actions' runs can be re-run or read from here; another app's link out. An Actions
+/// check run's id is its job's id.
+fn check_jobs(mut runs: Vec<CheckRun>) -> Vec<Job> {
+    runs.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.id.cmp(&b.id)));
+    let jobs = runs
+        .into_iter()
+        .map(|r| {
+            let actions = r.app.as_ref().and_then(|a| a.slug.as_deref()) == Some("github-actions");
+            let status = PipelineStatus::from_check_run(&r.status, r.conclusion.as_deref());
+            Job {
+                id: r.id,
+                name: r.name,
+                stage: r.app.and_then(|a| a.name).unwrap_or_else(|| "Checks".into()),
+                retryable: actions && r.status == "completed",
+                has_log: actions && r.status == "completed",
+                status,
+                web_url: r.html_url.or(r.details_url).unwrap_or_default(),
+                started_at: r.started_at,
+                finished_at: r.completed_at,
+                allow_failure: false,
+                project: None,
+            }
+        })
+        .collect();
+    by_stage(jobs)
+}
+
+pub fn retry_job(item: &MergeRequest, job: &Job) -> Result<(), String> {
+    if !job.retryable {
+        return Err("Only GitHub Actions jobs can be re-run from here.".into());
+    }
+    cli().send(&format!("repos/{}/actions/jobs/{}/rerun", item.project_path, job.id), "POST", &json!({})).map(drop)
+}
+
+/// The job's log: GitHub answers with a redirect to the text, which `gh api` follows.
+pub fn job_log(item: &MergeRequest, job: &Job) -> Result<Vec<u8>, String> {
+    cli().api(&[format!("repos/{}/actions/jobs/{}/logs", item.project_path, job.id)], None)
 }

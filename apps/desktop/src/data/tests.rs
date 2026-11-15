@@ -250,6 +250,77 @@ mod mine {
     }
 
     #[test]
+    fn a_quiet_request_offers_to_ask_its_waiting_reviewers_again() {
+        use crate::data::mine::{ask_again, explain};
+        let mut asked = approved(request("1", "One", "a", "main"));
+        asked.reviewers.push(reviewer("Tomás Varga", ReviewState::Unreviewed));
+        let waiting = status(&asked, None);
+        assert!(ask_again(&asked, &waiting).is_empty(), "a request still fresh isn't nagged");
+
+        asked.updated_at = Utc::now() - Duration::days(4);
+        let quiet = status(&asked, None);
+        assert_eq!(quiet.standing, Standing::Quiet);
+        let who: Vec<String> = ask_again(&asked, &quiet).into_iter().map(|r| r.person.name).collect();
+        assert_eq!(who, ["Tomás Varga"], "only the one still to review, not Maya who approved");
+        assert!(explain(&asked, &quiet, None, None).contains("Ask again"));
+
+        asked.auto_merge = true;
+        assert!(ask_again(&asked, &status(&asked, None)).is_empty(), "auto-merge says it merges by itself; nothing to ask");
+    }
+
+    #[test]
+    fn a_branch_behind_its_target_is_offered_an_update() {
+        use crate::data::mine::{explain, needs_update};
+        let mut behind = approved(request("1", "One", "a", "main"));
+        assert!(!needs_update(&behind));
+        behind.merge_status = Some("need_rebase".into());
+        let st = status(&behind, None);
+        assert_eq!((st.standing, st.step.as_str()), (Standing::NeedsYou, "Needs a rebase"));
+        assert!(needs_update(&behind));
+        assert!(explain(&behind, &st, None, None).contains("Rebase it"));
+        behind.forge = Forge::Github;
+        assert!(explain(&behind, &st, None, None).contains("Update the branch"), "GitHub's word for it");
+        behind.merge_status = Some("conflict".into());
+        assert!(!needs_update(&behind), "a conflict needs a person, not a button");
+        behind.merge_status = Some("need_rebase".into());
+        behind.state = "closed".into();
+        assert!(!needs_update(&behind));
+    }
+
+    #[test]
+    fn github_keeps_reviewers_who_reviewed() {
+        use crate::data::mine::can_remove;
+        let mut item = request("1", "One", "a", "main");
+        let (asked, done) = (reviewer("Sam", ReviewState::Unreviewed), reviewer("Maya", ReviewState::Approved));
+        assert!(can_remove(&item, &asked) && can_remove(&item, &done));
+        item.forge = Forge::Github;
+        assert!(can_remove(&item, &asked));
+        assert!(!can_remove(&item, &done));
+    }
+
+    #[test]
+    fn editing_a_title_keeps_a_gitlab_drafts_prefix() {
+        use crate::data::mine::{edited_title, title_parts};
+        let mut item = request("1", "Draft: Cache tenant settings", "a", "main");
+        item.draft = true;
+        assert_eq!(title_parts(&item), ("Draft: ", "Cache tenant settings"));
+        assert_eq!(edited_title(&item, "  Cache settings per request "), "Draft: Cache settings per request");
+        for (title, prefix) in [("[Draft] x", "[Draft] "), ("(draft)x", "(draft)"), ("WIP: x", "WIP: "), ("Draft - x", "Draft - ")] {
+            item.title = title.into();
+            assert_eq!(title_parts(&item).0, prefix, "{title}");
+        }
+        // Not a draft: the title is all there is, and typing a prefix is a choice made in plain sight.
+        item.draft = false;
+        item.title = "Draft: notes on drafts".into();
+        assert_eq!(title_parts(&item), ("", "Draft: notes on drafts"));
+        // GitHub keeps the flag apart from the title.
+        item.draft = true;
+        item.forge = Forge::Github;
+        assert_eq!(edited_title(&item, "Draft: x"), "Draft: x");
+        assert_eq!(title_parts(&item).0, "");
+    }
+
+    #[test]
     fn whose_move_it_is() {
         let plain = request("1", "One", "a", "main");
         assert_eq!(status(&plain, None).step, "No reviewers yet");
@@ -929,6 +1000,394 @@ fn github_pending_review_comments_land_in_place_and_threads_keep_their_node() {
 }
 
 #[test]
+fn gitlab_members_become_people_who_can_review() {
+    let raw = br#"[
+        {"id": 7, "username": "maya.lind", "name": "Maya Lindqvist", "state": "active", "avatar_url": "https://gitlab.example.com/a/7.png", "access_level": 30},
+        {"id": 9, "username": "gone", "name": "Left Long Ago", "state": "blocked", "avatar_url": null},
+        {"id": 7, "username": "Maya.Lind", "name": "Maya Lindqvist", "state": "active", "avatar_url": null},
+        {"id": 11, "username": "sam", "name": "Samuel Achterberg"}
+    ]"#;
+    let people = super::gitlab::people_from_json(raw).expect("members decode");
+    let names: Vec<&str> = people.iter().map(|p| p.username.as_str()).collect();
+    assert_eq!(names, ["maya.lind", "sam"], "blocked members can't review, and one inherited twice shows once");
+    assert_eq!(people[0].avatar_url.as_deref(), Some("https://gitlab.example.com/a/7.png"));
+}
+
+#[test]
+fn github_assignable_users_become_people_who_can_review() {
+    let json = r#"{"repository": {"assignableUsers": {"nodes": [
+        {"login": "maya", "name": "Maya Lindqvist", "avatarUrl": "https://avatars.example/maya"},
+        {"login": "octo", "name": null, "avatarUrl": null},
+        null
+    ]}}}"#;
+    let people = super::github::people_from_json(json).expect("users decode");
+    assert_eq!(people.len(), 2, "an unreadable user is skipped");
+    assert_eq!((people[0].username.as_str(), people[0].name.as_str()), ("maya", "Maya Lindqvist"));
+    assert_eq!(people[1].name, "octo", "no name falls back to the login");
+    assert!(super::github::people_from_json(r#"{"repository": null}"#).unwrap().is_empty());
+}
+
+#[test]
+fn forges_name_bringing_a_branch_up_to_date_their_own_way() {
+    assert_eq!(Forge::Gitlab.update_branch_title(), "Rebase");
+    assert_eq!(Forge::Github.update_branch_title(), "Update Branch");
+    assert!(Forge::Gitlab.removes_reviewed() && !Forge::Github.removes_reviewed());
+}
+
+#[test]
 fn verdicts_name_githubs_events() {
     assert_eq!(Verdict::ALL.map(Verdict::event), ["COMMENT", "REQUEST_CHANGES", "APPROVE"]);
+}
+
+mod context {
+    use crate::data::diff::{self, DiffLine, Gap, Reveal, Shown};
+
+    /// A diff whose first hunk starts at line 1, then one further down.
+    const FROM_THE_TOP: &str = "@@ -1,3 +1,4 @@ fn main() {\n a\n+b\n c\n d\n@@ -10,2 +11,2 @@ fn other() {\n x\n-y\n+z\n";
+
+    #[test]
+    fn a_hunk_at_the_first_line_leaves_no_gap_above_it() {
+        let lines = DiffLine::parse(FROM_THE_TOP);
+        let gaps = diff::gaps(&lines, Some(20));
+        // Lines 5–10 of the new side between the hunks, then 13–20 under the last one.
+        assert_eq!(gaps, [Gap { at: 5, new_start: 5, old_start: 4, len: Some(6) }, Gap { at: lines.len(), new_start: 13, old_start: 12, len: Some(8) }]);
+        // The offset holds across the gap: the hunk under it starts at old 10, new 11.
+        assert_eq!(gaps[0].old_number(11), 10);
+        assert_eq!(gaps[1].old_number(20), 19);
+        assert!(!gaps[0].is_first() && gaps[1].is_last(lines.len()));
+    }
+
+    #[test]
+    fn the_gap_below_the_last_hunk_waits_for_the_file() {
+        let lines = DiffLine::parse(FROM_THE_TOP);
+        let gaps = diff::gaps(&lines, None);
+        assert_eq!(gaps.last(), Some(&Gap { at: lines.len(), new_start: 13, old_start: 12, len: None }));
+        // A file that ends with its last hunk has nothing below it.
+        assert_eq!(diff::gaps(&lines, Some(12)).len(), 1);
+    }
+
+    #[test]
+    fn a_gap_above_the_first_hunk_and_one_after_a_deletion() {
+        // Two lines removed after line 6, then one changed further down.
+        let lines = DiffLine::parse("@@ -5,4 +5,2 @@\n e\n-f\n-g\n h\n@@ -30 +28 @@\n-old\n+new\n");
+        let gaps = diff::gaps(&lines, Some(28));
+        assert_eq!(gaps[0], Gap { at: 0, new_start: 1, old_start: 1, len: Some(4) });
+        assert!(gaps[0].is_first());
+        assert_eq!(gaps[1], Gap { at: 5, new_start: 7, old_start: 9, len: Some(21) });
+        assert_eq!(gaps[1].old_number(27), 29, "the line above the second hunk sits two lower on the old side");
+        assert_eq!(gaps.len(), 2, "the file ends at the second hunk");
+        // A hunk with no new lines sits after the one its header names.
+        let removed = DiffLine::parse("@@ -3,2 +2,0 @@\n-a\n-b\n");
+        assert_eq!(
+            diff::gaps(&removed, Some(10)),
+            [Gap { at: 0, new_start: 1, old_start: 1, len: Some(2) }, Gap { at: removed.len(), new_start: 3, old_start: 5, len: Some(8) }]
+        );
+    }
+
+    #[test]
+    fn hunk_headers_without_counts_have_one_line() {
+        assert_eq!(diff::hunk_range("@@ -7 +7,2 @@ impl"), Some((7, 1, 7, 2)));
+        assert_eq!(diff::hunk_range("@@ -0,0 +1,6 @@"), Some((0, 0, 1, 6)));
+        assert_eq!(diff::hunk_range("not a hunk"), None);
+    }
+
+    #[test]
+    fn a_gap_shows_from_both_ends_until_they_meet() {
+        let gap = Gap { at: 9, new_start: 100, old_start: 90, len: Some(50) };
+        let shown = Shown::default().reveal(Reveal::Down).reveal(Reveal::Up);
+        assert_eq!(shown.split(&gap), (100..120, Some(10), 130..150));
+        let shown = shown.reveal(Reveal::Up);
+        assert_eq!(shown.split(&gap), (100..120, Some(0), 120..150), "the ends meet and stop there");
+        assert_eq!(Shown::default().reveal(Reveal::All).split(&gap), (100..150, Some(0), 150..150));
+        let unknown = Gap { len: None, ..gap };
+        assert_eq!(Shown::default().reveal(Reveal::Down).split(&unknown).1, None);
+    }
+
+    #[test]
+    fn a_files_text_splits_into_its_lines() {
+        assert_eq!(diff::text_lines("a\r\nb\n"), ["a", "b"]);
+        assert_eq!(diff::text_lines("a\n\nb"), ["a", "", "b"]);
+        assert!(diff::text_lines("").is_empty());
+    }
+}
+
+mod ahead {
+    use chrono::{Duration, Utc};
+
+    use crate::data::forge::Forge;
+    use crate::data::prefs;
+    use crate::data::store::{Loadable, QueueMode, Store, stale_ahead};
+
+    fn store() -> Store {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        store.forge = Forge::Gitlab;
+        store.mode = QueueMode::ToReview;
+        store
+    }
+
+    fn ids(store: &Store) -> Vec<String> {
+        store.ahead().into_iter().map(|m| m.id).collect()
+    }
+
+    #[test]
+    fn the_next_request_loads_ahead_then_the_one_before() {
+        let mut store = store();
+        let list: Vec<String> = store.visible_items().into_iter().map(|m| m.id).collect();
+        assert!(list.len() >= 3);
+        // The first is loaded (the fixture has its changes); nothing comes before it.
+        store.select(Some(list[0].clone()));
+        assert_eq!(ids(&store), [list[1].clone()]);
+
+        // From the second: the third, and not the first, which is in already.
+        store.select(Some(list[1].clone()));
+        assert!(ids(&store).is_empty(), "nothing loads ahead until the selection's own details are in");
+        store.diffs.insert(list[1].clone(), Loadable::Loaded(Default::default()));
+        store.discussions.insert(list[1].clone(), Loadable::Failed("offline".into()));
+        assert_eq!(ids(&store), [list[2].clone()]);
+        store.diffs.remove(&list[0]);
+        assert_eq!(ids(&store), [list[2].clone()], "its threads are in, so it isn't asked for again");
+        store.discussions.remove(&list[0]);
+        assert_eq!(ids(&store), [list[2].clone(), list[0].clone()], "the next first, then the one before");
+
+        // One that's loading isn't asked for again, and two on their way are the most.
+        store.diffs.insert(list[2].clone(), Loadable::Loading);
+        assert_eq!(ids(&store), [list[0].clone()]);
+        for id in ["elsewhere-1", "elsewhere-2"] {
+            store.fetched_ahead.insert(id.into(), Utc::now());
+            store.diffs.insert(id.into(), Loadable::Loading);
+        }
+        assert!(ids(&store).is_empty());
+    }
+
+    #[test]
+    fn with_nothing_selected_the_first_loads_ahead() {
+        let mut store = store();
+        let first = store.visible_items()[0].id.clone();
+        store.selected_id = None;
+        assert!(ids(&store).is_empty(), "the first is loaded already");
+        store.diffs.remove(&first);
+        store.discussions.remove(&first);
+        assert_eq!(ids(&store), [first]);
+    }
+
+    #[test]
+    fn threads_loaded_ahead_go_stale_after_two_minutes() {
+        let now = Utc::now();
+        assert!(!stale_ahead(now - Duration::seconds(90), now));
+        assert!(stale_ahead(now - Duration::minutes(3), now));
+    }
+}
+
+#[test]
+fn github_addresses_each_kind_of_comment_by_its_thread() {
+    let reviews = r#"[{"id":300,"body":"Ship it.","user":{"login":"me"},"state":"APPROVED","submitted_at":"2026-01-03T00:00:00Z"}]"#;
+    let issue = r#"[{"id":40,"body":"Thanks!","user":{"login":"me"},"created_at":"2026-01-01T00:00:00Z"}]"#;
+    let threads = super::github::discussions_from_json(issue, GH_LINES, reviews, Default::default(), None).expect("comments decode");
+    let (accounts, ..) = crate::fixtures::load();
+    let item = accounts[&Forge::Github].open[0].clone();
+    let repo = format!("repos/{}", item.project_path);
+    let find = |id: &str| threads.iter().find(|t| t.id == id).unwrap();
+    let endpoint = |thread: &Discussion| super::github::note_endpoint(&item, thread, &thread.notes[0]).unwrap();
+
+    assert_eq!(endpoint(find("ic-40")), (format!("{repo}/issues/comments/40"), "PATCH"));
+    assert_eq!(endpoint(find("rc-10")), (format!("{repo}/pulls/comments/10"), "PATCH"));
+    assert_eq!(endpoint(find("rv-300")), (format!("{repo}/pulls/{}/reviews/300", item.iid), "PUT"));
+
+    let summary = find("rv-300");
+    assert!(!Forge::Github.deletes_note(summary), "a review's summary can only be edited");
+    assert!(Forge::Github.deletes_note(find("ic-40")) && Forge::Github.deletes_note(find("rc-10")));
+    let (verdict, written) = Forge::Github.written(summary, &summary.notes[0]);
+    assert_eq!((verdict.as_str(), written.as_str()), ("**Approved**\n\n", "Ship it."), "the editor holds what I wrote, not the verdict");
+}
+
+mod my_comments {
+    use std::rc::Rc;
+
+    use crate::data::models::{Discussion, MergeRequest};
+    use crate::data::prefs;
+    use crate::data::store::{Loadable, Store};
+
+    fn store() -> (Store, MergeRequest) {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        let item = store.visible_items()[0].clone();
+        (store, item)
+    }
+
+    fn threads(store: &Store, id: &str) -> Vec<Discussion> {
+        store.discussions[id].value().unwrap().as_ref().clone()
+    }
+
+    fn ids(store: &Store, id: &str) -> Vec<String> {
+        threads(store, id).into_iter().map(|t| t.id).collect()
+    }
+
+    fn body(store: &Store, id: &str, thread: &str, note: i64) -> Option<String> {
+        threads(store, id).into_iter().find(|t| t.id == thread)?.notes.into_iter().find(|n| n.id == note).map(|n| n.body)
+    }
+
+    /// Lands the forge's answer for `ticket`, which comes back from another thread.
+    fn land(store: &mut Store, ticket: u64) -> bool {
+        for _ in 0..400 {
+            store.poll(0.0);
+            if let Some(ok) = store.finished.remove(&ticket) {
+                return ok;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("no answer for ticket {ticket}");
+    }
+
+    #[test]
+    fn only_my_posted_comments_are_mine_to_change() {
+        let (store, item) = store();
+        let t1 = threads(&store, &item.id).into_iter().find(|t| t.id == "t1").unwrap();
+        let mine: Vec<i64> = t1.notes.iter().filter(|n| store.wrote(&item, n)).map(|n| n.id).collect();
+        assert_eq!(mine, [7], "not someone else's, and not a pending draft");
+    }
+
+    #[test]
+    fn an_edit_shows_at_once_and_goes_back_if_the_forge_refuses() {
+        let (mut store, item) = store();
+        let was = body(&store, &item.id, "t1", 7).unwrap();
+        let ticket = store.change_note_answered(&item, "t1", 7, Some("Fixed a typo.".into()), Err("no".into()));
+        assert_eq!(body(&store, &item.id, "t1", 7).as_deref(), Some("Fixed a typo."), "shown before the forge answers");
+        assert!(!land(&mut store, ticket));
+        assert_eq!(body(&store, &item.id, "t1", 7), Some(was));
+        assert!(store.toast.as_deref().is_some_and(|t| t.starts_with("Couldn’t save")));
+
+        let ticket = store.change_note_answered(&item, "t1", 7, Some("Fixed a typo.".into()), Ok(()));
+        assert!(land(&mut store, ticket));
+        assert_eq!(body(&store, &item.id, "t1", 7).as_deref(), Some("Fixed a typo."));
+    }
+
+    #[test]
+    fn deleting_the_only_comment_takes_its_thread_and_a_refusal_puts_it_back() {
+        let (mut store, item) = store();
+        let mut all = threads(&store, &item.id);
+        let mine = all[0].notes.iter().find(|n| n.id == 7).unwrap().clone();
+        // A comment of mine on its own.
+        all.insert(1, Discussion { id: "t9".into(), individual_note: true, notes: vec![crate::data::models::Note { id: 8, ..mine }], node_id: None });
+        store.discussions.insert(item.id.clone(), Loadable::Loaded(Rc::new(all)));
+        let before = ids(&store, &item.id);
+
+        let ticket = store.change_note_answered(&item, "t9", 8, None, Err("no".into()));
+        assert!(!ids(&store, &item.id).contains(&"t9".to_string()), "its thread goes with it");
+        assert!(!land(&mut store, ticket));
+        assert_eq!(ids(&store, &item.id), before, "back in its place");
+
+        // In a thread with others, only the comment goes.
+        let count = threads(&store, &item.id)[0].notes.len();
+        let ticket = store.change_note_answered(&item, "t1", 7, None, Ok(()));
+        assert!(land(&mut store, ticket));
+        let t1 = threads(&store, &item.id).into_iter().find(|t| t.id == "t1").unwrap();
+        assert!(!t1.notes.iter().any(|n| n.id == 7));
+        assert_eq!(t1.notes.len(), count - 1);
+    }
+}
+
+/// GitLab lists a pipeline's jobs newest first.
+const GITLAB_JOBS: &str = r#"[
+  {"id":307,"name":"deploy:staging","stage":"deploy","status":"manual","web_url":"https://gitlab.example.com/acme/web/-/jobs/307",
+   "started_at":null,"finished_at":null,"allow_failure":false},
+  {"id":305,"name":"test:e2e","stage":"test","status":"failed","web_url":"https://gitlab.example.com/acme/web/-/jobs/305",
+   "started_at":"2026-01-01T10:02:00Z","finished_at":"2026-01-01T10:03:10Z","allow_failure":true},
+  {"id":304,"name":"test:unit","stage":"test","status":"running","web_url":"https://gitlab.example.com/acme/web/-/jobs/304",
+   "started_at":"2026-01-01T10:02:00Z","finished_at":null,"allow_failure":false},
+  {"id":306,"name":"compile","stage":"build","status":"failed","web_url":"https://gitlab.example.com/acme/web/-/jobs/306",
+   "started_at":"2026-01-01T10:05:00Z","finished_at":"2026-01-01T10:09:47Z","allow_failure":false},
+  {"id":301,"name":"lint","stage":"build","status":"success","web_url":"https://gitlab.example.com/acme/web/-/jobs/301",
+   "started_at":"2026-01-01T10:00:00Z","finished_at":"2026-01-01T10:00:41Z","allow_failure":false},
+  {"id":303,"name":"test:docs","stage":"test","status":"waiting_for_resource","web_url":"https://gitlab.example.com/acme/web/-/jobs/303",
+   "started_at":null,"finished_at":null}
+]"#;
+
+#[test]
+fn gitlab_jobs_map_by_stage_in_running_order() {
+    let jobs = super::gitlab::jobs_from_json(GITLAB_JOBS).expect("jobs decode");
+    let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+    // Stages as they first come up (oldest job first), a retried build job staying in its stage.
+    assert_eq!(names, ["lint", "compile", "test:docs", "test:unit", "test:e2e", "deploy:staging"]);
+    let job = |name: &str| jobs.iter().find(|j| j.name == name).unwrap();
+    assert_eq!(job("compile").status, PipelineStatus::Failed);
+    assert!(job("compile").failed_hard() && job("compile").offers_retry());
+    assert_eq!(job("compile").seconds(Utc::now()), Some(287));
+    assert!(!job("test:e2e").failed_hard(), "allowed to fail");
+    assert_eq!(job("test:unit").status, PipelineStatus::Running);
+    assert!(job("test:unit").active() && !job("test:unit").offers_retry());
+    assert_eq!(job("test:docs").status, PipelineStatus::Pending);
+    assert!(!job("test:docs").has_log);
+    assert_eq!(job("deploy:staging").status, PipelineStatus::Manual);
+    assert!(job("deploy:staging").offers_run() && !job("deploy:staging").has_log);
+    assert_eq!(job("lint").web_url, "https://gitlab.example.com/acme/web/-/jobs/301");
+}
+
+const CHECK_RUNS: &str = r#"{"total_count":4,"check_runs":[
+  {"id":9002,"name":"test (ubuntu)","status":"completed","conclusion":"failure",
+   "html_url":"https://github.com/acme/web/actions/runs/1/job/9002","details_url":"https://github.com/acme/web/actions/runs/1/job/9002",
+   "started_at":"2026-01-01T10:01:00Z","completed_at":"2026-01-01T10:04:30Z","app":{"slug":"github-actions","name":"GitHub Actions"}},
+  {"id":9001,"name":"build","status":"completed","conclusion":"success","html_url":"https://github.com/acme/web/actions/runs/1/job/9001",
+   "started_at":"2026-01-01T10:00:00Z","completed_at":"2026-01-01T10:00:50Z","app":{"slug":"github-actions","name":"GitHub Actions"}},
+  {"id":9003,"name":"lint","status":"in_progress","conclusion":null,"html_url":"https://github.com/acme/web/actions/runs/1/job/9003",
+   "started_at":"2026-01-01T10:02:00Z","completed_at":null,"app":{"slug":"github-actions","name":"GitHub Actions"}},
+  {"id":77,"name":"coverage","status":"completed","conclusion":"timed_out","html_url":null,"details_url":"https://ci.example.com/build/77",
+   "started_at":"2026-01-01T10:00:30Z","completed_at":"2026-01-01T10:30:30Z","app":{"slug":"example-ci","name":"Example CI"}}
+]}"#;
+
+#[test]
+fn github_check_runs_map_onto_jobs() {
+    let jobs = super::github::jobs_from_json(CHECK_RUNS).expect("check runs decode");
+    let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(names, ["build", "test (ubuntu)", "lint", "coverage"], "grouped by app, in the order they started");
+    let job = |name: &str| jobs.iter().find(|j| j.name == name).unwrap();
+    let test = job("test (ubuntu)");
+    assert_eq!((test.id, test.status, test.stage.as_str()), (9002, PipelineStatus::Failed, "GitHub Actions"));
+    assert!(test.offers_retry() && test.has_log, "an Actions job re-runs and has its log here");
+    assert_eq!(job("lint").status, PipelineStatus::Running);
+    assert!(!job("lint").retryable, "not until it's done");
+    let other = job("coverage");
+    assert_eq!(other.status, PipelineStatus::Failed, "timed out reads as failed");
+    assert!(!other.retryable && !other.has_log, "another app's check only links out");
+    assert_eq!(other.web_url, "https://ci.example.com/build/77");
+    assert_eq!(PipelineStatus::from_check_run("completed", Some("cancelled")), PipelineStatus::Canceled);
+    assert_eq!(PipelineStatus::from_check_run("completed", Some("neutral")), PipelineStatus::Skipped);
+    assert_eq!(PipelineStatus::from_check_run("queued", None), PipelineStatus::Pending);
+}
+
+#[test]
+fn ansi_codes_come_out_of_logs() {
+    assert_eq!(strip_ansi("\u{1b}[1m\u{1b}[32mok\u{1b}[0m done"), "ok done");
+    assert_eq!(strip_ansi("\u{1b}]0;title\u{7}after"), "after");
+    assert_eq!(strip_ansi("\u{1b}]8;;https://x\u{1b}\\link\u{1b}]8;;\u{1b}\\"), "link");
+    assert_eq!(strip_ansi("plain → text"), "plain → text");
+}
+
+#[test]
+fn a_log_keeps_its_last_lines_as_a_terminal_shows_them() {
+    let gitlab = "\u{1b}[0Ksection_start:1:step_script\r\u{1b}[0K\u{1b}[36;1mRunning the script\u{1b}[0;m\r\n\
+                  50%\r100%\r\n\
+                  \u{1b}[31mFAILED\u{1b}[0m\n\
+                  \u{1b}[0Ksection_end:2:step_script\r\u{1b}[0K\n\n\n";
+    let log = JobLog::tail(gitlab.as_bytes(), 10);
+    assert_eq!(log.text, "Running the script\n100%\nFAILED");
+    assert!(!log.cut);
+    let github = "2026-01-01T10:00:00.1234567Z ##[group]Run cargo test\n2026-01-01T10:00:01.0000000Z test a ... ok\nno stamp here";
+    assert_eq!(JobLog::tail(github.as_bytes(), 10).text, "##[group]Run cargo test\ntest a ... ok\nno stamp here");
+    let long: String = (1..=500).map(|n| format!("line {n}\n")).collect();
+    let tail = JobLog::tail(long.as_bytes(), LOG_LINES);
+    assert!(tail.cut);
+    assert_eq!(tail.text.lines().count(), LOG_LINES);
+    assert!(tail.text.starts_with("line 301\n") && tail.text.ends_with("line 500"));
+}
+
+#[test]
+fn durations_read_short() {
+    assert_eq!(duration_label(38), "38s");
+    assert_eq!(duration_label(252), "4m 12s");
+    assert_eq!(duration_label(3900), "1h 5m");
 }

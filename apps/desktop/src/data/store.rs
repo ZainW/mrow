@@ -8,7 +8,7 @@ use std::rc::Rc;
 use chrono::{Local, Utc};
 
 use super::bg::Bg;
-use super::diff::DiffLine;
+use super::diff::{self, DiffLine, Gap, Reveal, Shown};
 use super::forge::{Forge, QueueResult};
 use super::inbox::{self, Event, Notice};
 use super::mine::{self, Stack, Standing, Status, WalkStep};
@@ -177,6 +177,54 @@ pub enum Msg {
         reload: Option<MergeRequest>,
         ticket: Option<u64>,
     },
+    /// The jobs of a merge request's pipeline (or its checks).
+    Jobs {
+        id: String,
+        request: u64,
+        result: Result<Vec<Job>, String>,
+    },
+    /// A job was retried (or run), already shown as pending; `was` is how it stood before.
+    Retried {
+        id: String,
+        job: i64,
+        name: String,
+        was: PipelineStatus,
+        result: Result<(), String>,
+    },
+    JobLog {
+        key: String,
+        request: u64,
+        result: Result<JobLog, String>,
+    },
+    /// A comment of mine was edited or deleted, already shown so; `was` is its thread before,
+    /// `at` its place in the list, to put back if the forge said no.
+    NoteChanged {
+        id: String,
+        was: Discussion,
+        at: usize,
+        deleted: bool,
+        ticket: u64,
+        result: Result<(), String>,
+    },
+    /// People who can review in a project, for the reviewer picker. `key` is `people_key`'s.
+    People {
+        key: (String, String),
+        result: Result<Vec<Person>, String>,
+    },
+    /// A change to one of my requests, already shown; `was` is the request before it, put
+    /// back if the forge said no.
+    Edited {
+        was: MergeRequest,
+        result: Result<(), String>,
+        message: String,
+        ticket: u64,
+    },
+    /// A file's text at a commit, by `text_key`, for the lines its diff leaves out.
+    FileText {
+        key: String,
+        request: u64,
+        result: Result<String, String>,
+    },
 }
 
 pub struct Store {
@@ -231,6 +279,28 @@ pub struct Store {
     pub bg: Bg<Msg>,
     /// Asked to show a toast at the next `poll`, with the clock.
     pending_toast: Option<String>,
+    /// The pipeline's jobs (or the checks) of the requests looked at, loaded when their overview shows.
+    pub jobs: HashMap<String, Loadable<Rc<Vec<Job>>>>,
+    /// Jobs' logs, by `log_key`.
+    pub job_logs: HashMap<String, Loadable<Rc<JobLog>>>,
+    /// The logs open under their jobs, by `log_key`.
+    pub open_logs: HashSet<String>,
+    /// The request whose running jobs are watched, and when they're next asked for.
+    jobs_poll: Option<(String, f64)>,
+    /// Job and log loads on their way, by request key and ticket: a poll waits for the last one
+    /// to land rather than starting another that would make it stale.
+    polling: HashMap<String, u64>,
+    /// People who can review, by project and search, for the reviewer picker.
+    pub people: HashMap<(String, String), Loadable<Rc<Vec<Person>>>>,
+    /// Files' texts at a commit, by `text_key`, as lines: what a diff's gaps show.
+    pub file_texts: HashMap<String, Loadable<Rc<Vec<String>>>>,
+    /// How much of each gap shows, by "merge request id|file id|digest", then the gap's first line.
+    pub shown: HashMap<String, BTreeMap<i64, Shown>>,
+    /// Counts changes to `file_texts` and `shown`, so a view knows when to list its rows again.
+    pub context_version: u64,
+    /// The requests whose changes and threads were loaded before they were opened, and when:
+    /// their threads load again on the visit if they've aged since.
+    pub fetched_ahead: HashMap<String, Date>,
 }
 
 impl Default for Store {
@@ -267,6 +337,16 @@ impl Default for Store {
             next_ticket: 0,
             bg: Bg::default(),
             pending_toast: None,
+            jobs: HashMap::new(),
+            job_logs: HashMap::new(),
+            open_logs: HashSet::new(),
+            jobs_poll: None,
+            polling: HashMap::new(),
+            people: HashMap::new(),
+            file_texts: HashMap::new(),
+            shown: HashMap::new(),
+            context_version: 0,
+            fetched_ahead: HashMap::new(),
         }
     }
 }
@@ -609,7 +689,11 @@ impl Store {
         if item.kind() != self.forge {
             self.set_forge(item.kind());
         }
+        if self.fetched_ahead.remove(&item.id).is_some_and(|at| stale_ahead(at, Utc::now())) {
+            self.load_discussions(&item);
+        }
         self.load_details_if_needed(&item);
+        self.fetch_ahead();
     }
 
     /// Keeps when a merge request was last seen, before showing it marks it seen again: what
@@ -865,8 +949,16 @@ impl Store {
         }
         // Changes and threads may have moved on; fetch them again when next shown.
         let selected = self.selected_id.clone();
+        // A load ahead still on its way would land data from before this refresh: drop it.
+        let ahead: Vec<String> = self.fetched_ahead.drain().map(|(id, _)| id).filter(|id| Some(id) != selected.as_ref()).collect();
+        for id in ahead {
+            self.start_request(format!("diffs {id}"));
+            self.start_request(format!("threads {id}"));
+        }
         self.diffs.retain(|k, _| Some(k) == selected.as_ref());
         self.discussions.retain(|k, _| Some(k) == selected.as_ref());
+        self.forget_jobs(selected.as_deref());
+        self.forget_file_texts(selected.as_deref());
         if let Some(item) = self.selected().cloned() {
             // What's on screen has been seen, including the update my own approval made.
             self.mark_seen(&item);
@@ -1144,6 +1236,102 @@ impl Store {
         self.perform("Submitting your review…", done, true, Some(item.clone()), move || it.kind().submit_review(&it, verdict, &body))
     }
 
+    // MARK: My comments
+
+    /// Whether I wrote a posted, non-system note, so I can edit or delete it.
+    pub fn wrote(&self, item: &MergeRequest, note: &Note) -> bool {
+        let me = self.accounts.get(&item.forge).and_then(|a| a.me.as_ref());
+        !note.system && !note.pending && me.is_some_and(|me| me.username == note.author.username)
+    }
+
+    /// Replaces the text of a comment of mine with `body` (what I wrote, without the verdict a
+    /// review's summary shows). It shows so at once, and goes back if the forge refuses. The
+    /// ticket's result lands in `finished`.
+    pub fn edit_note(&mut self, item: &MergeRequest, thread: &str, note: i64, body: String) -> u64 {
+        let it = item.clone();
+        let edit = body.clone();
+        self.change_note(item, thread, note, Some(body), move |th, n| it.kind().edit_note(&it, th, n, &edit))
+    }
+
+    /// Deletes a comment of mine, and its thread with it when it was the only one.
+    pub fn delete_note(&mut self, item: &MergeRequest, thread: &str, note: i64) -> u64 {
+        let it = item.clone();
+        self.change_note(item, thread, note, None, move |th, n| it.kind().delete_note(&it, th, n))
+    }
+
+    /// Shows the edit (`Some`) or deletion (`None`) at once and runs `work` on the thread and
+    /// note as they stood. Snapshots and benchmarks show it without asking the forge.
+    fn change_note(
+        &mut self,
+        item: &MergeRequest,
+        thread: &str,
+        note: i64,
+        body: Option<String>,
+        work: impl FnOnce(&Discussion, &Note) -> Result<(), String> + Send + 'static,
+    ) -> u64 {
+        let ticket = self.ticket();
+        let deleted = body.is_none();
+        let Some((was, at, before)) = self.show_note_change(item, thread, note, body) else {
+            self.finished.insert(ticket, false);
+            return ticket;
+        };
+        if self.offline {
+            self.finished.insert(ticket, true);
+            return ticket;
+        }
+        let id = item.id.clone();
+        self.bg.spawn(move || {
+            let result = work(&was, &before);
+            Msg::NoteChanged { id, was, at, deleted, ticket, result }
+        });
+        ticket
+    }
+
+    /// Puts an edit or deletion into the loaded threads: the thread as it was, its place, and
+    /// the note as it was. None when the note isn't there.
+    fn show_note_change(&mut self, item: &MergeRequest, thread: &str, note: i64, body: Option<String>) -> Option<(Discussion, usize, Note)> {
+        let Some(Loadable::Loaded(threads)) = self.discussions.get(&item.id) else { return None };
+        let at = threads.iter().position(|t| t.id == thread)?;
+        let was = threads[at].clone();
+        let index = was.notes.iter().position(|n| n.id == note && !n.pending)?;
+        let before = was.notes[index].clone();
+        let mut threads = threads.as_ref().clone();
+        match body {
+            Some(body) => {
+                let (verdict, _) = item.kind().written(&was, &before);
+                threads[at].notes[index].body = format!("{verdict}{body}");
+            }
+            None => {
+                threads[at].notes.remove(index);
+                if threads[at].notes.iter().all(|n| n.system) {
+                    threads.remove(at);
+                }
+            }
+        }
+        self.discussions.insert(item.id.clone(), Loadable::Loaded(Rc::new(threads)));
+        Some((was, at, before))
+    }
+
+    /// Puts a thread back as it was before an edit or deletion the forge refused.
+    fn restore_thread(&mut self, id: &str, was: Discussion, at: usize) {
+        let Some(Loadable::Loaded(threads)) = self.discussions.get(id) else { return };
+        let mut threads = threads.as_ref().clone();
+        match threads.iter().position(|t| t.id == was.id) {
+            Some(i) => threads[i] = was,
+            None => threads.insert(at.min(threads.len()), was),
+        }
+        self.discussions.insert(id.to_string(), Loadable::Loaded(Rc::new(threads)));
+    }
+
+    /// `change_note` with the forge's answer given, for the self-tests.
+    #[cfg(test)]
+    pub fn change_note_answered(&mut self, item: &MergeRequest, thread: &str, note: i64, body: Option<String>, answer: Result<(), String>) -> u64 {
+        self.offline = false;
+        let ticket = self.change_note(item, thread, note, body, move |_, _| answer);
+        self.offline = true;
+        ticket
+    }
+
     fn ticket(&mut self) -> u64 {
         self.next_ticket += 1;
         self.next_ticket
@@ -1246,6 +1434,34 @@ impl Store {
                         self.finished.insert(t, ok);
                     }
                 }
+                Msg::Jobs { id, request, result } => self.landed_jobs(id, request, result),
+                Msg::Retried { id, job, name, was, result } => self.landed_retry(id, job, &name, was, result),
+                Msg::JobLog { key, request, result } => {
+                    self.landed_poll(&format!("log {key}"), request);
+                    if self.requests.get(&format!("log {key}")) == Some(&request) {
+                        self.job_logs.insert(key, result.map_or_else(Loadable::Failed, |log| Loadable::Loaded(Rc::new(log))));
+                    }
+                }
+                Msg::NoteChanged { id, was, at, deleted, ticket, result } => {
+                    self.finished.insert(ticket, result.is_ok());
+                    match result {
+                        Ok(()) => self.show(if deleted { "Deleted your comment" } else { "Saved your comment" }),
+                        Err(e) => {
+                            self.restore_thread(&id, was, at);
+                            let verb = if deleted { "delete" } else { "save" };
+                            self.show(&format!("Couldn’t {verb} your comment: {e}"));
+                        }
+                    }
+                    // Either way, the forge has the last word.
+                    if let Some(item) = self.item(&id).cloned() {
+                        self.load_discussions(&item);
+                    }
+                }
+                Msg::People { key, result } => {
+                    self.people.insert(key, result.map_or_else(Loadable::Failed, |found| Loadable::Loaded(Rc::new(found))));
+                }
+                Msg::Edited { was, result, message, ticket } => self.landed_edit(was, result, message, ticket),
+                Msg::FileText { key, request, result } => self.landed_file_text(key, request, result),
             }
         }
         if let Some(message) = self.pending_toast.take() {
@@ -1260,6 +1476,9 @@ impl Store {
         if self.toast.is_some() && now >= self.toast_until && self.toast_until > 0.0 {
             self.toast = None;
             changed = true;
+        }
+        if changed {
+            self.fetch_ahead();
         }
         (changed, effects)
     }
@@ -1414,6 +1633,550 @@ impl Store {
         self.accounts = accounts;
         self.diffs = diffs.into_iter().map(|(k, v)| (k, Loadable::Loaded(Rc::new(v)))).collect();
         self.discussions = threads.into_iter().map(|(k, v)| (k, Loadable::Loaded(Rc::new(v)))).collect();
+    }
+}
+
+/// How often the jobs of the request on screen are asked for again while one runs, in seconds.
+const JOBS_EVERY: f64 = 15.0;
+
+impl Store {
+    // MARK: Jobs
+
+    /// The key of a job's log in `job_logs` and `open_logs`.
+    pub fn log_key(id: &str, job: i64) -> String {
+        format!("{id}|{job}")
+    }
+
+    /// Loads the jobs of the request whose overview is `shown` the first time it shows, then asks
+    /// again every few seconds while one runs or waits. Returns whether anything changed, and
+    /// when to look next.
+    pub fn tick_jobs(&mut self, now: f64, shown: Option<&str>) -> (bool, Option<f64>) {
+        if self.offline {
+            return (false, None);
+        }
+        let Some(item) = shown.and_then(|id| self.item(id)).cloned() else { return (false, None) };
+        let jobs = match self.jobs.get(&item.id) {
+            None if item.pipeline.is_some() => {
+                self.load_jobs(&item);
+                self.jobs_poll = Some((item.id.clone(), now + JOBS_EVERY));
+                return (true, None);
+            }
+            Some(Loadable::Loaded(jobs)) => jobs.clone(),
+            _ => return (false, None),
+        };
+        // A refresh of the queue asks for them again at once (`forget_jobs`), running or not.
+        let due = self.jobs_poll.as_ref().filter(|(id, _)| *id == item.id).map(|(_, at)| *at);
+        let forced = due == Some(0.0);
+        if !forced && !jobs.iter().any(Job::active) {
+            self.jobs_poll = None;
+            return (false, None);
+        }
+        let due = due.unwrap_or(now + JOBS_EVERY);
+        if now < due {
+            self.jobs_poll = Some((item.id.clone(), due));
+            return (false, Some(due));
+        }
+        // A slow forge: wait for the last answer rather than make it stale with another ask.
+        if !self.polling.contains_key(&format!("jobs {}", item.id)) {
+            self.load_jobs(&item);
+        }
+        // A running job's open log grows as it runs.
+        let growing: Vec<&Job> = jobs
+            .iter()
+            .filter(|j| j.active())
+            .filter(|j| {
+                let key = Self::log_key(&item.id, j.id);
+                self.open_logs.contains(&key) && !self.polling.contains_key(&format!("log {key}"))
+            })
+            .collect();
+        for job in growing {
+            self.load_log(&item, job);
+        }
+        let next = now + JOBS_EVERY;
+        self.jobs_poll = Some((item.id.clone(), next));
+        (true, Some(next))
+    }
+
+    /// After a refresh: drops the jobs of requests not selected, and has the selected one's asked
+    /// for again the next time they show.
+    fn forget_jobs(&mut self, selected: Option<&str>) {
+        // A load that failed goes too, so the next look tries again.
+        self.jobs.retain(|k, v| Some(k.as_str()) == selected && v.value().is_some());
+        self.job_logs.retain(|k, _| selected.is_some_and(|s| k.split_once('|').is_some_and(|(id, _)| id == s)));
+        self.open_logs.retain(|k| selected.is_some_and(|s| k.split_once('|').is_some_and(|(id, _)| id == s)));
+        if let Some(id) = selected.filter(|id| self.jobs.contains_key(*id)) {
+            self.jobs_poll = Some((id.to_string(), 0.0));
+        }
+    }
+
+    fn load_jobs(&mut self, item: &MergeRequest) {
+        if self.offline {
+            return;
+        }
+        if self.jobs.get(&item.id).and_then(Loadable::value).is_none() {
+            self.jobs.insert(item.id.clone(), Loadable::Loading);
+        }
+        let key = format!("jobs {}", item.id);
+        let request = self.start_request(key.clone());
+        self.polling.insert(key, request);
+        let item = item.clone();
+        self.bg.spawn(move || Msg::Jobs { id: item.id.clone(), request, result: item.kind().jobs(&item) });
+    }
+
+    fn landed_jobs(&mut self, id: String, request: u64, result: Result<Vec<Job>, String>) {
+        self.landed_poll(&format!("jobs {id}"), request);
+        if self.requests.get(&format!("jobs {id}")) != Some(&request) {
+            return;
+        }
+        match result {
+            Ok(jobs) => {
+                self.jobs.insert(id, Loadable::Loaded(Rc::new(jobs)));
+            }
+            // A poll that fails keeps what showed; the next one tries again.
+            Err(_) if self.jobs.get(&id).and_then(Loadable::value).is_some() => {}
+            Err(e) => {
+                self.jobs.insert(id, Loadable::Failed(e));
+            }
+        }
+    }
+
+    /// Retries a failed or canceled job, or runs a manual one. It shows as pending at once, and
+    /// goes back if the forge refuses.
+    pub fn retry_job(&mut self, item: &MergeRequest, job: &Job) {
+        if self.offline || !self.show_job_status(&item.id, job.id, PipelineStatus::Pending) {
+            return;
+        }
+        // A reload already on its way predates the retry.
+        self.start_request(format!("jobs {}", item.id));
+        let (it, j) = (item.clone(), job.clone());
+        self.bg.spawn(move || Msg::Retried { id: it.id.clone(), job: j.id, name: j.name.clone(), was: j.status, result: it.kind().retry_job(&it, &j) });
+    }
+
+    fn landed_retry(&mut self, id: String, job: i64, name: &str, was: PipelineStatus, result: Result<(), String>) {
+        let run = was == PipelineStatus::Manual;
+        match result {
+            Ok(()) => {
+                self.show(&if run { format!("Started {name}") } else { format!("Retrying {name}") });
+                // The new run is a new job, with a log of its own.
+                let key = Self::log_key(&id, job);
+                self.open_logs.remove(&key);
+                self.job_logs.remove(&key);
+                if let Some(item) = self.item(&id).cloned() {
+                    self.load_jobs(&item);
+                }
+            }
+            Err(e) => {
+                self.show_job_status(&id, job, was);
+                let verb = if run { "run" } else { "retry" };
+                self.show(&format!("Couldn’t {verb} {name}: {e}"));
+            }
+        }
+    }
+
+    /// Shows a loaded job with another status. False when it isn't there.
+    fn show_job_status(&mut self, id: &str, job: i64, status: PipelineStatus) -> bool {
+        let Some(Loadable::Loaded(jobs)) = self.jobs.get(id) else { return false };
+        let Some(at) = jobs.iter().position(|j| j.id == job) else { return false };
+        let mut jobs = jobs.as_ref().clone();
+        jobs[at].status = status;
+        if status == PipelineStatus::Pending {
+            jobs[at].started_at = None;
+            jobs[at].finished_at = None;
+        }
+        self.jobs.insert(id.to_string(), Loadable::Loaded(Rc::new(jobs)));
+        true
+    }
+
+    /// The job that failed my own request's pipeline and can be retried from here, once its
+    /// jobs are loaded: the one the queue named, else the first that failed outright.
+    pub fn failed_job(&self, item: &MergeRequest) -> Option<&Job> {
+        let jobs = self.jobs.get(&item.id).and_then(Loadable::value)?;
+        let named = item.failed_job.as_ref().and_then(|name| jobs.iter().find(|j| &j.name == name && j.failed_hard()));
+        named.or_else(|| jobs.iter().find(|j| j.failed_hard())).filter(|j| j.offers_retry())
+    }
+
+    /// Opens a job's log under it, loading it, or closes it.
+    pub fn toggle_log(&mut self, item: &MergeRequest, job: &Job) {
+        let key = Self::log_key(&item.id, job.id);
+        if self.open_logs.remove(&key) {
+            return;
+        }
+        self.open_logs.insert(key.clone());
+        let stale = !matches!(self.job_logs.get(&key), Some(Loadable::Loaded(_) | Loadable::Loading)) || job.active();
+        if stale {
+            self.load_log(item, job);
+        }
+    }
+
+    /// A job or log load came back: the next poll may ask again, unless a newer one is out.
+    fn landed_poll(&mut self, key: &str, request: u64) {
+        if self.polling.get(key) == Some(&request) {
+            self.polling.remove(key);
+        }
+    }
+
+    fn load_log(&mut self, item: &MergeRequest, job: &Job) {
+        if self.offline {
+            return;
+        }
+        let key = Self::log_key(&item.id, job.id);
+        if self.job_logs.get(&key).and_then(Loadable::value).is_none() {
+            self.job_logs.insert(key.clone(), Loadable::Loading);
+        }
+        let request = self.start_request(format!("log {key}"));
+        self.polling.insert(format!("log {key}"), request);
+        let (it, j) = (item.clone(), job.clone());
+        self.bg.spawn(move || Msg::JobLog { key, request, result: it.kind().job_log(&it, &j) });
+    }
+}
+
+/// The most people one search returns; a list this long may be missing someone.
+pub const PEOPLE_PAGE: usize = 100;
+
+/// Managing a request of my own: reviewers, its branch, closing it, its title and description.
+/// What's cheap to show (a reviewer, a title) shows at once and goes back if the forge refuses.
+impl Store {
+    /// Where a search for people in `item`'s project is kept: the project, and the search.
+    pub fn people_key(item: &MergeRequest, query: &str) -> (String, String) {
+        (format!("{}:{}", item.forge.raw(), item.project_path), query.trim().to_lowercase())
+    }
+
+    pub fn people(&self, item: &MergeRequest, query: &str) -> Option<&Loadable<Rc<Vec<Person>>>> {
+        self.people.get(&Store::people_key(item, query))
+    }
+
+    /// Looks for people who can review in `item`'s project, unless that search is already
+    /// here or on its way. A failed one is tried again.
+    pub fn find_people(&mut self, item: &MergeRequest, query: &str) {
+        let key = Store::people_key(item, query);
+        if self.offline || matches!(self.people.get(&key), Some(Loadable::Loading | Loadable::Loaded(_))) {
+            return;
+        }
+        self.people.insert(key.clone(), Loadable::Loading);
+        let (it, query) = (item.clone(), query.trim().to_string());
+        self.bg.spawn(move || Msg::People { key, result: it.kind().find_people(&it, &query) });
+    }
+
+    /// Changes `id` wherever it's listed, and returns how it was.
+    fn reshape(&mut self, id: &str, change: impl Fn(&mut MergeRequest)) -> Option<MergeRequest> {
+        let was = self.item(id).cloned()?;
+        for account in self.accounts.values_mut() {
+            for m in account.open.iter_mut().chain(account.done.iter_mut()).chain(account.mine.iter_mut()).filter(|m| m.id == id) {
+                change(m);
+            }
+        }
+        Some(was)
+    }
+
+    /// Runs `work` with the change already shown, as `perform` runs an action. The ticket's
+    /// result lands in `finished`.
+    fn perform_edit(
+        &mut self,
+        item: &MergeRequest,
+        label: &str,
+        message: String,
+        change: impl Fn(&mut MergeRequest),
+        work: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) -> u64 {
+        let ticket = self.ticket();
+        if self.offline {
+            self.finished.insert(ticket, false);
+            return ticket;
+        }
+        let was = self.reshape(&item.id, change).unwrap_or_else(|| item.clone());
+        self.busy = Some(label.into());
+        self.bg.spawn(move || Msg::Edited { was, result: work(), message, ticket });
+        ticket
+    }
+
+    fn landed_edit(&mut self, was: MergeRequest, result: Result<(), String>, message: String, ticket: u64) {
+        self.busy = None;
+        self.finished.insert(ticket, result.is_ok());
+        match result {
+            Ok(()) => self.show(&message),
+            Err(e) => {
+                self.reshape(&was.id, |m| *m = was.clone());
+                self.show(&e);
+            }
+        }
+        // Either way the forge has the last word on what changed.
+        self.refresh();
+    }
+
+    pub fn add_reviewer(&mut self, item: &MergeRequest, person: &Person) {
+        if item.reviewers.iter().any(|r| r.person.username.eq_ignore_ascii_case(&person.username)) {
+            return;
+        }
+        let (it, who) = (item.clone(), person.clone());
+        let first = person.name.split(' ').next().unwrap_or(&person.name).to_string();
+        let added = Reviewer { person: person.clone(), state: ReviewState::Unreviewed, approved: false };
+        self.perform_edit(
+            item,
+            &format!("Asking {first}…"),
+            format!("Asked {first} to review"),
+            move |m| m.reviewers.push(added.clone()),
+            move || it.kind().add_reviewer(&it, &who.username),
+        );
+    }
+
+    pub fn remove_reviewer(&mut self, item: &MergeRequest, reviewer: &Reviewer) {
+        if !mine::can_remove(item, reviewer) {
+            self.show(&format!("{} already reviewed it, and {} keeps everyone who reviewed on the list.", reviewer.person.name, item.kind().name()));
+            return;
+        }
+        let (it, who) = (item.clone(), reviewer.clone());
+        let username = reviewer.person.username.clone();
+        self.perform_edit(
+            item,
+            &format!("Removing {}…", reviewer.person.name),
+            format!("Removed {}", reviewer.person.name),
+            move |m| m.reviewers.retain(|r| r.person.username != username),
+            move || it.kind().remove_reviewer(&it, &who),
+        );
+    }
+
+    /// Asks these reviewers for another look. It counts as activity, so a quiet request goes
+    /// back to waiting at once.
+    pub fn ask_again(&mut self, item: &MergeRequest, reviewers: Vec<Reviewer>) {
+        if reviewers.is_empty() {
+            return;
+        }
+        let first: Vec<&str> = reviewers.iter().map(|r| r.person.name.split(' ').next().unwrap_or(&r.person.name)).collect();
+        let who = match first.as_slice() {
+            [one] => one.to_string(),
+            [a, b] => format!("{a} and {b}"),
+            [a, rest @ ..] => format!("{a} and {} others", rest.len()),
+            [] => String::new(),
+        };
+        let names: Vec<String> = reviewers.iter().map(|r| r.person.username.clone()).collect();
+        let it = item.clone();
+        self.perform_edit(
+            item,
+            &format!("Asking {who} again…"),
+            format!("Asked {who} again"),
+            move |m| {
+                m.updated_at = Utc::now();
+                for r in m.reviewers.iter_mut().filter(|r| names.contains(&r.person.username)) {
+                    r.state = ReviewState::Unreviewed;
+                }
+            },
+            move || reviewers.iter().try_for_each(|r| it.kind().ask_again(&it, r)),
+        );
+    }
+
+    /// Rebases it (GitLab) or merges the target in (GitHub).
+    pub fn update_branch(&mut self, item: &MergeRequest) {
+        let it = item.clone();
+        let done = format!("{} {}", item.kind().updated_branch(), item.short_reference());
+        self.perform(item.kind().updating_branch(), done, true, None, move || it.kind().update_branch(&it));
+    }
+
+    /// Closes it without merging, or reopens it.
+    pub fn set_open(&mut self, item: &MergeRequest, open: bool) {
+        let it = item.clone();
+        let (label, done) = if open { ("Reopening…", "Reopened") } else { ("Closing…", "Closed") };
+        self.perform_edit(
+            item,
+            label,
+            format!("{done} {}", item.short_reference()),
+            move |m| {
+                m.state = if open { "opened" } else { "closed" }.into();
+                m.closed_at = (!open).then(Utc::now);
+            },
+            move || it.kind().set_open(&it, open),
+        );
+    }
+
+    /// Saves a new title and description, sending only what changed. `title` is as typed: on a
+    /// GitLab draft, its prefix goes back on (see `mine::edited_title`).
+    pub fn edit_request(&mut self, item: &MergeRequest, title: &str, description: &str) -> u64 {
+        let title = mine::edited_title(item, title);
+        let new_title = (title != item.title).then(|| title.clone());
+        let new_description = (description.trim_end() != item.description.trim_end()).then(|| description.trim_end().to_string());
+        if new_title.is_none() && new_description.is_none() {
+            let t = self.ticket();
+            self.finished.insert(t, true);
+            return t;
+        }
+        let it = item.clone();
+        let (t, d) = (new_title.clone(), new_description.clone());
+        self.perform_edit(
+            item,
+            "Saving…",
+            "Saved".into(),
+            move |m| {
+                if let Some(t) = &t {
+                    m.title = t.clone();
+                }
+                if let Some(d) = &d {
+                    m.description = d.clone();
+                }
+            },
+            move || it.kind().edit(&it, new_title.as_deref(), new_description.as_deref()),
+        )
+    }
+}
+
+// MARK: Loading ahead
+
+/// How many requests load ahead at once.
+const AHEAD: usize = 2;
+
+/// How old threads loaded ahead can be when their request is opened before they load again.
+const AHEAD_FRESH_SECONDS: i64 = 120;
+
+/// Whether threads loaded ahead at `at` have aged past use by `now`.
+pub fn stale_ahead(at: Date, now: Date) -> bool {
+    (now - at).num_seconds() > AHEAD_FRESH_SECONDS
+}
+
+impl Store {
+    /// The requests to load ahead, so moving on through the list lands at once: once the
+    /// selection's own changes and threads are in, the one after it in the list, then the one
+    /// before; with nothing selected, the list's first. Leaves out what's loaded or loading, and
+    /// what's beyond `AHEAD` loads on their way.
+    pub fn ahead(&self) -> Vec<MergeRequest> {
+        fn settled<T>(l: Option<&Loadable<T>>) -> bool {
+            matches!(l, Some(Loadable::Loaded(_) | Loadable::Failed(_)))
+        }
+        let items = self.visible_items();
+        let near: Vec<usize> = match &self.selected_id {
+            None => vec![0],
+            Some(id) => {
+                if !settled(self.diffs.get(id)) || !settled(self.discussions.get(id)) {
+                    return Vec::new();
+                }
+                let Some(at) = items.iter().position(|m| &m.id == id) else { return Vec::new() };
+                [Some(at + 1), at.checked_sub(1)].into_iter().flatten().collect()
+            }
+        };
+        let loading = |id: &String| matches!(self.diffs.get(id), Some(Loadable::Loading)) || matches!(self.discussions.get(id), Some(Loadable::Loading));
+        let room = AHEAD.saturating_sub(self.fetched_ahead.keys().filter(|id| loading(id)).count());
+        near.into_iter()
+            .filter_map(|i| items.get(i))
+            .filter(|m| !self.diffs.contains_key(&m.id) && !self.discussions.contains_key(&m.id))
+            .take(room)
+            .cloned()
+            .collect()
+    }
+
+    /// Starts loading `ahead`'s requests. Never offline.
+    fn fetch_ahead(&mut self) {
+        if self.offline {
+            return;
+        }
+        for item in self.ahead() {
+            self.load_diffs(&item);
+            self.load_discussions(&item);
+            self.fetched_ahead.insert(item.id.clone(), Utc::now());
+        }
+    }
+}
+
+// MARK: Context
+
+/// The key of a file's text at a commit.
+/// How many files' texts are kept before the ones from other commits go.
+const FILE_TEXTS: usize = 40;
+
+fn text_key(sha: &str, path: &str) -> String {
+    format!("{sha}|{path}")
+}
+
+impl Store {
+    /// Whether a file's diff can show the unchanged lines around its hunks: it has a new side
+    /// with hunks, and the commit it was taken at is known.
+    pub fn expandable(&self, item: &MergeRequest, file: &FileDiff) -> bool {
+        !file.deleted_file && !file.new_file && !file.too_large && !file.lines.is_empty() && self.diff_refs.contains_key(&item.id)
+    }
+
+    /// The text of a file's new side at the head of its diff, as far as it has loaded.
+    pub fn file_text(&self, item: &MergeRequest, file: &FileDiff) -> Option<&Loadable<Rc<Vec<String>>>> {
+        let refs = self.diff_refs.get(&item.id)?;
+        self.file_texts.get(&text_key(&refs.head_sha, &file.new_path))
+    }
+
+    /// The unchanged stretches around a file's hunks; the one below the last has a length once
+    /// the file's text is in.
+    pub fn gaps(&self, item: &MergeRequest, file: &FileDiff) -> Vec<Gap> {
+        if !self.expandable(item, file) {
+            return Vec::new();
+        }
+        let len = self.file_text(item, file).and_then(Loadable::value).map(|t| t.len());
+        diff::gaps(&file.lines, len)
+    }
+
+    /// After a refresh: keeps only the selected request's file texts at its current head, and
+    /// how much of its gaps show.
+    fn forget_file_texts(&mut self, selected: Option<&str>) {
+        let head = selected.and_then(|id| self.diff_refs.get(id)).map(|r| format!("{}|", r.head_sha));
+        self.file_texts.retain(|k, _| head.as_ref().is_some_and(|h| k.starts_with(h.as_str())));
+        self.shown.retain(|k, _| selected.is_some_and(|id| k.starts_with(&format!("{id}|"))));
+        self.context_version += 1;
+    }
+
+    fn shown_key(item: &MergeRequest, file: &FileDiff) -> String {
+        format!("{}|{}|{}", item.id, file.id(), file.digest)
+    }
+
+    /// How much of `gap` shows.
+    pub fn shown(&self, item: &MergeRequest, file: &FileDiff, gap: &Gap) -> Shown {
+        self.shown.get(&Self::shown_key(item, file)).and_then(|g| g.get(&gap.new_start)).copied().unwrap_or_default()
+    }
+
+    /// Shows more of a gap, loading the file's text the first time.
+    pub fn reveal(&mut self, item: &MergeRequest, file: &FileDiff, gap: &Gap, how: Reveal) {
+        let now = self.shown(item, file, gap).reveal(how);
+        self.shown.entry(Self::shown_key(item, file)).or_default().insert(gap.new_start, now);
+        self.context_version += 1;
+        self.load_file_text(item, file);
+    }
+
+    /// Asks for a file's text at its diff's head, unless it's in or on its way. A failed load
+    /// is asked again.
+    pub fn load_file_text(&mut self, item: &MergeRequest, file: &FileDiff) {
+        let Some(sha) = self.diff_refs.get(&item.id).map(|r| r.head_sha.clone()) else { return };
+        let key = text_key(&sha, &file.new_path);
+        if self.offline || matches!(self.file_texts.get(&key), Some(Loadable::Loading | Loadable::Loaded(_))) {
+            return;
+        }
+        // Whole files add up over a long session: past a few dozen, only this commit's stay.
+        if self.file_texts.len() >= FILE_TEXTS {
+            self.file_texts.retain(|k, v| matches!(v, Loadable::Loading) || k.starts_with(&format!("{sha}|")));
+        }
+        self.file_texts.insert(key.clone(), Loadable::Loading);
+        self.context_version += 1;
+        let request = self.start_request(format!("file {key}"));
+        let (item, path) = (item.clone(), file.new_path.clone());
+        self.bg.spawn(move || Msg::FileText { key, request, result: item.kind().file_at(&item, &path, &sha) });
+    }
+
+    fn landed_file_text(&mut self, key: String, request: u64, result: Result<String, String>) {
+        // Dropped while on its way (a refresh moved on from its commit): nobody wants it now.
+        if self.requests.get(&format!("file {key}")) != Some(&request) || !self.file_texts.contains_key(&key) {
+            return;
+        }
+        let value = match result {
+            Ok(text) => Loadable::Loaded(Rc::new(diff::text_lines(&text))),
+            Err(e) => Loadable::Failed(e),
+        };
+        self.file_texts.insert(key, value);
+        self.context_version += 1;
+    }
+
+    /// Line `new` of a file's new side where its diff leaves it out, as a context line with
+    /// both its numbers: what a comment on it is placed by.
+    pub fn context_line(&self, item: &MergeRequest, file: &FileDiff, new: i64) -> Option<DiffLine> {
+        let text = self.file_text(item, file)?.value()?;
+        let gap = self.gaps(item, file).into_iter().find(|g| g.len.is_some_and(|n| (g.new_start..g.new_start + n).contains(&new)))?;
+        let line = text.get(usize::try_from(new - 1).ok()?)?;
+        Some(DiffLine { kind: diff::LineKind::Context, text: line.clone(), old_number: Some(gap.old_number(new)), new_number: Some(new) })
+    }
+
+    /// Puts a file's text in place, for scenes and tests, which never ask a forge.
+    pub fn insert_file_text(&mut self, sha: &str, path: &str, text: &str) {
+        self.file_texts.insert(text_key(sha, path), Loadable::Loaded(Rc::new(diff::text_lines(text))));
+        self.context_version += 1;
     }
 }
 

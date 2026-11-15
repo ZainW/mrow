@@ -513,7 +513,7 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
                 branch: "dev/webhook-backoff",
                 counts: (64, 12, 4),
             },
-            "Deliveries that fail now retry up to five times, waiting 2ⁿ seconds plus up to a second of jitter.",
+            "Deliveries that fail now retry up to five times, waiting 2ⁿ seconds plus up to a second of jitter.\n\n```mermaid\nflowchart LR\n    A[Webhook queued] --> B{Delivered?}\n    B -->|yes| C([Done])\n    B -->|no| D[Wait 2ⁿ s + jitter]\n    D --> E{Tries < 5?}\n    E -->|yes| A\n    E -->|no| F[(Dead letters)]\n```",
         ),
         mr(
             Spec {
@@ -622,8 +622,8 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
     );
     let on_line = at("src/export/job.rs", 28);
     let mut threads = HashMap::new();
-    // Open and resolved threads, with Robin's review under way: a reply held in the first
-    // thread, a new one on a line, and one on the whole change.
+    // Open and resolved threads, with Robin's review under way: a reply posted and one held in
+    // the first thread, a new one on a line, and one on the whole change.
     threads.insert(
         first.id.clone(),
         vec![
@@ -639,6 +639,8 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
                         1,
                         Some(on_line.clone()),
                     ),
+                    // Robin's own, posted: theirs to edit or delete.
+                    note(7, ("robin", "Robin Okafor"), "Fair, I'd missed that it's buffered.", 1, Some(on_line.clone())),
                     draft(21, "A one-line comment there would settle it for the next reader too.", Some(on_line)),
                 ],
                 node_id: None,
@@ -756,6 +758,24 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
     (accounts, diffs, threads)
 }
 
+/// The people who can review in a project, for the reviewer picker.
+pub fn people() -> Vec<Person> {
+    [
+        ("robin", "Robin Okafor"),
+        ("maya.lind", "Maya Lindqvist"),
+        ("sam", "Samuel Achterberg"),
+        ("dev.k", "Devika Rao"),
+        ("tomas.v", "Tomás Varga"),
+        ("marta.n", "Marta Nowak"),
+        ("amari", "Amari Mensah"),
+        ("jonah.ek", "Jonah Ek"),
+        ("mathilde", "Mathilde Arnaud"),
+    ]
+    .into_iter()
+    .map(|(u, n)| person(u, n))
+    .collect()
+}
+
 /// The inbox: four new events (on Robin's own requests and a review asked of them) and some
 /// already dealt with, one about a request that has since merged.
 pub fn events() -> Vec<Event> {
@@ -828,3 +848,207 @@ pub fn big_diff(files: usize, lines: usize) -> Vec<FileDiff> {
         })
         .collect()
 }
+
+/// The commit the first review's changes are shown at, for its files' texts.
+pub const HEAD: &str = "5e1f0a9c2b7d";
+
+/// `src/export/job.rs` as the first review leaves it: the lines its diff shows and those around.
+pub const JOB_RS: &str = "//! The ledger export: rows out to CSV, a batch at a time.
+
+use std::time::Duration;
+
+use crate::db::Replica;
+use crate::export::batch::{Batch, Cursor};
+use crate::export::writer::Writer;
+use crate::Result;
+use crate::ledger::LedgerId;
+use crate::ledger::Ledger;
+
+/// Writes a ledger out as CSV.
+pub struct ExportJob {
+    ledger: LedgerId,
+    cursor: Cursor,
+    batch: Batch,
+}
+
+impl ExportJob {
+    pub fn new(ledger: LedgerId, batch: Batch) -> Self {
+        ExportJob { ledger, cursor: Cursor::start(), batch }
+    }
+
+    /// Streams the rows in batches, flushing after each one, so a slow
+    /// reader never holds the writer for long.
+    pub async fn run(&mut self, out: &mut Writer) -> Result<usize> {
+        let mut written = 0;
+        while let Some(rows) = self.next_batch().await? {
+            out.write_rows(&rows)?;
+            out.flush()?;
+            written += rows.len();
+        }
+        Ok(written)
+    }
+}
+
+impl ExportJob {
+    /// The next batch of rows after the cursor, or none once the ledger is done.
+    async fn next_batch(&mut self) -> Result<Option<Vec<Row>>> {
+        let replica = Replica::connect().await?;
+        self.back_off(replica.lag().await?).await;
+        let rows = replica.rows(self.ledger, self.cursor.after(), self.batch).await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        self.cursor = rows.last_cursor();
+        Ok(Some(rows))
+    }
+
+    /// How far along the export is, for the status endpoint.
+    pub fn progress(&self, total: usize) -> f32 {
+        if total == 0 {
+            return 1.0;
+        }
+        self.cursor.position() as f32 / total as f32
+    }
+
+    /// Waits between batches while the replica falls behind, so the export
+    /// doesn't read rows the primary hasn't handed over yet.
+    async fn back_off(&self, lag: Duration) {
+        if lag > Duration::from_secs(2) {
+            tokio::time::sleep(lag / 2).await;
+        }
+    }
+
+    /// The file name a finished export is offered under.
+    pub fn file_name(&self, ledger: &Ledger) -> String {
+        let day = ledger.closed_on().format(\"%Y-%m-%d\");
+        format!(\"{}-{day}.csv\", ledger.slug())
+    }
+
+    /// Whether the job can pick up where a crashed one stopped.
+    pub fn resumable(&self) -> bool {
+        self.cursor != Cursor::start()
+    }
+
+    /// Starts again from a cursor kept by a crashed job.
+    pub fn resume(ledger: LedgerId, batch: Batch, cursor: Cursor) -> Self {
+        ExportJob { ledger, cursor, batch }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_empty_ledger_writes_nothing() {
+        let mut job = ExportJob::new(LedgerId::EMPTY, Batch::rows(100));
+        let mut out = Writer::memory();
+        assert_eq!(job.run(&mut out).await.unwrap(), 0);
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batches_are_flushed_one_by_one() {
+        let mut job = ExportJob::new(LedgerId::SAMPLE, Batch::rows(2));
+        let mut out = Writer::memory();
+        job.run(&mut out).await.unwrap();
+        assert_eq!(out.flushes(), 3);
+    }
+}
+";
+
+/// A change to `src/export/job.rs` in two hunks far enough apart to leave a long gap between
+/// them, a short one above the first and another under the last.
+pub fn job_rs_wide() -> FileDiff {
+    let fields = "@@ -12,7 +12,8 @@ use crate::ledger::Ledger;
+ /// Writes a ledger out as CSV.
+ pub struct ExportJob {
+     ledger: LedgerId,
+-    cursor: Option<RowId>,
++    cursor: Cursor,
++    batch: Batch,
+ }
+
+ impl ExportJob {
+";
+    let tests = "@@ -85,7 +86,7 @@ mod tests {
+
+     #[tokio::test]
+     async fn an_empty_ledger_writes_nothing() {
+-        let mut job = ExportJob::new(LedgerId::EMPTY);
++        let mut job = ExportJob::new(LedgerId::EMPTY, Batch::rows(100));
+         let mut out = Writer::memory();
+         assert_eq!(job.run(&mut out).await.unwrap(), 0);
+         assert!(out.is_empty());
+";
+    file("src/export/job.rs", "src/export/job.rs", &format!("{fields}{tests}"), false)
+}
+
+/// A pipeline partway through, on `web_url`'s project: passed, failed (one allowed to), running,
+/// pending and manual jobs over three stages.
+pub fn jobs(web_url: &str) -> Vec<Job> {
+    use PipelineStatus::*;
+    let project = web_url.split("/-/").next().unwrap_or(web_url);
+    let minutes = |m: f64| Utc::now() - Duration::seconds((m * 60.0) as i64);
+    let job = |id: i64, name: &str, stage: &str, status: PipelineStatus, ran: Option<(f64, f64)>, allow_failure: bool| Job {
+        id,
+        name: name.into(),
+        stage: stage.into(),
+        status,
+        web_url: format!("{project}/-/jobs/{id}"),
+        started_at: ran.map(|(from, _)| minutes(from)),
+        finished_at: ran.and_then(|(from, took)| (took > 0.0).then(|| minutes(from - took))),
+        allow_failure,
+        retryable: matches!(status, Success | Failed | Canceled | Manual),
+        has_log: !matches!(status, Manual | Pending | Skipped),
+        project: None,
+    };
+    vec![
+        job(9101, "compile", "build", Success, Some((14.0, 2.23)), false),
+        job(9102, "lint", "build", Success, Some((14.0, 0.68)), false),
+        job(9103, "test:unit", "test", Success, Some((11.5, 3.03)), false),
+        job(9104, "test:integration", "test", Failed, Some((11.5, 4.78)), false),
+        job(9105, "test:e2e-flaky", "test", Failed, Some((11.5, 1.17)), true),
+        job(9106, "test:migrations", "test", Running, Some((1.5, 0.0)), false),
+        job(9107, "deploy:review-app", "deploy", Pending, None, false),
+        job(9108, "deploy:staging", "deploy", Manual, None, false),
+    ]
+}
+
+/// The end of a failed job's log as GitLab sends it: colours, section markers and all.
+pub const JOB_LOG: &str = "\u{1b}[0Ksection_start:1731571200:prepare_script\r\u{1b}[0K\u{1b}[0K\u{1b}[36;1mPreparing environment\u{1b}[0;m
+Running on runner-x7k2 via ci-shared-4...
+\u{1b}[0Ksection_end:1731571203:prepare_script\r\u{1b}[0K
+\u{1b}[0Ksection_start:1731571203:step_script\r\u{1b}[0K\u{1b}[0K\u{1b}[36;1mExecuting \"step_script\" stage of the job script\u{1b}[0;m
+\u{1b}[32;1m$ cargo test --test integration -- --test-threads 4\u{1b}[0;m
+\u{1b}[1m\u{1b}[32m   Compiling\u{1b}[0m hooks v0.4.0 (/builds/fieldnotes/hooks)
+\u{1b}[1m\u{1b}[32m    Finished\u{1b}[0m `test` profile [unoptimized + debuginfo] target(s) in 38.12s
+\u{1b}[1m\u{1b}[32m     Running\u{1b}[0m tests/integration.rs (target/debug/deps/integration-5c1e)
+
+running 14 tests
+test deliveries::accepts_a_signed_delivery ... \u{1b}[32mok\u{1b}[0m
+test deliveries::queues_in_order ... \u{1b}[32mok\u{1b}[0m
+test deliveries::retries_after_a_timeout ... \u{1b}[32mok\u{1b}[0m
+test settings::caches_per_request ... \u{1b}[31mFAILED\u{1b}[0m
+test settings::reads_the_tenant_once ... \u{1b}[32mok\u{1b}[0m
+test settings::falls_back_without_a_tenant ... \u{1b}[32mok\u{1b}[0m
+
+failures:
+
+---- settings::caches_per_request stdout ----
+thread 'settings::caches_per_request' panicked at tests/integration.rs:212:9:
+assertion `left == right` failed: the second request read the settings again
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    settings::caches_per_request
+
+test result: \u{1b}[31mFAILED\u{1b}[0m. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.41s
+
+\u{1b}[31;1merror\u{1b}[0m: test failed, to rerun pass `--test integration`
+\u{1b}[0Ksection_end:1731571290:step_script\r\u{1b}[0K
+\u{1b}[31;1mERROR: Job failed: exit code 101
+\u{1b}[0;m
+";

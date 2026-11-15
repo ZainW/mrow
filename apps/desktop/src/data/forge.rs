@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::cli::Cli;
-use super::models::{DiffRefs, Discussion, FileDiff, MergeRequest, Note, Person, Verdict};
+use super::models::{DiffRefs, Discussion, FileDiff, Job, JobLog, LOG_LINES, MergeRequest, Note, Person, Reviewer, Verdict};
 use super::{github, gitlab};
 use crate::data::diff::DiffLine;
 
@@ -227,6 +227,193 @@ impl Forge {
             Forge::Github => github::submit_review(item, verdict, body),
         }
     }
+
+    // The pipeline: its jobs (GitLab) or the head commit's checks (GitHub).
+
+    /// "pipeline", "checks": what the forge calls the jobs that run on a request.
+    pub fn jobs_noun(self) -> &'static str {
+        match self {
+            Forge::Gitlab => "pipeline",
+            Forge::Github => "checks",
+        }
+    }
+
+    /// The latest pipeline's jobs, or the head commit's check runs, in the order they run.
+    pub fn jobs(self, item: &MergeRequest) -> Result<Vec<Job>, String> {
+        match self {
+            Forge::Gitlab => gitlab::jobs(item),
+            Forge::Github => github::jobs(item),
+        }
+    }
+
+    /// Starts a job again: a retry once it's done, a run when it's manual.
+    pub fn retry_job(self, item: &MergeRequest, job: &Job) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::retry_job(item, job),
+            Forge::Github => github::retry_job(item, job),
+        }
+    }
+
+    /// The end of a job's log.
+    pub fn job_log(self, item: &MergeRequest, job: &Job) -> Result<JobLog, String> {
+        let raw = match self {
+            Forge::Gitlab => gitlab::job_log(item, job)?,
+            Forge::Github => github::job_log(item, job)?,
+        };
+        Ok(JobLog::tail(&raw, LOG_LINES))
+    }
+
+    // My posted comments, edited or deleted in place.
+
+    /// Replaces the text of a comment of mine. `body` is what I wrote: see `written`.
+    pub fn edit_note(self, item: &MergeRequest, thread: &Discussion, note: &Note, body: &str) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::edit_note(item, note, body),
+            Forge::Github => github::edit_note(item, thread, note, body),
+        }
+    }
+
+    pub fn delete_note(self, item: &MergeRequest, thread: &Discussion, note: &Note) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::delete_note(item, note),
+            Forge::Github => github::delete_note(item, thread, note),
+        }
+    }
+
+    /// Whether a comment of mine can be deleted. A GitHub review's summary can only be edited.
+    pub fn deletes_note(self, thread: &Discussion) -> bool {
+        match self {
+            Forge::Gitlab => true,
+            Forge::Github => github::deletes_note(thread),
+        }
+    }
+
+    /// A note's text split into what the app put in front of it (a GitHub review's verdict)
+    /// and what I wrote, which is what its editor holds.
+    pub fn written(self, thread: &Discussion, note: &Note) -> (String, String) {
+        match self {
+            Forge::Gitlab => (String::new(), note.body.clone()),
+            Forge::Github => github::written(thread, note),
+        }
+    }
+
+    // Managing a request of my own without opening the forge: who reviews it, bringing its
+    // branch up to date, closing it, and its title and description.
+
+    /// What bringing a branch up to date is called: GitLab rebases it, GitHub merges the base in.
+    pub fn update_branch_title(self) -> &'static str {
+        match self {
+            Forge::Gitlab => "Rebase",
+            Forge::Github => "Update Branch",
+        }
+    }
+
+    /// The busy line while it runs.
+    pub fn updating_branch(self) -> &'static str {
+        match self {
+            Forge::Gitlab => "Rebasing…",
+            Forge::Github => "Updating the branch…",
+        }
+    }
+
+    /// The toast once it's done: "Rebased web!42".
+    pub fn updated_branch(self) -> &'static str {
+        match self {
+            Forge::Gitlab => "Rebased",
+            Forge::Github => "Updated the branch of",
+        }
+    }
+
+    /// Whether a reviewer who already reviewed can be taken off. GitHub keeps everyone who
+    /// reviewed on the list; only a pending request can be withdrawn.
+    pub fn removes_reviewed(self) -> bool {
+        self == Forge::Gitlab
+    }
+
+    /// People who can review in the request's project, matching `query` (blank for the first 100).
+    pub fn find_people(self, item: &MergeRequest, query: &str) -> Result<Vec<Person>, String> {
+        match self {
+            Forge::Gitlab => gitlab::find_people(item, query),
+            Forge::Github => github::find_people(item, query),
+        }
+    }
+
+    pub fn add_reviewer(self, item: &MergeRequest, username: &str) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::add_reviewer(item, username),
+            Forge::Github => github::add_reviewer(item, username),
+        }
+    }
+
+    pub fn remove_reviewer(self, item: &MergeRequest, reviewer: &Reviewer) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::remove_reviewer(item, reviewer),
+            Forge::Github => github::remove_reviewer(item, reviewer),
+        }
+    }
+
+    /// Asks a reviewer for another look: a fresh request, notification and all.
+    pub fn ask_again(self, item: &MergeRequest, reviewer: &Reviewer) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::ask_again(item, reviewer),
+            Forge::Github => github::ask_again(item, reviewer),
+        }
+    }
+
+    /// Brings the source branch up to date with the target, and waits (a while) until it has.
+    pub fn update_branch(self, item: &MergeRequest) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::rebase(item),
+            Forge::Github => github::update_branch(item),
+        }
+    }
+
+    /// Closes it without merging, or reopens it.
+    pub fn set_open(self, item: &MergeRequest, open: bool) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::set_open(item, open),
+            Forge::Github => github::set_open(item, open),
+        }
+    }
+
+    /// Changes the title, the description, or both; None leaves one as it is.
+    pub fn edit(self, item: &MergeRequest, title: Option<&str>, description: Option<&str>) -> Result<(), String> {
+        match self {
+            Forge::Gitlab => gitlab::edit(item, title, description),
+            Forge::Github => github::edit(item, title, description),
+        }
+    }
+
+    // A file as it stands at a commit, for the unchanged lines a diff leaves out.
+
+    /// The text of `path` at commit `sha`, in the merge request's project. A binary file is an error.
+    pub fn file_at(self, item: &MergeRequest, path: &str, sha: &str) -> Result<String, String> {
+        let raw = match self {
+            Forge::Gitlab => gitlab::file_at(item, path, sha),
+            Forge::Github => github::file_at(item, path, sha),
+        }?;
+        if raw.contains(&0) {
+            return Err("It's a binary file.".into());
+        }
+        String::from_utf8(raw).map_err(|_| "It isn't text.".into())
+    }
+
+    /// Whether a comment can go on a line the diff leaves out, once it's shown. GitHub takes
+    /// comments only on lines in the diff's hunks.
+    pub fn comments_outside_diff(self) -> bool {
+        self == Forge::Gitlab
+    }
+}
+
+/// Percent-encodes a file's path for a REST URL, keeping its slashes when `slashes`.
+pub fn encode_path(path: &str, slashes: bool) -> String {
+    path.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b'/' if slashes => "/".into(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// One forge's review queue, as fetched.

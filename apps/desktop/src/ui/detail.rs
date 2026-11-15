@@ -21,7 +21,7 @@ use rune::{Align, El, GrowthSpec, PointerPress, PopupAnchor, PopupItem, PopupMen
 use rune_kit::{Kit, Spinner, TextArea};
 
 use crate::app::{App, DraftKey};
-use crate::data::diff::LineKind;
+use crate::data::diff::{DiffLine, Gap, LineKind, REVEAL_STEP, Reveal};
 use crate::data::models::{Discussion, FileDiff, MergeRequest, Note, Verdict};
 use crate::data::store::{Loadable, Viewed, relative};
 use crate::ui::components::{
@@ -161,13 +161,19 @@ enum Row {
     Footer(usize),
     Thread(usize),
     Composer,
+    /// Unchanged lines a file's diff leaves out, with the ways to show them.
+    Gap(usize, Gap),
+    /// One of those lines, shown: its file, and its numbers on the new and old sides.
+    Shown(usize, i64, i64),
+    /// The pipeline's jobs (GitHub's checks), on the overview.
+    Pipeline,
 }
 
 impl Row {
     /// The file a row of the changes belongs to.
     fn file(&self) -> Option<usize> {
         match self {
-            Row::FileHeader(f) | Row::Notice(f, ..) | Row::Top(f) | Row::Line(f, _) | Row::Footer(f) => Some(*f),
+            Row::FileHeader(f) | Row::Notice(f, ..) | Row::Top(f) | Row::Line(f, _) | Row::Footer(f) | Row::Gap(f, _) | Row::Shown(f, ..) => Some(*f),
             _ => None,
         }
     }
@@ -188,6 +194,9 @@ impl Row {
             Row::Footer(f) => format!("footer:{}", files[*f].id()),
             Row::Thread(t) => format!("thread:{}", threads[*t].id),
             Row::Composer => "composer".into(),
+            Row::Gap(f, gap) => format!("gap:{}:{}", files[*f].id(), gap.new_start),
+            Row::Shown(f, new, _) => format!("shown:{}:{new}", files[*f].id()),
+            Row::Pipeline => "pipeline".into(),
         }
     }
 }
@@ -254,7 +263,11 @@ pub fn detail(s: &App, p: &Pal, _k: &Kit, item: &MergeRequest, room: Room) -> El
         mine,
     });
     let open = s.tab(&item.id);
-    let overview = Rc::new(vec![Row::Header, Row::Description, Row::Standing]);
+    let mut overview = vec![Row::Header, Row::Description, Row::Standing];
+    if crate::ui::pipeline::shows(s, item) {
+        overview.push(Row::Pipeline);
+    }
+    let overview = Rc::new(overview);
     let overview_keys = Rc::new(overview.iter().map(|r| r.key(&page.files, &page.threads)).collect::<Vec<_>>());
     let pages = col()
         .key("pages")
@@ -364,6 +377,9 @@ fn bar(s: &App, page: &Page, open: Tab, room: Room) -> El {
     }
     if room > Room::Tight {
         r = r.child(forge_button(p, item, narrow));
+    }
+    if page.mine {
+        r = r.child(crate::ui::manage::more_button(s, p, item));
     }
     let pending = s.store.pending_count(item);
     if reviews(item, page.mine, pending) {
@@ -549,6 +565,8 @@ struct Inputs {
     head: Option<String>,
     /// How each file is folded: 0 open, 1 collapsed, 2 a large file expanded.
     folds: Vec<u8>,
+    /// The store's `context_version`: how much of the files' gaps shows, and their texts.
+    context: u64,
 }
 
 impl Inputs {
@@ -567,6 +585,7 @@ impl Inputs {
             && same(&self.talk, &other.talk)
             && self.head == other.head
             && self.folds == other.folds
+            && self.context == other.context
     }
 }
 
@@ -604,7 +623,15 @@ fn page_rows(
             })
             .collect()
     };
-    let inputs = Inputs { item: item.id.clone(), seen: s.store.seen_before.get(&item.id).copied(), diffs: diffs.cloned(), talk: talk.cloned(), head, folds };
+    let inputs = Inputs {
+        item: item.id.clone(),
+        seen: s.store.seen_before.get(&item.id).copied(),
+        diffs: diffs.cloned(),
+        talk: talk.cloned(),
+        head,
+        folds,
+        context: s.store.context_version,
+    };
     let cached = PAGE_ROWS.with(|c| c.borrow().as_ref().and_then(|(was, rows)| was.same(&inputs).then(|| rows.clone())));
     if let Some(rows) = cached {
         return rows;
@@ -630,7 +657,7 @@ fn page_rows(
                     rows.push(Row::Notice(f, format!("{} lines. Show the diff", file.lines.len()), true));
                 } else {
                     rows.push(Row::Top(f));
-                    rows.extend((0..file.lines.len()).map(|l| Row::Line(f, l)));
+                    context_rows(s, item, f, file, &mut rows);
                 }
                 rows.push(Row::Footer(f));
             }
@@ -657,6 +684,39 @@ fn page_rows(
     };
     PAGE_ROWS.with(|c| *c.borrow_mut() = Some((inputs, made.clone())));
     made
+}
+
+/// A file's lines with the gaps around its hunks: the lines shown from each gap's ends, the
+/// gap's row while some of it is hidden, and a hunk's header until the gap above it is all shown.
+fn context_rows(s: &App, item: &MergeRequest, f: usize, file: &FileDiff, rows: &mut Vec<Row>) {
+    let gaps = s.store.gaps(item, file);
+    let has_text = s.store.file_text(item, file).is_some_and(|t| t.value().is_some());
+    let push_gap = |gap: &Gap, rows: &mut Vec<Row>| -> bool {
+        if !has_text {
+            rows.push(Row::Gap(f, *gap));
+            return false;
+        }
+        let (top, hidden, bottom) = s.store.shown(item, file, gap).split(gap);
+        rows.extend(top.map(|n| Row::Shown(f, n, gap.old_number(n))));
+        if hidden != Some(0) {
+            rows.push(Row::Gap(f, *gap));
+        }
+        rows.extend(bottom.map(|n| Row::Shown(f, n, gap.old_number(n))));
+        hidden == Some(0)
+    };
+    let mut gaps = gaps.iter().peekable();
+    for l in 0..file.lines.len() {
+        let mut whole = false;
+        while let Some(gap) = gaps.next_if(|g| g.at == l) {
+            whole = push_gap(gap, rows);
+        }
+        if !(whole && file.lines[l].kind == LineKind::Hunk) {
+            rows.push(Row::Line(f, l));
+        }
+    }
+    for gap in gaps {
+        push_gap(gap, rows);
+    }
 }
 
 /// A long or generated file, whose lines wait for a click.
@@ -768,7 +828,8 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
     let item = &page.item;
     let what = if tab == Tab::Changes { "changes" } else { "conversation" };
     let content = match &rows[i] {
-        Row::Header => header(s, p, item),
+        Row::Header => header(s, p, k, item),
+        Row::Description if s.editing_request(&item.id).is_some() => crate::ui::manage::description_editor(s, p, k, item).unwrap_or_else(el),
         Row::Description => {
             let body = if item.description.trim().is_empty() {
                 text("No description.").font(serif(16.0, 400.0).italic()).color(p.tertiary)
@@ -777,7 +838,7 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
             };
             el().w_full().max_w(READING_WIDTH).pt(30.0).child(body)
         }
-        Row::Standing if !item.is_open() => how_it_ended(p, item),
+        Row::Standing if !item.is_open() => how_it_ended_here(s, p, item),
         Row::Standing if page.mine => before_it_merges(s, p, item),
         Row::Standing => standing(s, p, page),
         Row::Loading => row()
@@ -797,6 +858,8 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
         Row::Notice(f, message, expands) => notice(p, page, *f, message, *expands),
         Row::Top(_) => el().w_full().h(4.0).fill(p.paper).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line),
         Row::Line(f, l) => line_row(s, p, k, page, *f, *l),
+        Row::Gap(f, gap) => gap_row(s, p, k, page, *f, gap),
+        Row::Shown(f, new, old) => shown_row(s, p, k, page, *f, *new, *old),
         Row::Footer(_) => {
             el().w_full().pb(14.0).child(el().w_full().h(10.0).fill(p.paper).corners([0.0, 0.0, 10.0, 10.0]).border_sides([0.0, 1.0, 1.0, 1.0], p.strong_line))
         }
@@ -813,6 +876,7 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
             "Comment",
             false,
         )),
+        Row::Pipeline => crate::ui::pipeline::section(s, p, k, item),
     };
     frame(tab, rows.len(), i, content)
 }
@@ -886,6 +950,15 @@ fn how_it_ended(p: &Pal, item: &MergeRequest) -> El {
         .child(text(format!("This {} {end}.", item.kind().noun())).font(serif(16.0, 400.0).lines(1.6)).color(p.text).wrap().selectable(true))
 }
 
+/// How a request ended, and on one of mine just closed, the way to reopen it.
+fn how_it_ended_here(s: &App, p: &Pal, item: &MergeRequest) -> El {
+    let ended = how_it_ended(p, item);
+    match crate::ui::manage::reopen_button(s, p, item) {
+        Some(reopen) => ended.child(row().child(reopen)),
+        None => ended,
+    }
+}
+
 /// The Conversation tab at the first thread someone can still resolve.
 pub fn jump_to_open_thread(s: &mut App, tx: &mut Tx) {
     let Some(id) = s.store.selected_id.clone() else { return };
@@ -942,7 +1015,7 @@ fn viewed_mark(p: &Pal, state: Viewed, ink: rune::Color) -> El {
 
 // MARK: Header
 
-fn header(s: &App, p: &Pal, item: &MergeRequest) -> El {
+fn header(s: &App, p: &Pal, k: &Kit, item: &MergeRequest) -> El {
     let mut top = row()
         .gap(8.0)
         .center_y()
@@ -957,8 +1030,15 @@ fn header(s: &App, p: &Pal, item: &MergeRequest) -> El {
     if item.state == "closed" {
         top = top.child(chip(p, Some(&I::CLOSE), "Closed", p.red, None, false));
     }
-    let title = text(item.title.clone()).font(serif(27.0, SEMIBOLD).lines(1.3)).color(p.text).wrap().selectable(true).w_full().max_w(READING_WIDTH);
     let mine = s.store.is_mine(item);
+    let editing = s.editing_request(&item.id).is_some();
+    if mine && item.is_open() && !editing {
+        top = top.child(el().grow(1.0)).child(crate::ui::manage::edit_button(p, item).my(-6.0));
+    }
+    let title = match crate::ui::manage::title_field(s, p, k, item) {
+        Some(field) => field,
+        None => text(item.title.clone()).font(serif(27.0, SEMIBOLD).lines(1.3)).color(p.text).wrap().selectable(true).w_full().max_w(READING_WIDTH),
+    };
     let mut c = col()
         .w_full()
         .gap(14.0)
@@ -1078,6 +1158,9 @@ fn reviewers(s: &App, p: &Pal, item: &MergeRequest) -> El {
                 .child(text(name).font(ui(12.0, MEDIUM)).color(p.text).single_line())
                 .child(state_icon(p, reviewer.state, 12.0)),
         );
+    }
+    if item.is_open() && s.store.is_mine(item) {
+        r = r.child(crate::ui::manage::reviewers_button(s, p, item).ml(-8.0).my(-5.0));
     }
     r
 }
@@ -1291,15 +1374,8 @@ fn line_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, l: usize) -> El {
     let line = &file.lines[l];
     let commentable = item.is_open() && matches!(line.kind, LineKind::Context | LineKind::Added | LineKind::Removed);
     let styled = diff::line_spans(p, k, file, l);
-    let mut c = col().w_full().fill(p.paper).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line).child(diff::line_view(
-        p,
-        line,
-        styled,
-        commentable,
-        item.id.clone(),
-        file.id(),
-        l,
-    ));
+    let comment = commentable.then(|| DraftKey::Line(item.id.clone(), file.id(), l));
+    let mut c = col().w_full().fill(p.paper).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line).child(diff::line_view(p, line, styled, comment));
     for &thread in page.placed.on(f, l) {
         c = c.child(el().w_full().px(14.0).py(8.0).fill(p.well).child(thread_card(s, p, k, item, &page.threads[thread], Head::Bare).max_w(760.0)));
     }
@@ -1312,6 +1388,106 @@ fn line_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, l: usize) -> El {
                 .py(10.0)
                 .fill(p.well)
                 .child(composer(s, p, k, key, &format!("Comment on line {number}. Markdown works."), "Comment", true).max_w(760.0)),
+        );
+    }
+    c
+}
+
+// MARK: Context
+
+/// A gap of this many lines or fewer shows whole with one click.
+const SMALL_GAP: i64 = 20;
+
+/// A gap's row: the ways to show its lines, or the file loading for them. Clicks land at once.
+fn gap_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, gap: &Gap) -> El {
+    let item = &page.item;
+    let file = &page.files[f];
+    let source = s.store.file_text(item, file);
+    let hidden = match source.and_then(Loadable::value) {
+        Some(_) => s.store.shown(item, file, gap).split(gap).1,
+        None => gap.len,
+    };
+    let lines = file.lines.len();
+    let reveal = |how: Reveal, glyph: &'static rune::Icon, title: String, help: &str| -> El {
+        let (mr, fid, gap) = (item.id.clone(), file.id(), *gap);
+        row()
+            .key(format!("reveal-{how:?}"))
+            .role("button")
+            .label(format!("{title}: {help}"))
+            .help(help.to_string())
+            .h(22.0)
+            .pl(6.0)
+            .pr(8.0)
+            .gap(4.0)
+            .center_y()
+            .radius(6.0)
+            .hover(p.hover)
+            .child(icon(glyph, 12.0).color(p.accent))
+            .child(text(title).font(ui(12.0, MEDIUM)).color(p.accent).single_line())
+            .on_press(move |s: &mut App| {
+                let Some(file) = s.store.diffs.get(&mr).and_then(Loadable::value).and_then(|f| f.iter().find(|d| d.id() == fid)).cloned() else { return };
+                let Some(item) = s.store.item(&mr).cloned() else { return };
+                s.store.reveal(&item, &file, &gap, how);
+            })
+    };
+    let noun = |n: i64| if n == 1 { "line" } else { "lines" };
+    let mut controls = row().gap(2.0).center_y().grow(1.0).shrink().min_w(0.0);
+    match source {
+        Some(Loadable::Loading) => {
+            controls = controls
+                .gap(8.0)
+                .pl(6.0)
+                .child(Spinner::new().size(12.0).build(k))
+                .child(text("Loading the file…").font(ui(12.0, 400.0)).color(p.secondary).single_line());
+        }
+        Some(Loadable::Failed(e)) => {
+            controls = controls
+                .gap(6.0)
+                .pl(6.0)
+                .child(icon(&I::WARNING, 12.0).color(p.red))
+                .child(text(format!("Couldn’t load the file: {e}")).font(ui(12.0, 400.0)).color(p.red).single_line().shrink().min_w(0.0))
+                .child(reveal(Reveal::Down, &I::REFRESH, "Try again".into(), "Load the file again"));
+        }
+        _ => match hidden {
+            Some(n) if n <= SMALL_GAP => {
+                controls = controls.child(reveal(Reveal::All, &I::CHEVRON_UP_DOWN, format!("Show {n} hidden {}", noun(n)), "Show the unchanged lines here"));
+            }
+            Some(n) => {
+                if !gap.is_first() {
+                    controls = controls.child(reveal(Reveal::Down, &I::CHEVRON_DOWN, format!("{REVEAL_STEP} more"), "Show more lines under the change above"));
+                }
+                if !gap.is_last(lines) {
+                    controls = controls.child(reveal(Reveal::Up, &I::CHEVRON_UP, format!("{REVEAL_STEP} more"), "Show more lines over the change below"));
+                }
+                controls = controls.child(reveal(Reveal::All, &I::CHEVRON_UP_DOWN, format!("Show all {n}"), "Show every unchanged line here"));
+            }
+            None => {
+                controls = controls.child(reveal(Reveal::Down, &I::CHEVRON_DOWN, "Show more".into(), "Show the lines under the last change"));
+            }
+        },
+    }
+    row().w_full().h(30.0).center_y().fill(p.well).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line).child(el().w(90.0)).child(controls)
+}
+
+/// A line from a gap, shown: a context line with both its numbers, coloured with the whole file.
+fn shown_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, new: i64, old: i64) -> El {
+    let item = &page.item;
+    let file = &page.files[f];
+    let lines = s.store.file_text(item, file).and_then(Loadable::value).cloned().unwrap_or_default();
+    let i = (new - 1).max(0) as usize;
+    let line = DiffLine { kind: LineKind::Context, text: lines.get(i).cloned().unwrap_or_default(), old_number: Some(old), new_number: Some(new) };
+    let head = s.store.diff_refs.get(&item.id).map_or("", |r| r.head_sha.as_str());
+    let spans = diff::text_spans(p, k, &format!("{head}|{}", file.new_path), &file.new_path, &lines, i);
+    let key = DraftKey::Context(item.id.clone(), file.id(), new);
+    let comment = (item.is_open() && item.kind().comments_outside_diff()).then(|| key.clone());
+    let mut c = col().w_full().fill(p.paper).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line).child(diff::line_view(p, &line, spans, comment));
+    if s.line_comment.as_ref() == Some(&key) {
+        c = c.child(
+            el().w_full()
+                .px(14.0)
+                .py(10.0)
+                .fill(p.well)
+                .child(composer(s, p, k, key, &format!("Comment on line {new}. Markdown works."), "Comment", true).max_w(760.0)),
         );
     }
     c
@@ -1425,7 +1601,7 @@ fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussi
         if index > 0 {
             c = c.child(el().w_full().pl(46.0).child(rule(p)));
         }
-        c = c.child(note_view(s, p, k, item, note));
+        c = c.child(note_view(s, p, k, item, thread, note));
     }
     // A thread of my pending comments alone has nothing to reply to or resolve yet.
     let started = notes.iter().any(|n| !n.pending);
@@ -1484,7 +1660,7 @@ fn resolve_button(p: &Pal, item: &MergeRequest, thread: &Discussion, resolved: b
         .on_press(move |s: &mut App| s.store.set_resolved(&it, &th, !resolved))
 }
 
-fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, note: &Note) -> El {
+fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussion, note: &Note) -> El {
     let mut meta = row().w_full().gap(6.0).center_y().child(text(note.author.name.clone()).font(ui(13.0, SEMIBOLD)).color(p.text).single_line());
     meta = if note.pending {
         meta.child(pending_mark(p))
@@ -1502,19 +1678,87 @@ fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, note: &Note) -> El 
                 .child(text("New").font(ui(12.0, SEMIBOLD)).color(p.accent).single_line()),
         );
     }
-    let edit = DraftKey::Edit(item.id.clone(), note.id);
-    let editing = note.pending && s.editing.as_ref() == Some(&edit);
+    let edit = if note.pending { DraftKey::Edit(item.id.clone(), note.id) } else { DraftKey::Revise(item.id.clone(), thread.id.clone(), note.id) };
+    let mine = s.store.wrote(item, note);
+    let editing = (note.pending || mine) && s.editing.as_ref() == Some(&edit);
+    let confirming = mine && s.confirm_delete.as_ref().is_some_and(|(id, th, n)| id == &item.id && th == &thread.id && *n == note.id);
     if note.pending && item.is_open() && !editing {
         meta = meta.child(el().grow(1.0)).child(draft_buttons(s, p, item, note));
+    } else if mine && !editing && !confirming {
+        meta = meta.child(el().grow(1.0)).child(note_buttons(s, p, item, thread, note));
     }
     let body = if editing {
         composer(s, p, k, edit, "Edit your comment…", "Save", true)
     } else {
         markdown::markdown(s, p, k, Doc { key: &format!("note-{}", note.id), source: &note.body, base: item.project_url(), size: 14.0, serif: false })
     };
-    let r = row().w_full().padding(14.0).gap(10.0).items_start().child(avatar(s, p, &note.author, 22.0));
-    let r = r.child(col().gap(6.0).grow(1.0).shrink().min_w(0.0).child(meta).child(body));
-    if note.pending { r.fill(p.accent.alpha(0.05)) } else { r }
+    let mut content = col().gap(6.0).grow(1.0).shrink().min_w(0.0).child(meta).child(body);
+    if confirming {
+        content = content.child(delete_confirmation(s, p, item, thread, note));
+    }
+    let r = row().w_full().padding(14.0).gap(10.0).items_start().child(avatar(s, p, &note.author, 22.0)).child(content);
+    if note.pending {
+        r.fill(p.accent.alpha(0.05))
+    } else if mine {
+        // Edit and Delete show while the pointer is over the comment, or Tab reaches them.
+        r.hover_group().hover_motion(rune::Anim::INSTANT, rune::Anim::INSTANT)
+    } else {
+        r
+    }
+}
+
+/// Edit and Delete on a posted comment of mine, shown on hover. A GitHub review's summary can
+/// only be edited.
+fn note_buttons(s: &App, p: &Pal, item: &MergeRequest, thread: &Discussion, note: &Note) -> El {
+    let idle = s.store.busy.is_none() && !s.saving_note(&item.id, &thread.id, note.id);
+    let (id, th, n) = (item.id.clone(), thread.id.clone(), note.id);
+    let edit = ChromeButton::new(format!("edit-{n}"), "Edit").icon(&I::PENCIL_SQUARE, 13.0).enabled(idle).build(p).on_press_tx({
+        let (id, th) = (id.clone(), th.clone());
+        move |s: &mut App, tx: &mut Tx| {
+            tx.instant();
+            s.edit_posted(&id, &th, n);
+            tx.focus(draft_field_key(&DraftKey::Revise(id.clone(), th.clone(), n)), false);
+        }
+    });
+    let mut buttons = row().gap(2.0).mt(-6.0).mb(-6.0).group_opacity(0.0, 1.0).child(edit);
+    if item.kind().deletes_note(thread) {
+        let delete =
+            ChromeButton::new(format!("delete-{n}"), "Delete").icon(&I::TRASH, 13.0).enabled(idle).build(p).on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                // Deleting can't be taken back, so it asks first, as merging does.
+                tx.instant();
+                s.confirm_delete = Some((id.clone(), th.clone(), n));
+                tx.focus(format!("{}/delete", confirm_delete_key(n)), false);
+            });
+        buttons = buttons.child(delete);
+    }
+    buttons
+}
+
+fn confirm_delete_key(note: i64) -> String {
+    format!("confirm-delete-{note}")
+}
+
+/// The second press that deletes a posted comment, under its text.
+fn delete_confirmation(s: &App, p: &Pal, item: &MergeRequest, thread: &Discussion, note: &Note) -> El {
+    let idle = s.store.busy.is_none();
+    let (id, th, n) = (item.id.clone(), thread.id.clone(), note.id);
+    let only = thread.notes.iter().filter(|n| !n.system).count() == 1 && !thread.individual_note;
+    let question = if only { "Delete this comment and its thread? This can’t be undone." } else { "Delete this comment? This can’t be undone." };
+    let cancel = action_button(p, "cancel", None, "Cancel", false, true).on_press_tx(|s: &mut App, tx: &mut Tx| {
+        tx.instant();
+        s.confirm_delete = None;
+    });
+    let delete = action_button(p, "delete", Some(&I::TRASH), "Delete", true, idle);
+    let delete = if idle { delete.fill(p.red) } else { delete };
+    row()
+        .key(confirm_delete_key(n))
+        .w_full()
+        .mt(4.0)
+        .gap(8.0)
+        .center_y()
+        .child(text(question).font(ui(12.0, 400.0)).color(p.secondary).wrap().grow(1.0).shrink().min_w(0.0))
+        .child(cancel)
+        .child(delete.on_press(move |s: &mut App| s.delete_posted(&id, &th, n)))
 }
 
 /// "Pending": a comment held in my review, which nobody else sees until it's submitted.
@@ -1560,6 +1804,8 @@ fn composer_key(key: &DraftKey) -> String {
         DraftKey::Line(id, file, line) => format!("line-{id}-{}-{line}", crate::data::models::fnv1a(file)),
         DraftKey::Edit(id, note) => format!("edit-{id}-{note}"),
         DraftKey::Summary(id) => format!("summary-{id}"),
+        DraftKey::Revise(id, thread, note) => format!("revise-{id}-{thread}-{note}"),
+        DraftKey::Context(id, file, number) => format!("context-{id}-{}-{number}", crate::data::models::fnv1a(file)),
     }
 }
 
@@ -1574,7 +1820,7 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
     let holds = item.is_some_and(|m| {
         m.is_open()
             && match &key {
-                DraftKey::Line(..) => true,
+                DraftKey::Line(..) | DraftKey::Context(..) => true,
                 DraftKey::Comment(_) => m.kind().drafts_general_comments(),
                 _ => false,
             }
@@ -1610,7 +1856,7 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
         .radius(10.0)
         .padding(if compact { 8.0 } else { 12.0 });
     let hint = match &key {
-        DraftKey::Edit(..) => "⌘↩ to save",
+        DraftKey::Edit(..) | DraftKey::Revise(..) => "⌘↩ to save",
         _ if reviewing => "⌘↩ to add to your review",
         _ => "⌘↩ to post",
     };
@@ -1634,7 +1880,7 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
             .child(action_button(p, "hold", None, "Start a Review", false, can_post).on_press(hold))
             .child(action_button(p, "post", Some(&I::BUBBLE_TEXT), submit, true, can_post).on_press(post)),
         _ => {
-            let glyph = (!matches!(key, DraftKey::Edit(..))).then_some(&I::BUBBLE_TEXT);
+            let glyph = (!matches!(key, DraftKey::Edit(..) | DraftKey::Revise(..))).then_some(&I::BUBBLE_TEXT);
             buttons.child(action_button(p, "post", glyph, submit, true, can_post).on_press(post))
         }
     };
@@ -1644,7 +1890,7 @@ pub fn composer(s: &App, p: &Pal, k: &Kit, key: DraftKey, placeholder: &str, sub
 fn cancel(s: &mut App, key: &DraftKey) {
     match key {
         DraftKey::Comment(_) | DraftKey::Summary(_) => {}
-        DraftKey::Edit(..) => {
+        DraftKey::Edit(..) | DraftKey::Revise(..) => {
             s.drafts.remove(key);
             if s.editing.as_ref() == Some(key) {
                 s.editing = None;
@@ -1653,7 +1899,7 @@ fn cancel(s: &mut App, key: &DraftKey) {
         DraftKey::Reply(id, thread) => {
             s.replying.remove(&format!("{id}|{thread}"));
         }
-        DraftKey::Line(..) => {
+        DraftKey::Line(..) | DraftKey::Context(..) => {
             if s.line_comment.as_ref() == Some(key) {
                 s.line_comment = None;
             }
@@ -1670,9 +1916,8 @@ impl TextEditHolder {
     }
 }
 
-/// Opens the comment box under a diff line and puts the caret in it.
-pub fn comment_on_line(s: &mut App, tx: &mut Tx, item: String, file: String, line: usize) {
-    let key = DraftKey::Line(item, file, line);
+/// Opens the comment box under a diff line (a `DraftKey::Line` or `Context`) and puts the caret in it.
+pub fn comment_on_line(s: &mut App, tx: &mut Tx, key: DraftKey) {
     tx.focus(draft_field_key(&key), false);
     s.line_comment = Some(key);
 }

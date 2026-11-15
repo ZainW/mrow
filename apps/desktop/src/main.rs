@@ -136,6 +136,14 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     } else {
         s.walk_refresh = 0.0;
     }
+    // The pipeline's jobs, on the overview of the request on screen: loaded when it first shows,
+    // then asked for again while one runs.
+    let shown = s.store.selected_id.clone().filter(|id| s.tab(id) == Tab::Overview);
+    let (jobs_changed, jobs_wake) = s.store.tick_jobs(clock, shown.as_deref());
+    changed |= jobs_changed;
+    if let Some(at) = jobs_wake {
+        tx.wake_at(at);
+    }
     // The queue refreshes on its own every few minutes.
     let minutes = prefs::read(|p| p.refresh_minutes);
     if minutes > 0 && !s.store.offline {
@@ -232,6 +240,20 @@ fn scene_edit_draft(s: &mut App) {
     }
 }
 
+/// A posted comment of mine open for editing, in the conversation.
+fn scene_edit_comment(s: &mut App) {
+    scene_discussion(s);
+    let Some(id) = s.store.selected_id.clone() else { return };
+    s.edit_posted(&id, "t1", 7);
+}
+
+/// A posted comment of mine asking to be deleted, after the first press.
+fn scene_delete_comment(s: &mut App) {
+    scene_discussion(s);
+    let Some(id) = s.store.selected_id.clone() else { return };
+    s.confirm_delete = Some((id, "t1".into(), 7));
+}
+
 fn scene_tabs(s: &mut App) {
     fixture(s);
     let ids: Vec<String> = s.store.visible_items().iter().take(2).map(|m| m.id.clone()).collect();
@@ -255,6 +277,27 @@ fn scene_big_diff(s: &mut App) {
     scene_changes(s);
     let id = s.store.selected_id.clone().unwrap_or_default();
     s.store.diffs.insert(id, crate::data::store::Loadable::Loaded(std::rc::Rc::new(fixtures::big_diff(40, 300))));
+}
+
+/// The changes with the lines around them: the short gap over the first hunk still folded, and
+/// the long one between two hunks shown twenty lines up from the second.
+fn scene_diff_context(s: &mut App) {
+    use crate::data::diff::Reveal;
+    use crate::data::store::Loadable;
+    scene_changes(s);
+    let Some(item) = s.store.selected().cloned() else { return };
+    let mut files = s.store.diffs.get(&item.id).and_then(|l| l.value()).map(|f| f.as_ref().clone()).unwrap_or_default();
+    let wide = fixtures::job_rs_wide();
+    files[0] = wide.clone();
+    s.store.diffs.insert(item.id.clone(), Loadable::Loaded(std::rc::Rc::new(files)));
+    let head = fixtures::HEAD.to_string();
+    s.store.diff_refs.insert(item.id.clone(), data::models::DiffRefs { base_sha: "a07c3e".into(), start_sha: "a07c3e".into(), head_sha: head.clone() });
+    s.store.insert_file_text(&head, &wide.new_path, fixtures::JOB_RS);
+    let gaps = s.store.gaps(&item, &wide);
+    if let Some(between) = gaps.get(1) {
+        s.store.reveal(&item, &wide, between, Reveal::Up);
+    }
+    s.pending_jump = Some(Jump::File(Some(0)));
 }
 
 fn scene_ask(s: &mut App) {
@@ -375,6 +418,58 @@ fn scene_mine_waiting(s: &mut App) {
     s.store.select(first);
 }
 
+/// A request of mine gone quiet: its row and its next step offer to ask again.
+fn scene_mine_quiet(s: &mut App) {
+    scene_mine(s);
+    let quiet = s.store.mine().iter().find(|m| m.iid == "307").map(|m| m.id.clone());
+    s.store.select(quiet);
+}
+
+/// The reviewer picker open on a quiet request, a search typed.
+fn scene_reviewers(s: &mut App) {
+    scene_mine_quiet(s);
+    let Some(item) = s.store.selected().cloned() else { return };
+    s.store.people.insert(data::store::Store::people_key(&item, ""), data::store::Loadable::Loaded(std::rc::Rc::new(fixtures::people())));
+    s.pick_reviewers(&item.id);
+    s.people_filter = rune::TextEdit::new("ma");
+}
+
+/// The title and description of a request of mine, open for editing.
+fn scene_edit_request(s: &mut App) {
+    scene_mine(s);
+    let id = s.store.mine().iter().find(|m| m.iid == "231").map(|m| m.id.clone());
+    s.store.select(id.clone());
+    let Some(id) = id else { return };
+    s.edit_request(&id);
+    if let Some(edit) = &mut s.request_edit {
+        edit.description = rune::TextEdit::new(
+            "The v1 export endpoint has had no callers since March.\n\nThis removes the route, its handler and the tests that covered it. Clients on v1 get a 410 with a link to the v2 docs.",
+        );
+    }
+}
+
+/// A request of mine whose target moved on: its next step offers to bring the branch up to date.
+fn scene_mine_rebase(s: &mut App) {
+    scene_mine(s);
+    let id = s.store.mine().iter().find(|m| m.iid == "231").map(|m| m.id.clone());
+    if let Some(account) = s.store.accounts.get_mut(&Forge::Gitlab) {
+        for m in account.mine.iter_mut().filter(|m| Some(&m.id) == id.as_ref()) {
+            m.merge_status = Some("need_rebase".into());
+        }
+    }
+    s.store.select(id);
+}
+
+/// Closing a request of mine, asked about first.
+fn scene_mine_close(s: &mut App) {
+    scene_mine(s);
+    let id = s.store.mine().iter().find(|m| m.iid == "92").map(|m| m.id.clone());
+    s.store.select(id.clone());
+    if let Some(id) = id {
+        s.confirm = Some((id, app::Confirm::Close));
+    }
+}
+
 fn scene_inbox(s: &mut App) {
     fixture(s);
     s.inbox_open = true;
@@ -422,6 +517,34 @@ fn scene_toast(s: &mut App) {
     s.store.show("Copied maya/batched-exports");
 }
 
+/// Gives the request `iid` a pipeline of fictional jobs and selects it, with the failed job's
+/// log open when `log`.
+fn with_jobs(s: &mut App, iid: &str, log: bool) {
+    let Some(item) = s.store.open().iter().chain(s.store.mine()).find(|m| m.iid == iid).cloned() else { return };
+    s.store.select(Some(item.id.clone()));
+    let jobs = fixtures::jobs(&item.web_url);
+    if log && let Some(failed) = jobs.iter().find(|j| j.failed_hard()) {
+        let key = data::store::Store::log_key(&item.id, failed.id);
+        let tail = data::models::JobLog::tail(fixtures::JOB_LOG.as_bytes(), data::models::LOG_LINES);
+        s.store.job_logs.insert(key.clone(), data::store::Loadable::Loaded(std::rc::Rc::new(tail)));
+        s.store.open_logs.insert(key);
+    }
+    s.store.jobs.insert(item.id, data::store::Loadable::Loaded(std::rc::Rc::new(jobs)));
+}
+
+/// A review's pipeline on its overview: jobs passed, failed, running, pending and manual, and a
+/// failed job's log open under it.
+fn scene_pipeline(s: &mut App) {
+    fixture(s);
+    with_jobs(s, "88", true);
+}
+
+/// One of my own with a failed pipeline: its next step retries the failed job.
+fn scene_pipeline_mine(s: &mut App) {
+    scene_mine(s);
+    with_jobs(s, "92", false);
+}
+
 const SCENES: &[(&str, fn(&mut App))] = &[
     ("to-review", scene_to_review),
     ("changes", scene_changes),
@@ -430,6 +553,8 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("thread-line", scene_thread_line),
     ("submit-review", scene_submit_review),
     ("edit-draft", scene_edit_draft),
+    ("edit-comment", scene_edit_comment),
+    ("delete-comment", scene_delete_comment),
     ("tabs", scene_tabs),
     ("line-comment", scene_line_comment),
     ("reviewed", scene_reviewed),
@@ -441,6 +566,11 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("mine-merging", scene_mine_merging),
     ("mine-work", scene_mine_work),
     ("mine-waiting", scene_mine_waiting),
+    ("mine-quiet", scene_mine_quiet),
+    ("reviewers", scene_reviewers),
+    ("edit-request", scene_edit_request),
+    ("mine-rebase", scene_mine_rebase),
+    ("mine-close", scene_mine_close),
     ("inbox", scene_inbox),
     ("inbox-mine", scene_inbox_mine),
     ("inbox-empty", scene_inbox_empty),
@@ -451,10 +581,13 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("toast", scene_toast),
     ("update", scene_update),
     ("big-diff", scene_big_diff),
+    ("diff-context", scene_diff_context),
     ("ask", scene_ask),
     ("ask-chat", scene_ask_chat),
     ("ask-comment", scene_ask_comment),
     ("bench", bench::scene),
+    ("pipeline", scene_pipeline),
+    ("pipeline-mine", scene_pipeline_mine),
 ];
 
 /// `--queue gitlab|github`: a live, read-only look at what a forge's mapping makes of your queue.

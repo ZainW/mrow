@@ -4,7 +4,8 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use super::models::{Date, MergeRequest, PipelineStatus, ReviewState};
+use super::forge::Forge;
+use super::models::{Date, MergeRequest, PipelineStatus, ReviewState, Reviewer};
 
 /// Asked this long ago with no review yet: the wait has gone quiet.
 const QUIET_DAYS: i64 = 3;
@@ -314,6 +315,7 @@ pub fn explain(item: &MergeRequest, status: &Status, below: Option<&MergeRequest
         },
         Standing::NeedsYou => match item.merge_status.as_deref() {
             Some("conflict") => format!("It conflicts with {}. Rebase it, or merge {} in.", item.target_branch, item.target_branch),
+            Some("need_rebase") if item.kind() == Forge::Github => format!("{} has moved on. Update the branch before it can merge.", item.target_branch),
             Some("need_rebase") => format!("{} has moved on. Rebase it before it can merge.", item.target_branch),
             _ if item.pipeline == Some(PipelineStatus::Failed) => "The pipeline failed on the latest push.".into(),
             _ => match item.reviewers.iter().find(|r| r.state == ReviewState::RequestedChanges) {
@@ -322,9 +324,53 @@ pub fn explain(item: &MergeRequest, status: &Status, below: Option<&MergeRequest
             },
         },
         Standing::Waiting | Standing::Quiet if item.auto_merge => format!("{} merges it by itself once everything passes.", item.kind().name()),
-        Standing::Quiet => format!("{} {was} asked {} ago and {has} reviewed yet.", names(&pending), span(item.updated_at)),
+        Standing::Quiet => format!("{} {was} asked {} ago and {has} reviewed yet. Ask again, or add someone else.", names(&pending), span(item.updated_at)),
         Standing::Waiting if pending.is_empty() => "Nothing for you to do right now.".into(),
         Standing::Waiting => format!("Nothing for you to do. {} {has} reviewed yet.", names(&pending)),
         Standing::Draft => "Nobody is asked to review a draft. Mark it ready when you want reviews.".into(),
     }
+}
+
+// MARK: Managing
+
+/// Who "Ask Again" asks: the reviewers a quiet request is still waiting on. Nobody when it
+/// hasn't gone quiet; until then, asking again is nagging.
+pub fn ask_again(item: &MergeRequest, status: &Status) -> Vec<Reviewer> {
+    if status.standing != Standing::Quiet || item.auto_merge {
+        return vec![];
+    }
+    item.reviewers.iter().filter(|r| r.state.needs_review() && !r.approved).cloned().collect()
+}
+
+/// Whether its branch has to catch up with the target before it can merge: the forge offers a
+/// rebase (GitLab) or an update (GitHub). A conflict needs a person, so it isn't offered then.
+pub fn needs_update(item: &MergeRequest) -> bool {
+    item.is_open() && item.merge_status.as_deref() == Some("need_rebase")
+}
+
+/// Whether a reviewer can be taken off the request.
+pub fn can_remove(item: &MergeRequest, reviewer: &Reviewer) -> bool {
+    item.kind().removes_reviewed() || reviewer.state == ReviewState::Unreviewed
+}
+
+/// The ways GitLab reads a title as a draft's, longest first; matched without case.
+const DRAFT_PREFIXES: [&str; 6] = ["draft -", "draft:", "[draft]", "(draft)", "[wip]", "wip:"];
+
+/// A title split into its draft prefix (with the space after it) and the rest. GitLab keeps a
+/// draft's flag in its title, so the prefix is set aside while editing and put back on save:
+/// an edit never turns a draft ready, or a ready one into a draft, without saying so.
+pub fn title_parts(item: &MergeRequest) -> (&str, &str) {
+    let title = item.title.as_str();
+    if item.kind() != Forge::Gitlab || !item.draft {
+        return ("", title);
+    }
+    let lower = title.to_ascii_lowercase();
+    let Some(prefix) = DRAFT_PREFIXES.iter().find(|p| lower.starts_with(*p)) else { return ("", title) };
+    let rest = title[prefix.len()..].trim_start();
+    (&title[..title.len() - rest.len()], rest)
+}
+
+/// The title to save from what was typed: the draft prefix put back, the rest trimmed.
+pub fn edited_title(item: &MergeRequest, typed: &str) -> String {
+    format!("{}{}", title_parts(item).0, typed.trim())
 }
