@@ -513,7 +513,7 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
                 branch: "dev/webhook-backoff",
                 counts: (64, 12, 4),
             },
-            "Deliveries that fail now retry up to five times, waiting 2ⁿ seconds plus up to a second of jitter.",
+            "Deliveries that fail now retry up to five times, waiting 2ⁿ seconds plus up to a second of jitter.\n\n```mermaid\nflowchart LR\n    A[Webhook queued] --> B{Delivered?}\n    B -->|yes| C([Done])\n    B -->|no| D[Wait 2ⁿ s + jitter]\n    D --> E{Tries < 5?}\n    E -->|yes| A\n    E -->|no| F[(Dead letters)]\n```",
         ),
         mr(
             Spec {
