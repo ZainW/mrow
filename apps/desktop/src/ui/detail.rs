@@ -1710,7 +1710,7 @@ fn note_view(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussion
 /// Edit and Delete on a posted comment of mine, shown on hover. A GitHub review's summary can
 /// only be edited.
 fn note_buttons(s: &App, p: &Pal, item: &MergeRequest, thread: &Discussion, note: &Note) -> El {
-    let idle = s.store.busy.is_none();
+    let idle = s.store.busy.is_none() && !s.saving_note(&item.id, &thread.id, note.id);
     let (id, th, n) = (item.id.clone(), thread.id.clone(), note.id);
     let edit = ChromeButton::new(format!("edit-{n}"), "Edit").icon(&I::PENCIL_SQUARE, 13.0).enabled(idle).build(p).on_press_tx({
         let (id, th) = (id.clone(), th.clone());

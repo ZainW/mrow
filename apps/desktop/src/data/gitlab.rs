@@ -855,6 +855,7 @@ pub fn delete_note(item: &MergeRequest, note: &Note) -> Result<(), String> {
 #[derive(Deserialize)]
 struct RestPipeline {
     id: i64,
+    project_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -871,15 +872,23 @@ struct RestJob {
 }
 
 fn job_path(item: &MergeRequest, job: &Job) -> String {
-    format!("projects/{}/jobs/{}", item.project_id(), job.id)
+    let project = job.project.map_or_else(|| item.project_id(), |p| p.to_string());
+    format!("projects/{project}/jobs/{}", job.id)
 }
 
 /// The jobs of the merge request's latest pipeline, without the ones retried since.
 pub fn jobs(item: &MergeRequest) -> Result<Vec<Job>, String> {
     let latest: Vec<RestPipeline> = cli().api_json(&format!("{}/pipelines?per_page=1", base(item)))?;
     let Some(pipeline) = latest.first() else { return Ok(vec![]) };
-    let path = format!("projects/{}/pipelines/{}/jobs?include_retried=false", item.project_id(), pipeline.id);
-    Ok(gitlab_jobs(paged_rest(&cli(), &path, 10)?))
+    // A fork's merge request runs its pipeline in the fork, so its jobs are asked of the project
+    // the pipeline names.
+    let project = pipeline.project_id.map_or_else(|| item.project_id(), |p| p.to_string());
+    let path = format!("projects/{project}/pipelines/{}/jobs?include_retried=false", pipeline.id);
+    let mut jobs = gitlab_jobs(paged_rest(&cli(), &path, 10)?);
+    for job in &mut jobs {
+        job.project = pipeline.project_id;
+    }
+    Ok(jobs)
 }
 
 /// A recorded `/pipelines/:id/jobs` response, for the self-tests.
@@ -907,6 +916,7 @@ fn gitlab_jobs(mut rest: Vec<RestJob>) -> Vec<Job> {
                 started_at: j.started_at,
                 finished_at: j.finished_at,
                 allow_failure: j.allow_failure,
+                project: None,
             }
         })
         .collect();

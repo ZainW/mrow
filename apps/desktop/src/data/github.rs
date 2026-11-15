@@ -1131,6 +1131,7 @@ fn check_jobs(mut runs: Vec<CheckRun>) -> Vec<Job> {
                 started_at: r.started_at,
                 finished_at: r.completed_at,
                 allow_failure: false,
+                project: None,
             }
         })
         .collect();

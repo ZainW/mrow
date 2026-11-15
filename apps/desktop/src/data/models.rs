@@ -379,6 +379,9 @@ pub struct Job {
     pub retryable: bool,
     /// Its log can be read here (GitHub keeps only Actions' logs).
     pub has_log: bool,
+    /// GitLab: the project the pipeline ran in, when it isn't the merge request's own (a fork's
+    /// merge request runs its pipeline in the fork).
+    pub project: Option<i64>,
 }
 
 impl PipelineStatus {

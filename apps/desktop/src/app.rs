@@ -377,11 +377,20 @@ impl App {
 
     /// Opens a posted comment of mine for editing, what I wrote in the box.
     pub fn edit_posted(&mut self, id: &str, thread: &str, note: i64) {
+        if self.saving_note(id, thread, note) {
+            return;
+        }
         let Some((_, written)) = self.posted_note(id, thread, note) else { return };
         let key = DraftKey::Revise(id.to_string(), thread.to_string(), note);
         self.drafts.insert(key.clone(), TextEdit::new(written));
         self.confirm_delete = None;
         self.editing = Some(key);
+    }
+
+    /// A posted comment of mine whose edit is still on its way to the forge: it can't be opened
+    /// again until it lands, or the answer would clear what's typed since.
+    pub fn saving_note(&self, id: &str, thread: &str, note: i64) -> bool {
+        self.posting.values().any(|k| matches!(k, DraftKey::Revise(i, t, n) if i == id && t == thread && *n == note))
     }
 
     /// Deletes a posted comment of mine, after its confirmation.

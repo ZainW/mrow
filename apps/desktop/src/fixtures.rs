@@ -1001,6 +1001,7 @@ pub fn jobs(web_url: &str) -> Vec<Job> {
         allow_failure,
         retryable: matches!(status, Success | Failed | Canceled | Manual),
         has_log: !matches!(status, Manual | Pending | Skipped),
+        project: None,
     };
     vec![
         job(9101, "compile", "build", Success, Some((14.0, 2.23)), false),

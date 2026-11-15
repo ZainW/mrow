@@ -287,6 +287,9 @@ pub struct Store {
     pub open_logs: HashSet<String>,
     /// The request whose running jobs are watched, and when they're next asked for.
     jobs_poll: Option<(String, f64)>,
+    /// Job and log loads on their way, by request key and ticket: a poll waits for the last one
+    /// to land rather than starting another that would make it stale.
+    polling: HashMap<String, u64>,
     /// People who can review, by project and search, for the reviewer picker.
     pub people: HashMap<(String, String), Loadable<Rc<Vec<Person>>>>,
     /// Files' texts at a commit, by `text_key`, as lines: what a diff's gaps show.
@@ -338,6 +341,7 @@ impl Default for Store {
             job_logs: HashMap::new(),
             open_logs: HashSet::new(),
             jobs_poll: None,
+            polling: HashMap::new(),
             people: HashMap::new(),
             file_texts: HashMap::new(),
             shown: HashMap::new(),
@@ -954,6 +958,7 @@ impl Store {
         self.diffs.retain(|k, _| Some(k) == selected.as_ref());
         self.discussions.retain(|k, _| Some(k) == selected.as_ref());
         self.forget_jobs(selected.as_deref());
+        self.forget_file_texts(selected.as_deref());
         if let Some(item) = self.selected().cloned() {
             // What's on screen has been seen, including the update my own approval made.
             self.mark_seen(&item);
@@ -1432,6 +1437,7 @@ impl Store {
                 Msg::Jobs { id, request, result } => self.landed_jobs(id, request, result),
                 Msg::Retried { id, job, name, was, result } => self.landed_retry(id, job, &name, was, result),
                 Msg::JobLog { key, request, result } => {
+                    self.landed_poll(&format!("log {key}"), request);
                     if self.requests.get(&format!("log {key}")) == Some(&request) {
                         self.job_logs.insert(key, result.map_or_else(Loadable::Failed, |log| Loadable::Loaded(Rc::new(log))));
                     }
@@ -1670,9 +1676,19 @@ impl Store {
             self.jobs_poll = Some((item.id.clone(), due));
             return (false, Some(due));
         }
-        self.load_jobs(&item);
+        // A slow forge: wait for the last answer rather than make it stale with another ask.
+        if !self.polling.contains_key(&format!("jobs {}", item.id)) {
+            self.load_jobs(&item);
+        }
         // A running job's open log grows as it runs.
-        let growing: Vec<&Job> = jobs.iter().filter(|j| j.active() && self.open_logs.contains(&Self::log_key(&item.id, j.id))).collect();
+        let growing: Vec<&Job> = jobs
+            .iter()
+            .filter(|j| j.active())
+            .filter(|j| {
+                let key = Self::log_key(&item.id, j.id);
+                self.open_logs.contains(&key) && !self.polling.contains_key(&format!("log {key}"))
+            })
+            .collect();
         for job in growing {
             self.load_log(&item, job);
         }
@@ -1700,12 +1716,15 @@ impl Store {
         if self.jobs.get(&item.id).and_then(Loadable::value).is_none() {
             self.jobs.insert(item.id.clone(), Loadable::Loading);
         }
-        let request = self.start_request(format!("jobs {}", item.id));
+        let key = format!("jobs {}", item.id);
+        let request = self.start_request(key.clone());
+        self.polling.insert(key, request);
         let item = item.clone();
         self.bg.spawn(move || Msg::Jobs { id: item.id.clone(), request, result: item.kind().jobs(&item) });
     }
 
     fn landed_jobs(&mut self, id: String, request: u64, result: Result<Vec<Job>, String>) {
+        self.landed_poll(&format!("jobs {id}"), request);
         if self.requests.get(&format!("jobs {id}")) != Some(&request) {
             return;
         }
@@ -1789,6 +1808,13 @@ impl Store {
         }
     }
 
+    /// A job or log load came back: the next poll may ask again, unless a newer one is out.
+    fn landed_poll(&mut self, key: &str, request: u64) {
+        if self.polling.get(key) == Some(&request) {
+            self.polling.remove(key);
+        }
+    }
+
     fn load_log(&mut self, item: &MergeRequest, job: &Job) {
         if self.offline {
             return;
@@ -1798,6 +1824,7 @@ impl Store {
             self.job_logs.insert(key.clone(), Loadable::Loading);
         }
         let request = self.start_request(format!("log {key}"));
+        self.polling.insert(format!("log {key}"), request);
         let (it, j) = (item.clone(), job.clone());
         self.bg.spawn(move || Msg::JobLog { key, request, result: it.kind().job_log(&it, &j) });
     }
@@ -2049,6 +2076,9 @@ impl Store {
 // MARK: Context
 
 /// The key of a file's text at a commit.
+/// How many files' texts are kept before the ones from other commits go.
+const FILE_TEXTS: usize = 40;
+
 fn text_key(sha: &str, path: &str) -> String {
     format!("{sha}|{path}")
 }
@@ -2076,6 +2106,15 @@ impl Store {
         diff::gaps(&file.lines, len)
     }
 
+    /// After a refresh: keeps only the selected request's file texts at its current head, and
+    /// how much of its gaps show.
+    fn forget_file_texts(&mut self, selected: Option<&str>) {
+        let head = selected.and_then(|id| self.diff_refs.get(id)).map(|r| format!("{}|", r.head_sha));
+        self.file_texts.retain(|k, _| head.as_ref().is_some_and(|h| k.starts_with(h.as_str())));
+        self.shown.retain(|k, _| selected.is_some_and(|id| k.starts_with(&format!("{id}|"))));
+        self.context_version += 1;
+    }
+
     fn shown_key(item: &MergeRequest, file: &FileDiff) -> String {
         format!("{}|{}|{}", item.id, file.id(), file.digest)
     }
@@ -2101,6 +2140,10 @@ impl Store {
         if self.offline || matches!(self.file_texts.get(&key), Some(Loadable::Loading | Loadable::Loaded(_))) {
             return;
         }
+        // Whole files add up over a long session: past a few dozen, only this commit's stay.
+        if self.file_texts.len() >= FILE_TEXTS {
+            self.file_texts.retain(|k, v| matches!(v, Loadable::Loading) || k.starts_with(&format!("{sha}|")));
+        }
         self.file_texts.insert(key.clone(), Loadable::Loading);
         self.context_version += 1;
         let request = self.start_request(format!("file {key}"));
@@ -2109,7 +2152,8 @@ impl Store {
     }
 
     fn landed_file_text(&mut self, key: String, request: u64, result: Result<String, String>) {
-        if self.requests.get(&format!("file {key}")) != Some(&request) {
+        // Dropped while on its way (a refresh moved on from its commit): nobody wants it now.
+        if self.requests.get(&format!("file {key}")) != Some(&request) || !self.file_texts.contains_key(&key) {
             return;
         }
         let value = match result {
