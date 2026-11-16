@@ -148,12 +148,19 @@ pub fn status(item: &MergeRequest, below: Option<&MergeRequest>) -> Status {
         }
         return is(Standing::NeedsYou, step);
     }
-    if open_threads > 0 {
+    let mergeable = item.merge_status.as_deref() == Some("mergeable");
+    // Open threads are worth knowing about, but they only hold the merge when the forge says so.
+    if open_threads > 0 && !mergeable {
         return is(Standing::NeedsYou, threads(open_threads));
     }
     let approvals = item.approved_by.len();
-    if item.merge_status.as_deref() == Some("mergeable") && pending.is_empty() {
-        let approved = if approvals > 0 { format!("Approved by {approvals} · ") } else { String::new() };
+    if mergeable && pending.is_empty() {
+        // With threads open they take the approval count's place, so the line still fits the list.
+        let approved = match (open_threads, approvals) {
+            (0, 0) => String::new(),
+            (0, n) => format!("Approved by {n} · "),
+            _ => format!("{} · ", threads(open_threads)),
+        };
         return match below {
             Some(b) => is(Standing::Held, capitalized(format!("{approved}held until {} merges", b.reference()))),
             None => is(Standing::Ready, capitalized(format!("{approved}ready to merge"))),
@@ -305,10 +312,18 @@ pub fn explain(item: &MergeRequest, status: &Status, below: Option<&MergeRequest
     let pending: Vec<&str> = item.reviewers.iter().filter(|r| r.state.needs_review() && !r.approved).map(|r| r.person.name.as_str()).collect();
     let (has, was) = if pending.len() == 1 { ("hasn't", "was") } else { ("haven't", "were") };
     match status.standing {
-        Standing::Ready => match above {
-            Some(a) => format!("Nothing blocks the merge. {} moves onto {} when this merges.", a.reference(), item.target_branch),
-            None => "Nothing blocks the merge.".into(),
-        },
+        Standing::Ready => {
+            let open = item.unresolved_threads.unwrap_or(0);
+            let first = match open {
+                0 => "Nothing blocks the merge.",
+                1 => "The open thread doesn't block the merge.",
+                _ => "The open threads don't block the merge.",
+            };
+            match above {
+                Some(a) => format!("{first} {} moves onto {} when this merges.", a.reference(), item.target_branch),
+                None => first.into(),
+            }
+        }
         Standing::Held => match below {
             Some(b) => format!("It sits on {}, which hasn't merged. It becomes ready the moment that does.", b.reference()),
             None => "It sits on a request that hasn't merged.".into(),
@@ -320,7 +335,7 @@ pub fn explain(item: &MergeRequest, status: &Status, below: Option<&MergeRequest
             _ if item.pipeline == Some(PipelineStatus::Failed) => "The pipeline failed on the latest push.".into(),
             _ => match item.reviewers.iter().find(|r| r.state == ReviewState::RequestedChanges) {
                 Some(asker) => format!("{} asked for changes. Push a fix or reply, then ask again.", asker.person.name),
-                None => "Reviewers left threads that are still open.".into(),
+                None => format!("Reviewers left threads that are still open, and {} won't merge it until they're resolved.", item.kind().name()),
             },
         },
         Standing::Waiting | Standing::Quiet if item.auto_merge => format!("{} merges it by itself once everything passes.", item.kind().name()),
