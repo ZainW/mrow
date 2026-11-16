@@ -96,6 +96,8 @@ pub struct Chat {
     /// The context line of the question being asked, removed if nothing was shared.
     turn_context: Option<u64>,
     pending: Option<Pending>,
+    /// A message sent while the agent was working: the turn is stopped and this goes next.
+    pub steer: Option<String>,
     /// Bumped by a new chat, so a worker's late reply to the old one is dropped.
     generation: u64,
     next_id: u64,
@@ -118,6 +120,7 @@ impl Chat {
             shared_context: false,
             turn_context: None,
             pending: None,
+            steer: None,
             generation: 0,
             next_id: 0,
         }
@@ -189,12 +192,19 @@ impl Chat {
         self.entries.insert(index, context);
     }
 
+    /// Puts an unsent message back in the composer, ahead of anything typed since.
+    fn restore_draft(&mut self, message: String) {
+        let text = if self.draft.text.trim().is_empty() { message } else { format!("{message}\n\n{}", self.draft.text) };
+        self.draft = TextEdit::new(text);
+    }
+
     fn reset(&mut self) {
         self.entries.clear();
         self.session = None;
         self.shared_context = false;
         self.turn_context = None;
         self.pending = None;
+        self.steer = None;
         self.phase = Phase::Idle;
         self.turn_started = None;
         self.reopening = false;
@@ -491,12 +501,44 @@ impl AskStore {
     }
 
     pub fn stop(&mut self, id: &str) {
-        let Some(chat) = self.chats.get(id) else { return };
-        if chat.phase == Phase::Working {
-            if let Some(session) = &chat.session {
-                acp::agent(chat.agent).notify("session/cancel", json!({"sessionId": session}));
-            }
+        let Some(chat) = self.chats.get_mut(id) else { return };
+        // A steering message not yet sent goes back to the composer.
+        if let Some(steer) = chat.steer.take() {
+            chat.restore_draft(steer);
         }
+        cancel(chat);
+    }
+
+    /// Redirects the agent mid-answer: stops the turn, then sends this once it has ended. Before
+    /// the question has gone, the message joins it instead.
+    pub fn steer(&mut self, id: &str, message: &str) {
+        let message = message.trim().to_string();
+        let Some(chat) = self.chats.get_mut(id) else { return };
+        if message.is_empty() || chat.phase == Phase::Idle {
+            return;
+        }
+        chat.draft = TextEdit::default();
+        if let Some(pending) = &mut chat.pending {
+            pending.question = format!("{}\n\n{message}", pending.question);
+            if let Some(q) = chat.entries.iter_mut().rev().find(|e| e.kind == EntryKind::Question) {
+                q.text = format!("{}\n\n{message}", q.text);
+            }
+            return;
+        }
+        chat.steer = Some(match chat.steer.take() {
+            Some(earlier) => format!("{earlier}\n\n{message}"),
+            None => message,
+        });
+        cancel(chat);
+    }
+
+    /// Sends a steering message once the turn it interrupted has ended, leaving the draft alone.
+    fn send_steer(&mut self, id: &str) {
+        let chat = self.chat_mut(id);
+        let Some(message) = chat.steer.take() else { return };
+        let draft = std::mem::take(&mut chat.draft);
+        self.ask(id, &message);
+        self.chat_mut(id).draft = draft;
     }
 
     /// Asks a question. The first one in a chat carries the merge request with it, so it waits
@@ -658,6 +700,10 @@ impl AskStore {
                 let chat = self.chat_mut(&id);
                 if chat.generation == generation {
                     chat.phase = Phase::Working;
+                    // Steered while the chat was starting: stop the turn as soon as it can be.
+                    if chat.steer.is_some() {
+                        cancel(chat);
+                    }
                 }
             }
             Msg::Answered { chat: id, generation, stop } => {
@@ -665,7 +711,11 @@ impl AskStore {
                 if chat.generation != generation {
                     return;
                 }
+                let steered = chat.steer.is_some();
                 match stop.as_deref() {
+                    Some("cancelled") if steered => {
+                        chat.append(EntryKind::Note, "Interrupted", None);
+                    }
                     Some("cancelled") => {
                         chat.append(EntryKind::Note, "Stopped", None);
                     }
@@ -679,6 +729,7 @@ impl AskStore {
                 }
                 chat.phase = Phase::Idle;
                 chat.turn_started = None;
+                self.send_steer(&id);
             }
             Msg::Failed { chat: id, generation, error, starting } => {
                 let chat = self.chat_mut(&id);
@@ -703,6 +754,10 @@ impl AskStore {
                 let chat = self.chat_mut(&id);
                 chat.phase = Phase::Idle;
                 chat.turn_started = None;
+                // A message steering a turn that failed goes back to the composer, unsent.
+                if let Some(steer) = chat.steer.take() {
+                    chat.restore_draft(steer);
+                }
             }
             Msg::Resumed { chat: id, generation, ok } => {
                 let chat = self.chat_mut(&id);
@@ -720,6 +775,7 @@ impl AskStore {
                         self.by_session.remove(&s);
                     }
                 }
+                self.send_steer(&id);
             }
             Msg::Models(agent, fresh) => self.keep_models(agent, fresh),
             Msg::ModelsLoaded(agent, result) => {
@@ -939,6 +995,15 @@ impl AskStore {
 }
 
 // MARK: Workers
+
+/// Asks the agent to stop the turn it's on; the reply to the prompt then says "cancelled".
+fn cancel(chat: &Chat) {
+    if chat.phase == Phase::Working {
+        if let Some(session) = &chat.session {
+            acp::agent(chat.agent).notify("session/cancel", json!({"sessionId": session}));
+        }
+    }
+}
 
 /// Stops a session that's no longer wanted. pi runs a process per session, which this ends too.
 fn end_session(agent: AgentKind, session: &str) {

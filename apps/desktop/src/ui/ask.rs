@@ -209,8 +209,13 @@ fn chips(p: &Pal, item: &MergeRequest) -> El {
     r
 }
 
+/// Asks, or while the agent works, steers it: its turn stops and this goes next.
 fn send(s: &mut App, tx: &mut Tx, id: &str, question: &str) {
-    s.ask.ask(id, question);
+    if s.ask.chat(id).is_some_and(|c| c.phase != Phase::Idle) {
+        s.ask.steer(id, question);
+    } else {
+        s.ask.ask(id, question);
+    }
     tx.scroll_to_bottom(format!("ask-transcript-{id}"));
 }
 
@@ -301,6 +306,9 @@ fn transcript(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, chat: &Chat) -> El
         let since = if chat.reopening { None } else { chat.turn_started };
         c = c.child(working_line(s, p, &label, since, chat.phase == Phase::Working));
     }
+    if let Some(steer) = &chat.steer {
+        c = c.child(steering(p, chat, steer));
+    }
     let key = format!("ask-transcript-{}", item.id);
     let view = col().key(key.clone()).w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(c);
     crate::ui::smooth_scroll::smooth_wheel(view, &key)
@@ -350,6 +358,30 @@ fn question(p: &Pal, item: &MergeRequest, e: &Entry, context: Option<&Entry>) ->
             .child(rule(p));
     }
     c.child(text(e.text.clone()).font(ui(14.0, 400.0).lines(1.4)).color(p.text).wrap().selectable(true).px(12.0).py(10.0).w_full())
+}
+
+/// A message sent mid-answer, waiting for the agent to stop: the question it will become, dimmed.
+fn steering(p: &Pal, chat: &Chat, message: &str) -> El {
+    col()
+        .key("ask-steer")
+        .role("status")
+        .label(format!("Interrupting {} to send: {message}", chat.agent.name()))
+        .w_full()
+        .radius(10.0)
+        .border(1.0, p.line)
+        .clip_rounded(10.0)
+        .child(
+            row()
+                .w_full()
+                .h(26.0)
+                .px(12.0)
+                .gap(6.0)
+                .center_y()
+                .child(icon(&I::STOP, 10.0).color(p.tertiary))
+                .child(text(format!("Interrupting {}…", chat.agent.name())).font(ui(12.0, 400.0)).color(p.tertiary).single_line()),
+        )
+        .child(rule(p))
+        .child(text(message.to_string()).font(ui(14.0, 400.0).lines(1.4)).color(p.secondary).wrap().px(12.0).py(10.0).w_full())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -572,7 +604,7 @@ fn note(p: &Pal, e: &Entry) -> El {
     row()
         .gap(6.0)
         .center_y()
-        .child(icon(if e.text == "Stopped" { &I::STOP } else { &I::EXCLAIM_CIRCLE }, 12.0).color(p.tertiary))
+        .child(icon(if matches!(e.text.as_str(), "Stopped" | "Interrupted") { &I::STOP } else { &I::EXCLAIM_CIRCLE }, 12.0).color(p.tertiary))
         .child(text(e.text.clone()).font(ui(12.0, 400.0)).color(p.tertiary).wrap())
 }
 
@@ -849,8 +881,16 @@ fn composer(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, chat: Option<&Chat>)
     let edit = chat.map_or(&empty_edit, |c| &c.draft);
     let working = chat.is_some_and(|c| c.phase == Phase::Working);
     let idle = chat.is_none_or(|c| c.phase == Phase::Idle);
-    let can_send = idle && !edit.text.trim().is_empty();
-    let placeholder = if chat.is_some_and(Chat::has_question) { "Reply…".to_string() } else { format!("How can I help with {}?", item.reference()) };
+    let typed = !edit.text.trim().is_empty();
+    // While the agent works, a typed message steers it; an empty composer's button stops it.
+    let steers = !idle && typed;
+    let stops = working && !typed;
+    let can_send = (idle || steers) && typed;
+    let placeholder = match chat {
+        Some(c) if !idle && !c.reopening => format!("Steer {}…", c.agent.name()),
+        Some(c) if c.has_question() => "Reply…".to_string(),
+        _ => format!("How can I help with {}?", item.reference()),
+    };
     let (edit_id, key_id) = (item.id.clone(), item.id.clone());
     // A bare editor: the composer is the field's frame.
     let field = rune::text_input(edit, ui(14.0, 400.0).lines(1.4))
@@ -876,21 +916,34 @@ fn composer(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, chat: Option<&Chat>)
         });
     let field = rune::auto_grow(field, 1, 10);
     let (send_id, stop_id) = (item.id.clone(), item.id.clone());
-    let active = can_send || working;
+    let active = can_send || stops;
+    let help = if stops {
+        "Stop  esc".to_string()
+    } else if steers {
+        crate::ui::components::keys("Stop and send  ↩    Just stop  esc")
+    } else {
+        crate::ui::components::keys("Send  ↩    New line  ⌥↩")
+    };
     let send_button = el()
         .key("ask-send")
         .role("button")
-        .label(if working { "Stop" } else { "Send" })
-        .help(if working { "Stop  esc".to_string() } else { crate::ui::components::keys("Send  ↩    New line  ⌥↩") })
+        .label(if stops {
+            "Stop"
+        } else if steers {
+            "Steer"
+        } else {
+            "Send"
+        })
+        .help(help)
         .size(28.0, 28.0)
         .ml(4.0)
         .radius(8.0)
         .center()
         .fill(p.accent.alpha(if active { 1.0 } else { 0.35 }))
-        .child(icon(if working { &I::STOP } else { &I::ARROW_UP }, if working { 11.0 } else { 13.0 }).color(rune::Color::WHITE));
+        .child(icon(if stops { &I::STOP } else { &I::ARROW_UP }, if stops { 11.0 } else { 13.0 }).color(rune::Color::WHITE));
     let send_button = if !active {
         send_button.disabled(true)
-    } else if working {
+    } else if stops {
         send_button.press_scale(0.97).on_press(move |s: &mut App| s.ask.stop(&stop_id))
     } else {
         send_button.press_scale(0.97).on_press_tx(move |s: &mut App, tx: &mut Tx| {
