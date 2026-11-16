@@ -1,6 +1,14 @@
 # Changelog
 
 What changed in each release of the Mrow app.
+## 0.2.0 (2026-11-16)
+
+### New
+
+- A review in three tabs instead of one long page (#14)
+- Finish a review in the app: resolve threads, pending reviews, and Request Changes (#15)
+- Pipeline jobs with per-job retry, diff context, editing my comments, managing my own requests, loading ahead, and Mermaid diagrams (#16)
+
 ## 0.1.1 (2026-11-14)
 
 ### New
