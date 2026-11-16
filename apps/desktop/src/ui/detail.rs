@@ -315,7 +315,11 @@ fn tab_page(s: &App, page: &Rc<Page>, tab: Tab, (keys, rows, version): Rows, ope
     }
     let mut view = view.grow(1.0).role("tabpanel").label(tab.title()).child(list).scroll(ScrollSpec { stick_bottom: false });
     if tab == Tab::Changes {
-        view = view.on_at_bottom(move |s: &mut App, at| s.spies.entry(id.clone()).or_default().bottom = at);
+        // Only J and K read it, so reaching or leaving the bottom rebuilds nothing.
+        view = view.on_at_bottom_if(move |s: &mut App, at| {
+            s.spies.entry(id.clone()).or_default().bottom = at;
+            false
+        });
     }
     match &s.bench {
         Some(_) => smooth_wheel_watching(view, &key, crate::bench::note_scroll),

@@ -7,9 +7,9 @@ publish = false
 description = "Mrow: a review queue for GitLab and GitHub, drawn with Rune."
 
 [dependencies]
-rune = { git = "https://github.com/anomalyco/rune", rev = "1dba3423fd1f1904553422e7814700f817abe8af" }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "1dba3423fd1f1904553422e7814700f817abe8af", features = ["markdown", "mermaid"] }
-rune-notify = { git = "https://github.com/anomalyco/rune", rev = "1dba3423fd1f1904553422e7814700f817abe8af" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90", features = ["markdown", "mermaid"] }
+rune-notify = { git = "https://github.com/anomalyco/rune", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,12 +38,15 @@ inherits = "release"
 debug = "line-tables-only"
 
 # Rune builds these crates as published plus its own patches (Rune's Cargo.toml says what each
-# changes: parley_engine's bidi fix and faster shaping, winit's input-method clauses on macOS, the
-# Windows-only wgpu-hal and accesskit_windows). A dependency's `[patch]` doesn't reach the app that
-# uses it, so every app on Rune repeats them, at the same rev as Rune. Keep the wgpu crates at the
-# version Rune locks (30.0.1 here: `cargo update -p wgpu --precise`), or the wgpu-hal patch goes unused.
+# changes: parley_engine's bidi fix and faster shaping, winit's input-method clauses on macOS,
+# accesskit_macos's headings and its answers off the main thread (without it, the app aborts when
+# it asks about its own focused window), the Windows-only wgpu-hal and accesskit_windows). A
+# dependency's `[patch]` doesn't reach the app that uses it, so every app on Rune repeats them, at
+# the same rev as Rune. Keep the wgpu crates at the version Rune locks (30.0.1 here: `cargo update
+# -p wgpu --precise`), or the wgpu-hal patch goes unused.
 [patch.crates-io]
-wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "1dba3423fd1f1904553422e7814700f817abe8af" }
-winit = { git = "https://github.com/anomalyco/rune", rev = "1dba3423fd1f1904553422e7814700f817abe8af" }
-parley_engine = { git = "https://github.com/anomalyco/rune", rev = "1dba3423fd1f1904553422e7814700f817abe8af" }
-accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "1dba3423fd1f1904553422e7814700f817abe8af" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90" }
