@@ -137,3 +137,30 @@ fn pi_tool_calls_read_like_the_others() {
     assert_eq!(line("grep", serde_json::json!({"pattern": "fn main", "path": "src"})), ("Grep \"fn main\" in src".to_string(), "search"));
     assert_eq!(line("ls", serde_json::json!({})), ("List".to_string(), "search"));
 }
+
+#[test]
+fn steering_stops_the_turn_and_sends_next() {
+    use super::{AskStore, EntryKind, Msg, Phase};
+    let mut ask = AskStore { remembers_sessions: false, offline: true, ..AskStore::default() };
+    ask.insert_fixture("mr", None, vec![(EntryKind::Question, "Why?", 5.0), (EntryKind::Answer, "Because", 1.0)], Phase::Working);
+    ask.steer("mr", "  Look at the tests instead ");
+    ask.steer("mr", "and the docs");
+    assert_eq!(ask.chat("mr").unwrap().steer.as_deref(), Some("Look at the tests instead\n\nand the docs"));
+    ask.chat_mut("mr").draft = rune::TextEdit::new("half typed");
+    ask.land(Msg::Answered { chat: "mr".into(), generation: 0, stop: Some("cancelled".into()) });
+    let chat = ask.chat("mr").unwrap();
+    let texts: Vec<_> = chat.entries.iter().filter(|e| e.kind != EntryKind::Context).map(|e| (e.kind.clone(), e.text.as_str())).collect();
+    assert_eq!(&texts[2..], [(EntryKind::Note, "Interrupted"), (EntryKind::Question, "Look at the tests instead\n\nand the docs")]);
+    assert_eq!((chat.phase, chat.steer.is_none(), chat.draft.text.as_str()), (Phase::Starting, true, "half typed"));
+}
+
+#[test]
+fn stopping_returns_a_steer_to_the_composer() {
+    use super::{AskStore, EntryKind, Phase};
+    let mut ask = AskStore { remembers_sessions: false, offline: true, ..AskStore::default() };
+    ask.insert_fixture("mr", None, vec![(EntryKind::Question, "Why?", 5.0)], Phase::Working);
+    ask.steer("mr", "Actually, never mind");
+    ask.stop("mr");
+    let chat = ask.chat("mr").unwrap();
+    assert_eq!((chat.steer.is_none(), chat.draft.text.as_str()), (true, "Actually, never mind"));
+}

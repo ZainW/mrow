@@ -329,6 +329,13 @@ fn scene_ask_chat(s: &mut App) {
     );
 }
 
+/// A message sent mid-answer, waiting while the agent stops.
+fn scene_ask_steer(s: &mut App) {
+    scene_ask_chat(s);
+    let id = s.store.selected_id.clone().unwrap_or_default();
+    s.ask.steer(&id, "Skip the tests for now. Is the cursor safe if the job restarts halfway?");
+}
+
 /// An answer that drafts two comments, one on a diff line, waiting for the user to post them.
 fn scene_ask_comment(s: &mut App) {
     use ask::EntryKind as K;
@@ -584,6 +591,7 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("diff-context", scene_diff_context),
     ("ask", scene_ask),
     ("ask-chat", scene_ask_chat),
+    ("ask-steer", scene_ask_steer),
     ("ask-comment", scene_ask_comment),
     ("bench", bench::scene),
     ("pipeline", scene_pipeline),
