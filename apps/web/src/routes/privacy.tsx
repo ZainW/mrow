@@ -10,7 +10,7 @@ export const Route = createFileRoute('/privacy')({
       path: '/privacy',
       title: 'What Mrow talks to',
       description:
-        'Mrow has no server, no account and no analytics. It reaches GitLab and GitHub through glab and gh, the agent you ask, and GitHub releases for updates.',
+        'Mrow has no server, no account and no analytics. It reaches GitHub and GitLab through gh and glab, the agent you ask, and GitHub releases for updates.',
     }),
   component: Privacy,
 })
@@ -24,9 +24,9 @@ function Privacy() {
         </p>
       </PageHead>
 
-      <Chapter id="forges" title="GitLab and GitHub, through their own tools" figure={<FlowFigure />}>
+      <Chapter id="forges" title="GitHub and GitLab, through their own tools" figure={<FlowFigure />}>
         <p>
-          Every request to GitLab or GitHub goes through the <code>glab</code> and <code>gh</code> tools you already
+          Every request to GitHub or GitLab goes through the <code>gh</code> and <code>glab</code> tools you already
           use. Their tokens stay where those tools keep them, and Mrow never sees one. Pictures uploaded to a GitLab
           project sit behind your login, so those come through <code>glab</code> too.
         </p>

@@ -74,7 +74,7 @@ function Reviewing() {
           Changes.
         </p>
         <p>
-          The bar holds “Open in GitLab” (or GitHub), Review and Approve on every tab, so a quick approval never takes a
+          The bar holds “Open in GitHub” (or GitLab), Review and Approve on every tab, so a quick approval never takes a
           scroll. Each tab keeps its place when you leave it. Tick files off as viewed while you go.
         </p>
         <p>
@@ -142,11 +142,11 @@ function Reviewing() {
 
       <Chapter
         id="accounts"
-        title="GitLab and GitHub, one switcher"
+        title="GitHub and GitLab, one switcher"
         aside={
           <>
             <p>
-              Sign in once with <code>glab auth login</code> or <code>gh auth login</code>. Mrow uses whatever those tools
+              Sign in once with <code>gh auth login</code> or <code>glab auth login</code>. Mrow uses whatever those tools
               are signed in to.
             </p>
             <KeyList items={[[['⌃1', '⌃2'], 'Switch account (Alt+1, Alt+2 on Linux)']]} />
@@ -155,12 +155,12 @@ function Reviewing() {
         figure={<AccountsFigure />}
       >
         <p>
-          Mrow reads GitLab through the <code>glab</code> command-line tool and GitHub through <code>gh</code>. Signed in
+          Mrow reads GitHub through the <code>gh</code> command-line tool and GitLab through <code>glab</code>. Signed in
           to both? The switcher at the top of the sidebar flips between them, the way you’d switch teams in a chat app.
         </p>
         <p>
           Each account keeps its own lists. Both refresh together, so the badge and notifications cover both. In Settings
-          you can turn either off, or point it at a self-hosted GitLab or GitHub Enterprise host.
+          you can turn either off, or point it at a GitHub Enterprise or self-hosted GitLab host.
         </p>
       </Chapter>
     </Page>

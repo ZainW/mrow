@@ -39,7 +39,7 @@ const GROUPS: { title: string; keys: [string[], string][] }[] = [
       [['⇧⌘R'], 'Finish the review: comment, request changes or approve'],
       [['⌘↩'], 'Post the comment; once a review is started, add it to the review'],
       [['esc'], 'Close the review panel'],
-      [['⌘O'], 'Open in GitLab or GitHub'],
+      [['⌘O'], 'Open in GitHub or GitLab'],
       [['⇧⌘C'], 'Copy the link'],
     ],
   },

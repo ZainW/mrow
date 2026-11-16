@@ -31,11 +31,13 @@ const word: Record<Standing, string> = {
   draft: 'draft',
 }
 
-/** The interactive window on the home page. Everything in it is made up. */
-export function AppMock() {
-  const [provider, setProvider] = useState<Provider>('gitlab')
+/**
+ * The interactive window on the home page. Everything in it is made up. The page owns the account,
+ * so the headline can follow it.
+ */
+export function AppMock({ provider, onProvider }: { provider: Provider; onProvider: (p: Provider) => void }) {
   const [list, setList] = useState<ListId>('review')
-  const [selectedId, setSelectedId] = useState('gl-214')
+  const [selectedId, setSelectedId] = useState(() => reviews[provider].find((r) => r.list === 'review')?.id ?? '')
   const [tabs, setTabs] = useState<string[]>([])
   const [chatOpen, setChatOpen] = useState(false)
   const [inboxOpen, setInboxOpen] = useState(false)
@@ -73,7 +75,7 @@ export function AppMock() {
     select(r)
   }
   function switchAccount(next: Provider) {
-    setProvider(next)
+    onProvider(next)
     setInboxOpen(false)
     const first = reviews[next].find((r) => r.list === list)
     if (first) select(first)
