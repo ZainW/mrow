@@ -123,6 +123,41 @@ pub struct Walk {
 /// (GitHub's two pages of 30). At or past this, the list may be cut short.
 const MINE_PAGE_FLOOR: usize = 60;
 
+/// What an action changes here once the forge says it went through, before the lists or
+/// threads say so. Nothing of it shows when the action fails.
+#[derive(Default)]
+struct Outcome {
+    /// The request it changes, and how.
+    item: Option<(String, Forge, Rc<dyn Fn(&mut MergeRequest)>)>,
+    /// How the request's loaded threads change; the reload that follows has the last word.
+    threads: Option<(String, Box<dyn Fn(&mut Vec<Discussion>)>)>,
+}
+
+impl Outcome {
+    fn item(item: &MergeRequest, change: impl Fn(&mut MergeRequest) + 'static) -> Self {
+        Outcome { item: Some((item.id.clone(), item.forge, Rc::new(change))), threads: None }
+    }
+
+    fn threads(item: &MergeRequest, change: impl Fn(&mut Vec<Discussion>) + 'static) -> Self {
+        Outcome::default().and_threads(item, change)
+    }
+
+    fn and_threads(mut self, item: &MergeRequest, change: impl Fn(&mut Vec<Discussion>) + 'static) -> Self {
+        self.threads = Some((item.id.clone(), Box::new(change)));
+        self
+    }
+}
+
+/// A finished action's change to a request, laid over every queue that lands until one fetched
+/// after it (numbered `from` or later) does: a fetch already on its way when the action finished
+/// would otherwise put the request back as it was. That later one is the forge's word, kept or not.
+struct Overlay {
+    id: String,
+    forge: Forge,
+    from: u64,
+    change: Rc<dyn Fn(&mut MergeRequest)>,
+}
+
 /// How long a walk waits on a part (a pipeline, usually) before it gives up.
 const WALK_PATIENCE_MINUTES: i64 = 45;
 
@@ -150,7 +185,8 @@ pub enum Viewed {
 
 /// What comes back from the background.
 pub enum Msg {
-    Queue(Vec<(Forge, Result<QueueResult, String>)>),
+    /// Every account's queue, from the fetch numbered so (see `Store::refresh_gen`).
+    Queue(u64, Vec<(Forge, Result<QueueResult, String>)>),
     Diffs {
         id: String,
         request: u64,
@@ -272,6 +308,15 @@ pub struct Store {
     pub offline: bool,
     refreshing: bool,
     refresh_again: bool,
+    /// Counts the queue fetches started, so one landing says whether it began after an action finished.
+    refresh_gen: u64,
+    /// Finished actions' changes, kept over queues fetched before them.
+    overlays: Vec<Overlay>,
+    /// What each running action changes once it goes through, by ticket.
+    outcomes: HashMap<u64, Outcome>,
+    /// The forge's answer to the next action, for the self-tests: it lands without asking.
+    #[cfg(test)]
+    pub answer: Option<Result<(), String>>,
     requests: HashMap<String, u64>,
     /// Finished actions whose result a view is waiting for (a comment box clears on success).
     pub finished: HashMap<u64, bool>,
@@ -332,6 +377,11 @@ impl Default for Store {
             offline: false,
             refreshing: false,
             refresh_again: false,
+            refresh_gen: 0,
+            overlays: Vec::new(),
+            outcomes: HashMap::new(),
+            #[cfg(test)]
+            answer: None,
             requests: HashMap::new(),
             finished: HashMap::new(),
             next_ticket: 0,
@@ -430,7 +480,7 @@ impl Store {
         let mut items: Vec<MergeRequest> = match mode {
             QueueMode::ToReview => self.open().iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft)).cloned().collect(),
             QueueMode::Reviewed => self.open().iter().filter(|m| !m.my_state.needs_review()).cloned().collect(),
-            QueueMode::Mine => self.mine().to_vec(),
+            QueueMode::Mine => self.mine_listed().cloned().collect(),
             QueueMode::Done => self.done().to_vec(),
         };
         let key = |m: &MergeRequest| if mode == QueueMode::Done { m.finished_at() } else { m.requested_at };
@@ -475,7 +525,7 @@ impl Store {
     /// The number beside a list's name. For Mine, the ones that are my move.
     pub fn count(&self, mode: QueueMode) -> usize {
         if mode == QueueMode::Mine {
-            return self.mine().iter().filter(|m| self.status_of(m).standing.on_me()).count();
+            return self.mine_listed().filter(|m| self.status_of(m).standing.on_me()).count();
         }
         self.items(mode).len()
     }
@@ -484,6 +534,12 @@ impl Store {
 
     pub fn mine(&self) -> &[MergeRequest] {
         self.accounts.get(&self.forge).map_or(&[], |a| &a.mine)
+    }
+
+    /// Mine as the list shows it. One merged from here leaves the list at once, but stays on
+    /// hand (and on screen, if selected) until the queue confirms it.
+    fn mine_listed(&self) -> impl Iterator<Item = &MergeRequest> {
+        self.mine().iter().filter(|m| m.is_open())
     }
 
     pub fn mine_error(&self) -> Option<&str> {
@@ -515,7 +571,7 @@ impl Store {
 
     /// How many of mine stand like `filter` (quiet and held ones count as waiting).
     pub fn mine_count(&self, filter: Standing) -> usize {
-        self.mine().iter().filter(|m| self.status_of(m).standing.group() == filter).count()
+        self.mine_listed().filter(|m| self.status_of(m).standing.group() == filter).count()
     }
 
     pub fn toggle_stack(&mut self, key: &str) {
@@ -549,7 +605,7 @@ impl Store {
     /// me and folding the rest. With a filter or a search the list is flat.
     pub fn mine_lines(&self) -> Vec<MineLine> {
         let query = self.filter.trim().to_lowercase();
-        let all: Vec<(&MergeRequest, Status)> = self.mine().iter().map(|m| (m, self.status_of(m))).collect();
+        let all: Vec<(&MergeRequest, Status)> = self.mine_listed().map(|m| (m, self.status_of(m))).collect();
         let refs: Vec<&MergeRequest> = all.iter().map(|(m, _)| *m).collect();
         let stacks = mine::stacks(&refs);
         let place = |id: &str| stacks.iter().find_map(|s| s.ids.iter().position(|i| i == id).map(|at| (at + 1, s.ids.len())));
@@ -890,13 +946,15 @@ impl Store {
             self.set_forge(*first);
         }
         let days = prefs::read(|p| p.done_days);
+        self.refresh_gen += 1;
+        let fetch = self.refresh_gen;
         self.bg.spawn(move || {
             let handles: Vec<_> = forges.into_iter().map(|f| (f, std::thread::spawn(move || f.queue(days)))).collect();
-            Msg::Queue(handles.into_iter().map(|(f, h)| (f, h.join().unwrap_or_else(|_| Err("The fetch crashed.".into())))).collect())
+            Msg::Queue(fetch, handles.into_iter().map(|(f, h)| (f, h.join().unwrap_or_else(|_| Err("The fetch crashed.".into())))).collect())
         });
     }
 
-    fn landed_queue(&mut self, results: Vec<(Forge, Result<QueueResult, String>)>) -> Effects {
+    fn landed_queue(&mut self, fetch: u64, results: Vec<(Forge, Result<QueueResult, String>)>) -> Effects {
         let mut effects = Effects::default();
         self.refreshing = false;
         self.is_loading = false;
@@ -904,6 +962,10 @@ impl Store {
         let any_ok = results.iter().any(|(_, r)| r.is_ok());
         // The accounts that loaded, with any of mine a search still listed after it finished.
         let mut fresh: Vec<(Forge, Vec<MergeRequest>)> = Vec::new();
+        // An overlay goes once a fetch started after it lands for its account, or the account goes.
+        let loaded: Vec<Forge> = results.iter().filter(|(_, r)| r.is_ok()).map(|(f, _)| *f).collect();
+        let accounts: Vec<Forge> = self.accounts.keys().copied().chain(loaded.iter().copied()).collect();
+        self.overlays.retain(|o| accounts.contains(&o.forge) && !(fetch >= o.from && loaded.contains(&o.forge)));
         for (forge, result) in results {
             let account = self.accounts.entry(forge).or_default();
             match result {
@@ -967,9 +1029,20 @@ impl Store {
         }
         // Before the walks move on: a part they merged is still on record as theirs.
         effects.notify = self.note_changes(&fresh, every_loaded);
+        // After the inbox has compared what the forge said with what it said last time.
+        let overlays = std::mem::take(&mut self.overlays);
+        for o in overlays.iter().filter(|o| loaded.contains(&o.forge)) {
+            self.reshape(&o.id, &*o.change);
+        }
+        self.overlays = overlays;
         self.advance_walks();
-        effects.badge = Some(self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review() && !m.draft).count());
+        effects.badge = Some(self.badge());
         effects
+    }
+
+    /// The Dock badge: reviews waiting on me, across every account.
+    fn badge(&self) -> usize {
+        self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review() && !m.draft).count()
     }
 
     pub fn load_details_if_needed(&mut self, item: &MergeRequest) {
@@ -1018,7 +1091,8 @@ impl Store {
 
     pub fn approve(&mut self, item: &MergeRequest) {
         let it = item.clone();
-        self.perform("Approving…", format!("Approved {}", item.short_reference()), true, None, move || it.kind().approve(&it));
+        let shown = Outcome::item(item, reviewed(self.me_on(item.forge), ReviewState::Approved));
+        self.perform("Approving…", format!("Approved {}", item.short_reference()), true, None, shown, move || it.kind().approve(&it));
     }
 
     /// Merges one of my merge requests, if nothing blocks it.
@@ -1028,7 +1102,8 @@ impl Store {
             return;
         }
         let it = item.clone();
-        self.perform(&format!("Merging {}…", item.reference()), format!("Merged {}", item.short_reference()), true, None, move || it.kind().merge(&it));
+        let label = format!("Merging {}…", item.reference());
+        self.perform(&label, format!("Merged {}", item.short_reference()), true, None, Outcome::item(item, merged), move || it.kind().merge(&it));
     }
 
     /// Merges a stack from its bottom part up: `bottom` now, then each of my parts above it
@@ -1106,14 +1181,17 @@ impl Store {
                     self.walks[at].moved_at = Utc::now();
                     let label = format!("Moving {} onto {branch}…", next.reference());
                     let done = format!("Moved {} onto {branch}", next.reference());
-                    self.perform(&label, done, true, None, move || next.kind().retarget(&next, &branch));
+                    let onto = branch.clone();
+                    let shown = Outcome::item(&next, move |m| m.target_branch = onto.clone());
+                    self.perform(&label, done, true, None, shown, move || next.kind().retarget(&next, &branch));
                     return;
                 }
                 (WalkStep::Merge, Some(next)) => {
                     self.walks[at].moved_at = Utc::now();
                     self.walks[at].merged.push(next.id.clone());
                     let label = format!("Merging {}…", next.reference());
-                    self.perform(&label, format!("Merged {}", next.short_reference()), true, None, move || next.kind().merge(&next));
+                    let shown = Outcome::item(&next, merged);
+                    self.perform(&label, format!("Merged {}", next.short_reference()), true, None, shown, move || next.kind().merge(&next));
                     return;
                 }
             }
@@ -1125,23 +1203,38 @@ impl Store {
         let it = item.clone();
         let (label, done) =
             if on { ("Turning auto-merge on…", "It merges once everything passes") } else { ("Turning auto-merge off…", "Auto-merge is off") };
-        self.perform(label, done.into(), true, None, move || it.kind().set_auto_merge(&it, on));
+        self.perform(label, done.into(), true, None, Outcome::item(item, move |m| m.auto_merge = on), move || it.kind().set_auto_merge(&it, on));
     }
 
     pub fn mark_ready(&mut self, item: &MergeRequest) {
         let it = item.clone();
-        self.perform("Marking it ready…", format!("{} is ready for review", item.short_reference()), true, None, move || it.kind().mark_ready(&it));
+        // GitLab keeps a draft's flag in its title, and takes it off with the flag.
+        let shown = Outcome::item(item, |m| {
+            m.title = mine::title_parts(m).1.to_string();
+            m.draft = false;
+        });
+        self.perform("Marking it ready…", format!("{} is ready for review", item.short_reference()), true, None, shown, move || it.kind().mark_ready(&it));
     }
 
     pub fn unapprove(&mut self, item: &MergeRequest) {
         let it = item.clone();
-        self.perform("Revoking approval…", "Approval revoked".into(), true, None, move || it.kind().unapprove(&it));
+        let shown = Outcome::item(item, reviewed(self.me_on(item.forge), ReviewState::Unapproved));
+        self.perform("Revoking approval…", "Approval revoked".into(), true, None, shown, move || it.kind().unapprove(&it));
     }
 
     /// Posts a comment on the merge request. The ticket's result lands in `finished`.
     pub fn comment(&mut self, item: &MergeRequest, body: String) -> u64 {
         let it = item.clone();
-        self.perform("Posting comment…", "Comment posted".into(), true, None, move || it.kind().comment(&it, &body))
+        let shown = match self.me_on(item.forge) {
+            Some(me) => {
+                let note = posted(me, body.clone());
+                Outcome::threads(item, move |threads| {
+                    threads.push(Discussion { id: format!("posted{}", note.id), individual_note: true, notes: vec![note.clone()], node_id: None })
+                })
+            }
+            None => Outcome::default(),
+        };
+        self.perform("Posting comment…", "Comment posted".into(), true, Some(item.clone()), shown, move || it.kind().comment(&it, &body))
     }
 
     /// Starts a thread on one line of a file's diff, against the commits that diff was taken
@@ -1154,14 +1247,28 @@ impl Store {
             return t;
         };
         let (it, file, line) = (item.clone(), file.clone(), line.clone());
-        self.perform("Posting comment…", "Comment posted".into(), false, Some(item.clone()), move || {
+        self.perform("Posting comment…", "Comment posted".into(), false, Some(item.clone()), Outcome::default(), move || {
             it.kind().comment_on_line(&it, &file, &line, &refs, &body)
         })
     }
 
     pub fn reply(&mut self, item: &MergeRequest, thread: &Discussion, body: String) -> u64 {
         let (it, thread) = (item.clone(), thread.clone());
-        self.perform("Posting reply…", "Reply posted".into(), false, Some(item.clone()), move || it.kind().reply(&it, &thread, &body))
+        let shown = match self.me_on(item.forge) {
+            Some(me) => {
+                let (id, note) = (thread.id.clone(), posted(me, body.clone()));
+                Outcome::threads(item, move |threads| {
+                    if let Some(t) = threads.iter_mut().find(|t| t.id == id) {
+                        // It takes the thread's resolved state, as the forge's would.
+                        let last = t.notes.last();
+                        let note = Note { resolvable: last.and_then(|n| n.resolvable), resolved: last.and_then(|n| n.resolved), ..note.clone() };
+                        t.notes.push(note);
+                    }
+                })
+            }
+            None => Outcome::default(),
+        };
+        self.perform("Posting reply…", "Reply posted".into(), false, Some(item.clone()), shown, move || it.kind().reply(&it, &thread, &body))
     }
 
     /// Resolves a thread, or reopens it. It shows so at once, and goes back if the forge refuses.
@@ -1197,7 +1304,8 @@ impl Store {
     /// Holds a comment on the whole request in my review. The ticket's result lands in `finished`.
     pub fn hold(&mut self, item: &MergeRequest, body: String) -> u64 {
         let it = item.clone();
-        self.perform("Adding to your review…", "Added to your review".into(), false, Some(item.clone()), move || it.kind().draft_comment(&it, &body))
+        let label = "Adding to your review…";
+        self.perform(label, "Added to your review".into(), false, Some(item.clone()), Outcome::default(), move || it.kind().draft_comment(&it, &body))
     }
 
     /// Holds a comment on a line in my review, like `comment_on_line`.
@@ -1209,19 +1317,32 @@ impl Store {
             return t;
         };
         let (it, file, line) = (item.clone(), file.clone(), line.clone());
-        self.perform("Adding to your review…", "Added to your review".into(), false, Some(item.clone()), move || {
+        self.perform("Adding to your review…", "Added to your review".into(), false, Some(item.clone()), Outcome::default(), move || {
             it.kind().draft_on_line(&it, &file, &line, &refs, &body)
         })
     }
 
     pub fn edit_draft(&mut self, item: &MergeRequest, note: &Note, body: String) -> u64 {
         let (it, note) = (item.clone(), note.clone());
-        self.perform("Saving…", "Saved".into(), false, Some(item.clone()), move || it.kind().edit_draft(&it, &note, &body))
+        let (id, text) = (note.id, body.clone());
+        let shown = Outcome::threads(item, move |threads| {
+            for n in threads.iter_mut().flat_map(|t| &mut t.notes).filter(|n| n.pending && n.id == id) {
+                n.body = text.clone();
+            }
+        });
+        self.perform("Saving…", "Saved".into(), false, Some(item.clone()), shown, move || it.kind().edit_draft(&it, &note, &body))
     }
 
     pub fn delete_draft(&mut self, item: &MergeRequest, note: &Note) -> u64 {
         let (it, note) = (item.clone(), note.clone());
-        self.perform("Deleting…", "Deleted from your review".into(), false, Some(item.clone()), move || it.kind().delete_draft(&it, &note))
+        let id = note.id;
+        let shown = Outcome::threads(item, move |threads| {
+            for t in threads.iter_mut() {
+                t.notes.retain(|n| !(n.pending && n.id == id));
+            }
+            threads.retain(|t| !t.notes.iter().all(|n| n.system));
+        });
+        self.perform("Deleting…", "Deleted from your review".into(), false, Some(item.clone()), shown, move || it.kind().delete_draft(&it, &note))
     }
 
     /// Submits my review with a verdict and an optional summary, then reloads its threads and
@@ -1232,8 +1353,18 @@ impl Store {
             Verdict::Approve => format!("Approved {}", item.short_reference()),
             Verdict::RequestChanges => format!("Requested changes on {}", item.short_reference()),
         };
+        let state = match verdict {
+            Verdict::Approve => ReviewState::Approved,
+            Verdict::RequestChanges => ReviewState::RequestedChanges,
+            // A comment leaves an approval standing.
+            Verdict::Comment if item.my_state == ReviewState::Approved => ReviewState::Approved,
+            Verdict::Comment => ReviewState::Reviewed,
+        };
+        let shown = Outcome::item(item, reviewed(self.me_on(item.forge), state)).and_threads(item, |threads| {
+            threads.iter_mut().flat_map(|t| &mut t.notes).for_each(|n| n.pending = false);
+        });
         let it = item.clone();
-        self.perform("Submitting your review…", done, true, Some(item.clone()), move || it.kind().submit_review(&it, verdict, &body))
+        self.perform("Submitting your review…", done, true, Some(item.clone()), shown, move || it.kind().submit_review(&it, verdict, &body))
     }
 
     // MARK: My comments
@@ -1241,7 +1372,8 @@ impl Store {
     /// Whether I wrote a posted, non-system note, so I can edit or delete it.
     pub fn wrote(&self, item: &MergeRequest, note: &Note) -> bool {
         let me = self.accounts.get(&item.forge).and_then(|a| a.me.as_ref());
-        !note.system && !note.pending && me.is_some_and(|me| me.username == note.author.username)
+        // One shown before the forge numbered it (see `posted`) waits for the reload.
+        !note.system && !note.pending && note.id > 0 && me.is_some_and(|me| me.username == note.author.username)
     }
 
     /// Replaces the text of a comment of mine with `body` (what I wrote, without the verdict a
@@ -1332,27 +1464,70 @@ impl Store {
         ticket
     }
 
+    /// Starts a queue fetch that asks no one, for the self-tests: its number, for `land_queue`.
+    #[cfg(test)]
+    pub fn start_refresh(&mut self) -> u64 {
+        self.refreshing = true;
+        self.refresh_gen += 1;
+        self.refresh_gen
+    }
+
+    /// Lands what the fetch numbered `fetch` brought back, for the self-tests.
+    #[cfg(test)]
+    pub fn land_queue(&mut self, fetch: u64, results: Vec<(Forge, Result<QueueResult, String>)>) {
+        self.landed_queue(fetch, results);
+    }
+
     fn ticket(&mut self) -> u64 {
         self.next_ticket += 1;
         self.next_ticket
     }
 
+    /// Runs an action. Once it goes through, `outcome` shows at once; the refresh or reload
+    /// that follows confirms it or puts it back.
     fn perform(
         &mut self,
         label: &str,
         message: String,
         refresh: bool,
         reload: Option<MergeRequest>,
+        outcome: Outcome,
         work: impl FnOnce() -> Result<(), String> + Send + 'static,
     ) -> u64 {
         let ticket = self.ticket();
-        if self.offline {
+        #[cfg(test)]
+        let answer = self.answer.take();
+        #[cfg(not(test))]
+        let answer: Option<Result<(), String>> = None;
+        if self.offline && answer.is_none() {
             self.finished.insert(ticket, false);
             return ticket;
         }
         self.busy = Some(label.into());
-        self.bg.spawn(move || Msg::Done { result: work(), message, refresh, reload, ticket: Some(ticket) });
+        self.outcomes.insert(ticket, outcome);
+        self.bg.spawn(move || Msg::Done { result: answer.unwrap_or_else(work), message, refresh, reload, ticket: Some(ticket) });
         ticket
+    }
+
+    /// Shows what a finished action changed. The request's change stays over queues fetched
+    /// before now (see `Overlay`).
+    fn show_outcome(&mut self, outcome: Outcome) {
+        if let Some((id, forge, change)) = outcome.item {
+            self.reshape(&id, &*change);
+            self.overlays.push(Overlay { id, forge, from: self.refresh_gen + 1, change });
+        }
+        if let Some((id, change)) = outcome.threads
+            && let Some(Loadable::Loaded(threads)) = self.discussions.get(&id)
+        {
+            let mut threads = threads.as_ref().clone();
+            change(&mut threads);
+            self.discussions.insert(id, Loadable::Loaded(Rc::new(threads)));
+        }
+    }
+
+    /// Me on an account, for showing my own actions before the forge does.
+    fn me_on(&self, forge: Forge) -> Option<Person> {
+        self.accounts.get(&forge).and_then(|a| a.me.clone())
     }
 
     /// Shows a short message; `poll` gives it its time on screen.
@@ -1368,7 +1543,7 @@ impl Store {
         for msg in self.bg.drain() {
             changed = true;
             match msg {
-                Msg::Queue(results) => effects.merge(self.landed_queue(results)),
+                Msg::Queue(fetch, results) => effects.merge(self.landed_queue(fetch, results)),
                 Msg::Diffs { id, request, result } => {
                     if self.requests.get(&format!("diffs {id}")) != Some(&request) {
                         continue;
@@ -1413,8 +1588,14 @@ impl Store {
                 Msg::Done { result, message, refresh, reload, ticket } => {
                     self.busy = None;
                     let ok = result.is_ok();
+                    let outcome = ticket.and_then(|t| self.outcomes.remove(&t));
                     match result {
                         Ok(()) => {
+                            // Before `refresh`, so a fetch already on its way counts as stale.
+                            if let Some(outcome) = outcome {
+                                self.show_outcome(outcome);
+                                effects.badge = Some(self.badge());
+                            }
                             self.show(&message);
                             if let Some(item) = reload {
                                 self.load_discussions(&item);
@@ -1633,6 +1814,51 @@ impl Store {
         self.accounts = accounts;
         self.diffs = diffs.into_iter().map(|(k, v)| (k, Loadable::Loaded(Rc::new(v)))).collect();
         self.discussions = threads.into_iter().map(|(k, v)| (k, Loadable::Loaded(Rc::new(v)))).collect();
+    }
+}
+
+/// A review of mine as it stands now: my state, my place among the reviewers and approvers.
+fn reviewed(me: Option<Person>, state: ReviewState) -> impl Fn(&mut MergeRequest) {
+    move |m| {
+        m.my_state = state;
+        let Some(me) = &me else { return };
+        let is_me = |username: &str| username.eq_ignore_ascii_case(&me.username);
+        let approved = match state {
+            ReviewState::Approved => true,
+            ReviewState::Unapproved => false,
+            _ => m.approved_by.iter().any(|u| is_me(u)),
+        };
+        m.approved_by.retain(|u| !is_me(u));
+        if approved {
+            m.approved_by.push(me.username.clone());
+        }
+        for r in m.reviewers.iter_mut().filter(|r| is_me(&r.person.username)) {
+            r.state = state;
+            r.approved = approved;
+        }
+    }
+}
+
+fn merged(m: &mut MergeRequest) {
+    m.state = "merged".into();
+    m.merged_at = Some(Utc::now());
+}
+
+/// A comment of mine the forge took, shown until the reload brings its own. The forge's ids
+/// are positive, so this one can't be mistaken for one to edit or reply to.
+fn posted(me: Person, body: String) -> Note {
+    let at = Utc::now();
+    Note {
+        id: -at.timestamp_micros(),
+        body,
+        author: me,
+        created_at: at,
+        system: false,
+        resolvable: None,
+        resolved: None,
+        position: None,
+        pending: false,
+        node_id: None,
     }
 }
 
@@ -1968,7 +2194,13 @@ impl Store {
     pub fn update_branch(&mut self, item: &MergeRequest) {
         let it = item.clone();
         let done = format!("{} {}", item.kind().updated_branch(), item.short_reference());
-        self.perform(item.kind().updating_branch(), done, true, None, move || it.kind().update_branch(&it));
+        // The forge works out again whether it can merge; until it says, nothing's known.
+        let shown = Outcome::item(item, |m| {
+            if m.merge_status.as_deref() == Some("need_rebase") {
+                m.merge_status = None;
+            }
+        });
+        self.perform(item.kind().updating_branch(), done, true, None, shown, move || it.kind().update_branch(&it));
     }
 
     /// Closes it without merging, or reopens it.

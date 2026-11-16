@@ -340,6 +340,15 @@ mod mine {
         quiet.updated_at = Utc::now() - Duration::days(4);
         assert_eq!(status(&quiet, None).standing, Standing::Quiet);
 
+        // Open threads show, but don't stand between me and a merge the forge allows.
+        let mut chatty = ready.clone();
+        chatty.unresolved_threads = Some(1);
+        let st = status(&chatty, None);
+        assert_eq!((st.standing, st.step.as_str()), (Standing::Ready, "1 thread open · ready to merge"));
+        assert_eq!(crate::data::mine::walk_step(Some(&chatty), "main", &[&chatty]), crate::data::mine::WalkStep::Merge);
+        chatty.merge_status = Some("discussions_not_resolved".into());
+        assert_eq!((status(&chatty, None).standing, status(&chatty, None).step.as_str()), (Standing::NeedsYou, "1 thread open"));
+
         let mut changes = asked.clone();
         changes.reviewers[1].state = ReviewState::RequestedChanges;
         changes.unresolved_threads = Some(2);
@@ -1390,4 +1399,176 @@ fn durations_read_short() {
     assert_eq!(duration_label(38), "38s");
     assert_eq!(duration_label(252), "4m 12s");
     assert_eq!(duration_label(3900), "1h 5m");
+}
+
+/// What an action changes shows as soon as the forge says it went through, and stays over a
+/// queue fetched before that, until one fetched after it has the forge's word.
+mod shown_on_success {
+    use std::collections::BTreeMap;
+
+    use crate::data::forge::{Forge, QueueResult};
+    use crate::data::mine::Standing;
+    use crate::data::models::{MergeRequest, ReviewState, Verdict};
+    use crate::data::prefs;
+    use crate::data::store::{Account, QueueMode, Store};
+
+    fn store() -> (Store, MergeRequest) {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        let item = store.visible_items()[0].clone();
+        assert_eq!(item.my_state, ReviewState::Unreviewed);
+        (store, item)
+    }
+
+    /// What a fetch brings back when the forge's lists are `accounts`.
+    fn queue(accounts: &BTreeMap<Forge, Account>) -> Vec<(Forge, Result<QueueResult, String>)> {
+        let result =
+            |a: &Account| QueueResult { me: a.me.clone().unwrap(), open: a.open.clone(), done: a.done.clone(), mine: a.mine.clone(), mine_error: None };
+        accounts.iter().map(|(f, a)| (*f, Ok(result(a)))).collect()
+    }
+
+    /// Approves with the forge's answer given.
+    fn approve(store: &mut Store, item: &MergeRequest, answer: Result<(), String>) {
+        store.answer = Some(answer);
+        store.approve(item);
+        assert!(store.busy.is_some(), "it runs");
+    }
+
+    fn state(store: &Store, id: &str) -> ReviewState {
+        store.item(id).unwrap().my_state
+    }
+
+    /// Waits for the action that's running to land.
+    fn settle(store: &mut Store) {
+        for _ in 0..400 {
+            store.poll(0.0);
+            if store.busy.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the action never landed");
+    }
+
+    #[test]
+    fn an_approval_shows_as_soon_as_it_goes_through() {
+        let (mut store, item) = store();
+        approve(&mut store, &item, Ok(()));
+        assert_eq!(state(&store, &item.id), ReviewState::Unreviewed, "not before the forge answers");
+        settle(&mut store);
+        let now = store.item(&item.id).unwrap().clone();
+        assert_eq!(now.my_state, ReviewState::Approved);
+        assert!(now.approved_by.iter().any(|u| u == "robin"));
+        assert!(now.reviewers.iter().any(|r| r.person.username == "robin" && r.approved && r.state == ReviewState::Approved));
+        assert!(!store.items(QueueMode::ToReview).iter().any(|m| m.id == item.id), "off the list waiting on me");
+        assert!(store.items(QueueMode::Reviewed).iter().any(|m| m.id == item.id));
+    }
+
+    #[test]
+    fn a_queue_fetched_before_the_approval_doesnt_undo_it() {
+        let (mut store, item) = store();
+        let before = store.accounts.clone();
+        let stale = store.start_refresh();
+        approve(&mut store, &item, Ok(()));
+        settle(&mut store);
+        store.land_queue(stale, queue(&before));
+        assert_eq!(state(&store, &item.id), ReviewState::Approved, "the fetch began before the approval");
+
+        // One begun after it is the forge's word: here, that it didn't take.
+        let fresh = store.start_refresh();
+        store.land_queue(fresh, queue(&before));
+        assert_eq!(state(&store, &item.id), ReviewState::Unreviewed);
+        // And nothing's left over to come back on the next one.
+        let next = store.start_refresh();
+        let now = store.accounts.clone();
+        store.land_queue(next, queue(&now));
+        assert_eq!(state(&store, &item.id), ReviewState::Unreviewed);
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_change_until_one_lands() {
+        let (mut store, item) = store();
+        let before = store.accounts.clone();
+        let stale = store.start_refresh();
+        approve(&mut store, &item, Ok(()));
+        settle(&mut store);
+        let failed = store.start_refresh();
+        store.land_queue(failed, vec![(item.forge, Err("offline".into()))]);
+        assert_eq!(state(&store, &item.id), ReviewState::Approved);
+        // The account that failed confirmed nothing, so the older fetch still can't undo it.
+        store.land_queue(stale, queue(&before));
+        assert_eq!(state(&store, &item.id), ReviewState::Approved);
+        let fresh = store.start_refresh();
+        store.land_queue(fresh, queue(&before));
+        assert_eq!(state(&store, &item.id), ReviewState::Unreviewed);
+    }
+
+    #[test]
+    fn a_failed_action_changes_nothing() {
+        let (mut store, item) = store();
+        let before = store.item(&item.id).cloned();
+        approve(&mut store, &item, Err("You can't approve this.".into()));
+        settle(&mut store);
+        assert_eq!(store.item(&item.id).cloned(), before);
+        assert_eq!(store.toast.as_deref(), Some("You can't approve this."));
+        let next = store.start_refresh();
+        let now = store.accounts.clone();
+        store.land_queue(next, queue(&now));
+        assert_eq!(store.item(&item.id).cloned(), before);
+    }
+
+    #[test]
+    fn a_merge_leaves_my_list_at_once_and_stays_merged_over_an_older_fetch() {
+        let (mut store, _) = store();
+        store.mode = QueueMode::Mine;
+        let ready = store.mine().iter().find(|m| store.status_of(m).standing == Standing::Ready && store.stack_of(m).is_none()).unwrap().clone();
+        let before = store.accounts.clone();
+        let stale = store.start_refresh();
+        store.answer = Some(Ok(()));
+        store.merge_here(&ready);
+        settle(&mut store);
+        let merged = store.item(&ready.id).expect("still on hand for the detail").clone();
+        assert_eq!(merged.state, "merged");
+        assert!(merged.merged_at.is_some());
+        assert!(!store.visible_items().iter().any(|m| m.id == ready.id), "gone from the list");
+
+        store.land_queue(stale, queue(&before));
+        assert_eq!(store.item(&ready.id).unwrap().state, "merged");
+
+        // The forge's own lists leave it out once it has merged.
+        let mut after = before.clone();
+        after.values_mut().for_each(|a| a.mine.retain(|m| m.id != ready.id));
+        let fresh = store.start_refresh();
+        store.land_queue(fresh, queue(&after));
+        assert!(store.item(&ready.id).is_none());
+    }
+
+    #[test]
+    fn submitting_a_review_publishes_my_pending_comments() {
+        let (mut store, item) = store();
+        assert!(store.pending_count(&item) > 0, "the fixture holds some");
+        store.answer = Some(Ok(()));
+        store.submit_review(&item, Verdict::RequestChanges, String::new());
+        settle(&mut store);
+        assert_eq!(store.pending_count(&item), 0);
+        assert_eq!(state(&store, &item.id), ReviewState::RequestedChanges);
+    }
+
+    #[test]
+    fn marking_a_gitlab_draft_ready_takes_the_prefix_off() {
+        let (mut store, _) = store();
+        let account = store.accounts.get_mut(&Forge::Gitlab).unwrap();
+        let draft = &mut account.mine[0];
+        draft.title = format!("Draft: {}", draft.title);
+        draft.draft = true;
+        let draft = draft.clone();
+        store.answer = Some(Ok(()));
+        store.mark_ready(&draft);
+        settle(&mut store);
+        let now = store.item(&draft.id).unwrap();
+        assert!(!now.draft);
+        assert!(!now.title.to_lowercase().starts_with("draft"), "{}", now.title);
+    }
 }
