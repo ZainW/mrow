@@ -10,7 +10,7 @@ export const Route = createFileRoute('/mine')({
       path: '/mine',
       title: 'Your own requests in Mrow',
       description:
-        'The merge and pull requests you opened, sorted by whose move it is, with the next step on each, what’s left before it merges, stacks, and an inbox for what changed.',
+        'The pull requests you opened, sorted by whose move it is, with the next step on each, what’s left before it merges, stacks, and an inbox for what changed. GitLab merge requests too.',
     }),
   component: Mine,
 })
@@ -41,11 +41,11 @@ function Mine() {
       >
         <p>
           <em>Your move</em> comes first: the requests that are ready to merge, then the ones with changes asked for, a
-          failed pipeline, conflicts or open threads. Below it are <em>Waiting on reviewers</em> and <em>Drafts</em>.
+          failed CI run, conflicts or open threads. Below it are <em>Waiting on reviewers</em> and <em>Drafts</em>.
         </p>
         <p>
-          Each row says its next step in a line: “Approved by 2 · ready to merge”, “Pipeline failed · test:integration”,
-          “Waiting on Tomás · 3 days”. A dot marks the rows where something changed since you last looked.
+          Each row says its next step in a line: “Approved by 2 · ready to merge”, “Pipeline failed · test (3.12)”,
+          “Waiting on Marcus · 3 days”. A dot marks the rows where something changed since you last looked.
         </p>
       </Chapter>
 
@@ -53,10 +53,10 @@ function Mine() {
         <p>
           Open one of your requests and its Overview starts on that next step, with the button for it. <strong>Merge</strong> asks
           once more before it does anything. <strong>Merge When Ready</strong> turns on the forge’s own auto-merge, so
-          GitLab or GitHub merges it once everything passes. <strong>Mark Ready</strong> marks a draft ready for review.
+          GitHub or GitLab merges it once everything passes. <strong>Mark Ready</strong> marks a draft ready for review.
         </p>
         <p>
-          The Overview ends with what’s left before it can merge: approvals, the pipeline, open threads, conflicts, and the
+          The Overview ends with what’s left before it can merge: approvals, CI, open threads, conflicts, and the
           request below it if it’s part of a stack. Each line that names something goes to it.
         </p>
       </Chapter>
@@ -104,7 +104,7 @@ function Mine() {
       >
         <p>
           The bell at the top of the sidebar counts what changed: a review asked of you or asked again, and on your own
-          requests an approval, changes asked for, a failed pipeline, new threads, ready to merge, merged or closed. Click
+          requests an approval, changes asked for, failed CI, new threads, ready to merge, merged or closed. Click
           a row to open its request, and mark one or all of them done.
         </p>
         <p>
@@ -114,7 +114,7 @@ function Mine() {
         </p>
         <p>
           Notifications come from the same events, one per request. By default a review asked of you or asked again, changes
-          asked for, a failed pipeline and ready to merge send one; approvals, new threads, and merged or closed only go in
+          asked for, failed CI and ready to merge send one; approvals, new threads, and merged or closed only go in
           the inbox.
         </p>
       </Chapter>

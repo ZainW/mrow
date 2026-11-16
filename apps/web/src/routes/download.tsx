@@ -46,8 +46,8 @@ function Download() {
         <ul className="needs">
           <li>macOS 15 or later on Apple silicon, or Linux on x86_64 or arm64 with a Vulkan driver</li>
           <li>
-            <code>glab</code> signed in for GitLab (<code>glab auth login</code>), <code>gh</code> for GitHub (
-            <code>gh auth login</code>), or both
+            <code>gh</code> signed in for GitHub (<code>gh auth login</code>), <code>glab</code> for GitLab (
+            <code>glab auth login</code>), or both
           </li>
         </ul>
         <p>

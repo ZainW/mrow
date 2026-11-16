@@ -17,6 +17,9 @@ export const Route = createRootRoute({
     links: [
       { rel: 'preload', href: '/fonts/InterVariable.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
       { rel: 'preload', href: '/fonts/MrowReading-Regular.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
+      // Bold and mono are above the fold too: the window's titles and refs, and the Linux install command.
+      { rel: 'preload', href: '/fonts/MrowReading-Bold.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
+      { rel: 'preload', href: '/fonts/GeistMono-Variable.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
       { rel: 'stylesheet', href: appCss },
       { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
     ],

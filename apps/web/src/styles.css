@@ -106,6 +106,7 @@ body {
   color: var(--text);
   font: 400 16px/1.5 var(--sans);
   font-feature-settings: 'cv11', 'ss01';
+  font-synthesis: none;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -324,6 +325,45 @@ kbd {
   letter-spacing: -0.022em;
   text-wrap: balance;
 }
+/* The headline's last word follows the window's account. */
+.swap {
+  display: inline-grid;
+  vertical-align: bottom;
+  transition: width 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.swap-word {
+  grid-area: 1 / 1;
+  justify-self: start;
+  white-space: nowrap;
+}
+.swap-word.in {
+  animation: swap-in 0.28s 0.08s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+.swap-word.out {
+  animation: swap-out 0.2s ease-in forwards;
+}
+@keyframes swap-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.3em);
+  }
+}
+@keyframes swap-out {
+  to {
+    opacity: 0;
+    transform: translateY(-0.3em);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .swap {
+    transition: none;
+  }
+  .swap-word.in,
+  .swap-word.out {
+    animation-duration: 0.01s;
+    transform: none;
+  }
+}
 .lede {
   max-width: 34em;
   margin-top: 28px;
@@ -367,6 +407,7 @@ kbd {
   color: var(--text-2);
   font-size: 14.5px;
   line-height: 1.5;
+  text-wrap: pretty;
 }
 .oneline {
   display: flex;
@@ -570,14 +611,18 @@ main {
 
 .rundown-list p {
   color: var(--text-2);
-  font-size: 15.5px;
+  font-size: 16px;
   line-height: 1.55;
+  text-wrap: pretty;
+}
+.rundown-after {
+  grid-column: text;
+  margin-top: 20px;
+  color: var(--text-2);
+  text-wrap: pretty;
 }
 .get-block .plate {
   margin-top: 32px;
-}
-.get-more {
-  margin-top: 4px;
 }
 @media (max-width: 720px) {
   .rundown-list li {

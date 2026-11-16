@@ -73,7 +73,7 @@ function SiteFooter() {
         <Wordmark />
         <p>Free, and it runs on your computer.</p>
         <p className="quiet">
-          Not affiliated with GitLab, GitHub or the makers of the agents it can run. Everyone in the illustrations is made up.
+          Not affiliated with GitHub, GitLab or the makers of the agents it can run. Everyone in the illustrations is made up.
         </p>
       </div>
       <nav className="footer-links" aria-label="More">
