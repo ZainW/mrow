@@ -8,6 +8,7 @@ on:
     paths:
       - apps/desktop/**
       - .github/workflows/check-desktop.yml
+      - .github/scripts/linux-packages.sh
   workflow_dispatch:
 
 concurrency:
@@ -35,7 +36,7 @@ jobs:
       - name: Formatting
         run: cargo fmt --check
       - name: Linux build packages
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libxkbcommon-dev libwayland-dev pkg-config
+        run: ../../.github/scripts/linux-packages.sh
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop

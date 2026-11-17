@@ -6,8 +6,11 @@
 #   MROW_SIGN_IDENTITY="Developer ID Application: …"
 #                                    # sign the image too (the app should be signed with the same)
 #   APPLE_ID=… APPLE_APP_SPECIFIC_PASSWORD=… APPLE_TEAM_ID=…
-#                                    # and have Apple notarize $APP and then the image, stapling each
-#                                    # ticket, so Gatekeeper opens both offline
+#                                    # and have Apple notarize the image (which covers the app in it),
+#                                    # then staple its ticket to the image and to $APP (the copy the
+#                                    # archive ships). One submission instead of two, about a minute
+#                                    # less; the app inside the image has no ticket of its own, so
+#                                    # dragged out of it, it checks with Apple online when first opened.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -36,12 +39,6 @@ notarize() {
 
 if [[ -n "${APPLE_ID:-}" ]]; then
   : "${APPLE_APP_SPECIFIC_PASSWORD:?needed to notarize}" "${APPLE_TEAM_ID:?needed to notarize}"
-  # The app first, so it carries its own ticket: in the image, in the archive made from $APP,
-  # and wherever it's copied, it opens without asking Apple online.
-  ditto -c -k --keepParent "$APP" "$WORK/Mrow.zip"
-  notarize "$WORK/Mrow.zip"
-  xcrun stapler staple "$APP"
-  spctl --assess --type execute -v "$APP"
 fi
 
 ditto "$APP" "$STAGE/Mrow.app"
@@ -64,11 +61,21 @@ if [[ -n "${APPLE_ID:-}" ]]; then
   notarize "$OUT"
   xcrun stapler staple "$OUT"
   spctl --assess --type open --context context:primary-signature -v "$OUT"
+  # The image's ticket covers the app inside it, so $APP (which the archive is made from) can
+  # carry it too. If Apple has no record for the app yet, notarize it on its own as before.
+  if ! xcrun stapler staple "$APP"; then
+    echo "No ticket for $APP from the image; notarizing it separately." >&2
+    ditto -c -k --keepParent "$APP" "$WORK/Mrow.zip"
+    notarize "$WORK/Mrow.zip"
+    xcrun stapler staple "$APP"
+  fi
+  spctl --assess --type execute -v "$APP"
 fi
 
-# The image opens, and the app inside still carries its signature (and its ticket, if notarized).
+# The image opens, and the app inside still carries its signature (and, if notarized, Apple
+# vouches for it: the app in the image has no ticket of its own, so this asks Apple online).
 hdiutil attach -quiet -nobrowse -readonly -mountpoint "$MOUNT" "$OUT"
 codesign --verify --strict "$MOUNT/Mrow.app"
-[[ -z "${APPLE_ID:-}" ]] || xcrun stapler validate -q "$MOUNT/Mrow.app"
+[[ -z "${APPLE_ID:-}" ]] || spctl --assess --type execute -v "$MOUNT/Mrow.app"
 test -L "$MOUNT/Applications"
 echo "Built $OUT ($("$MOUNT/Mrow.app/Contents/MacOS/Mrow" --version))"
