@@ -45,6 +45,8 @@ pub struct Pal {
     pub amber: Color,
     pub blue: Color,
     pub added_line: Color,
+    /// Removed lines' counts and glyphs: the diff's own orange-red, apart from `red`'s failures.
+    pub removed: Color,
     pub removed_line: Color,
     pub added_word: Color,
     pub removed_word: Color,
@@ -86,6 +88,7 @@ impl Pal {
             amber: pick("#9A6B12", "#D9AE5C"),
             blue: pick("#3C6A9E", "#86AEDB"),
             added_line: if dark { c("#5FBF77").alpha(0.11) } else { c("#3F9A55").alpha(0.11) },
+            removed: pick("#B4443A", "#E5847A"),
             removed_line: if dark { c("#E5655A").alpha(0.11) } else { c("#C9483C").alpha(0.09) },
             added_word: if dark { c("#5FBF77").alpha(0.22) } else { c("#3F9A55").alpha(0.22) },
             removed_word: if dark { c("#E5655A").alpha(0.22) } else { c("#C9483C").alpha(0.2) },

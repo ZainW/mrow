@@ -162,7 +162,13 @@ fn item_row(p: &Pal, item: &MergeRequest, status: &Status, rail: Option<Rail>, p
         .child(
             text(short_time(item.updated_at))
                 .font(ui(12.0, MEDIUM).features("'tnum' 1"))
-                .color(if quiet { p.accent } else { p.tertiary })
+                .color(if quiet {
+                    p.accent
+                } else if selected {
+                    p.secondary
+                } else {
+                    p.tertiary
+                })
                 .single_line()
                 .pt(1.5)
                 .help(format!("Last activity {}", crate::ui::components::long_date(item.updated_at))),
@@ -176,7 +182,7 @@ fn item_row(p: &Pal, item: &MergeRequest, status: &Status, rail: Option<Rail>, p
         .gap(6.0)
         .center_y()
         // Cut from the start, so the number that identifies the request stays.
-        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate_head())
+        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(if selected { p.secondary } else { p.tertiary }).single_line().truncate_head())
         .child(el().grow(1.0).min_w(4.0));
     if let Some((at, of)) = place {
         meta = meta.child(

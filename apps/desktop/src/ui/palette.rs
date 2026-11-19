@@ -6,6 +6,7 @@ use rune::{El, ScrollSpec, TextEdit, Tx, col, el, icon, row, text};
 use rune_kit::{Kit, TextInput};
 
 use crate::app::App;
+use crate::data::models::MergeRequest;
 use crate::ui::actions::{self, Listed};
 use crate::ui::components::{keys, rule};
 use crate::ui::icons as I;
@@ -116,12 +117,12 @@ fn ranked<T>(items: Vec<T>, score: impl Fn(&T) -> Option<i32>) -> Vec<T> {
 /// anything is typed), then the requests in the current list that do.
 pub fn entries(s: &App) -> Vec<Entry> {
     let query = s.palette.as_ref().map_or("", |p| p.query.text.as_str()).trim();
-    let commands = ranked(actions::listed(s), |c| fit(query, &c.title));
+    let fits = |m: &MergeRequest| request_fit(query, m.kind().reference_mark(), &m.iid, &m.title);
+    let requests = if query.is_empty() { vec![] } else { ranked(s.store.visible_items(), fits) };
+    // A request whose title starts with what's typed beats a command its letters only scatter through.
+    let strong = query.chars().count() >= 3 && requests.first().and_then(fits).is_some_and(|n| n >= 4000);
+    let commands = ranked(actions::listed(s), |c| fit(query, &c.title).filter(|&n| !strong || n >= 2000));
     let mut out: Vec<Entry> = commands.into_iter().map(Entry::Command).collect();
-    if query.is_empty() {
-        return out;
-    }
-    let requests = ranked(s.store.visible_items(), |m| request_fit(query, m.kind().reference_mark(), &m.iid, &m.title));
     out.extend(requests.into_iter().take(MOST_REQUESTS).map(|m| Entry::Request { id: m.id.clone(), reference: m.reference(), title: m.title }));
     out
 }
@@ -151,6 +152,9 @@ fn run(s: &mut App, tx: &mut Tx, index: usize) {
     match entry {
         Entry::Command(c) => (c.run)(s, tx),
         Entry::Request { id, .. } => {
+            // Picked over a sheet, it shows rather than opening behind it.
+            s.settings_open = false;
+            s.inbox_open = false;
             s.store.select(Some(id.clone()));
             tx.scroll_into_view(format!("rows/{id}"));
         }
@@ -179,7 +183,7 @@ fn empty_line(s: &App, query: &str) -> String {
     let hidden = ranked(actions::unavailable(s), |(title, _)| fit(query, title).filter(|&n| n >= 3000));
     match hidden.first() {
         Some((title, why)) => format!("{} can’t run now. {why}", title.trim_end_matches('…')),
-        None => format!("Nothing matches “{query}”."),
+        None => format!("Nothing in this list matches “{query}”."),
     }
 }
 
@@ -199,7 +203,7 @@ fn entry_row(p: &Pal, entry: &Entry, index: usize, on: bool) -> El {
                 .min_w(0.0)
                 .child(text(c.title.clone()).font(ui(13.0, 400.0)).color(p.text).single_line().truncate().grow(1.0).shrink().min_w(0.0));
             if let Some(k) = &c.keys {
-                r = r.child(text(k.clone()).font(mono(12.0, 400.0)).color(if on { p.secondary } else { p.tertiary }).single_line());
+                r = r.child(text(k.clone()).font(ui(12.0, 400.0)).color(if on { p.secondary } else { p.tertiary }).single_line());
             }
             let label = match &c.keys {
                 Some(k) => format!("{}, {k}", c.title),
@@ -294,7 +298,12 @@ pub fn panel(s: &App, p: &Pal, k: &Kit) -> Option<El> {
         rows = rows.child(entry_row(p, entry, i, i == on));
     }
     let scroller = col().key("palette-scroll").w_full().shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(rows);
-    let hint = text(keys("↑↓ to choose   ↩ to run   esc to close")).font(ui(12.0, 400.0)).color(p.tertiary).single_line().truncate();
+    let hint =
+        text(keys(if cfg!(target_os = "macos") { "↑↓ to choose   ↩ to run   esc to close" } else { "↑↓ to choose   ↩ to run   Esc to close" }))
+            .font(ui(12.0, 400.0))
+            .color(p.tertiary)
+            .single_line()
+            .truncate();
     let panel = col()
         .key("palette")
         .role("dialog")

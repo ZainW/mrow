@@ -1028,7 +1028,7 @@ pub fn toggle_viewed(s: &mut App, tx: &mut Tx) -> bool {
     let Some(f) = spy.file.map(|p| p.what).or(spy.aimed).or(spy.top).map(|f| f.min(files.len() - 1)) else {
         match first_unviewed(s, &item) {
             Some(f) => go(s, tx, Jump::File(Some(f))),
-            None => s.store.show("You’ve viewed every file"),
+            None => s.store.show("You’ve viewed every file."),
         }
         return true;
     };
@@ -1040,7 +1040,7 @@ pub fn toggle_viewed(s: &mut App, tx: &mut Tx) -> bool {
     if next.is_none() {
         // The jump back to its header unfolds it; the file just marked stays folded.
         s.collapsed.insert(format!("{}|{}", item.id, files[f].id()));
-        s.store.show("You’ve viewed every file");
+        s.store.show("You’ve viewed every file.");
     }
     true
 }
@@ -1060,11 +1060,15 @@ fn set_viewed(s: &mut App, item: &MergeRequest, file: &FileDiff, now: bool) {
 pub fn reply_to_picked(s: &mut App, tx: &mut Tx) -> bool {
     let Some(item) = s.store.selected().cloned() else { return false };
     let Some(thread) = picked_thread(s, &item.id) else {
-        s.store.show("Press N to pick a thread to reply to");
+        s.store.show("Press N to pick a thread to reply to.");
         return true;
     };
     let threads = s.store.discussions.get(&item.id).and_then(Loadable::value).cloned().unwrap_or_default();
-    let Some(thread) = threads.iter().find(|t| t.id == thread).filter(|t| takes_replies(t)) else { return false };
+    let Some(thread) = threads.iter().find(|t| t.id == thread) else { return false };
+    if !takes_replies(thread) {
+        s.store.show("This thread takes no replies.");
+        return true;
+    }
     tx.instant();
     s.replying.insert(format!("{}|{}", item.id, thread.id));
     tx.focus_when_shown(draft_field_key(&DraftKey::Reply(item.id.clone(), thread.id.clone())), false);
@@ -1400,7 +1404,7 @@ fn chips(p: &Pal, item: &MergeRequest, mine: bool) -> El {
             .radius(6.0)
             .fill(p.hover)
             .child(text(format!("+{}", item.additions)).font(mono(12.0, 400.0)).color(p.green).single_line())
-            .child(text(format!("−{}", item.deletions)).font(mono(12.0, 400.0)).color(p.red).single_line())
+            .child(text(format!("−{}", item.deletions)).font(mono(12.0, 400.0)).color(p.removed).single_line())
             .child(text(format!("· {} {files}", item.file_count)).font(mono(12.0, 400.0)).color(p.secondary).single_line()),
     );
     if let Some(pipe) = item.pipeline {
@@ -1573,7 +1577,7 @@ fn entry_row(s: &App, p: &Pal, page: &Page, f: usize) -> El {
     let (glyph, tint) = if file.new_file {
         (&I::DOC_PLUS, p.green)
     } else if file.deleted_file {
-        (&I::DOC_MINUS, p.red)
+        (&I::DOC_MINUS, p.removed)
     } else if file.renamed_file {
         (&I::DOC_ARROW, p.tertiary)
     } else {
@@ -1581,6 +1585,9 @@ fn entry_row(s: &App, p: &Pal, page: &Page, f: usize) -> El {
     };
     let path = file.path();
     let name = &path[page.tree.label_at[f]..];
+    let label = text(name.to_string()).font(mono(12.0, 400.0)).color(if state == Viewed::Yes { p.tertiary } else { p.text }).single_line();
+    // A whole path loses its folders first; a name in a folder keeps its start and its extension.
+    let label = if page.tree.label_at[f] > 0 { label.truncate_middle() } else { label.truncate_head() }.grow(1.0).shrink().min_w(0.0);
     let whole = if file.renamed_file && file.old_path != file.new_path { format!("{} → {path}", file.old_path) } else { path.to_string() };
     let row = row()
         .key(format!("file-entry-{f}"))
@@ -1594,16 +1601,7 @@ fn entry_row(s: &App, p: &Pal, page: &Page, f: usize) -> El {
         .center_y()
         .hover(p.hover)
         .child(el().w(14.0).center().child(icon(glyph, 12.0).color(tint)))
-        .child(
-            text(name.to_string())
-                .font(mono(12.0, 400.0))
-                .color(if state == Viewed::Yes { p.tertiary } else { p.text })
-                .single_line()
-                .truncate_head()
-                .grow(1.0)
-                .shrink()
-                .min_w(0.0),
-        )
+        .child(label)
         .child(counts(p, file.added, file.removed).opacity(if state == Viewed::Yes { 0.6 } else { 1.0 }))
         .child(viewed_mark(p, state, p.well))
         .on_press_tx(move |s: &mut App, tx: &mut Tx| go(s, tx, Jump::File(Some(f))));
@@ -1617,7 +1615,7 @@ fn counts(p: &Pal, added: usize, removed: usize) -> El {
         r = r.child(text(format!("+{added}")).font(mono(12.0, MEDIUM)).color(p.green).single_line());
     }
     if removed > 0 {
-        r = r.child(text(format!("−{removed}")).font(mono(12.0, MEDIUM)).color(p.red).single_line());
+        r = r.child(text(format!("−{removed}")).font(mono(12.0, MEDIUM)).color(p.removed).single_line());
     }
     r
 }
@@ -1659,7 +1657,7 @@ fn file_header(s: &App, p: &Pal, page: &Page, f: usize) -> El {
         name = name.child(chip(p, None, "New", p.green, None, false));
     }
     if file.deleted_file {
-        name = name.child(chip(p, None, "Deleted", p.red, None, false));
+        name = name.child(chip(p, None, "Deleted", p.removed, None, false));
     }
     if file.generated_file {
         name = name.child(chip(p, None, "Generated", p.secondary, None, false));

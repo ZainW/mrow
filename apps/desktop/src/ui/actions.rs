@@ -257,9 +257,9 @@ fn hold_selected(s: &mut App, tx: &mut Tx, picked: &str) {
     if fits {
         crate::ui::menus::run_snooze(s, tx, &item.id, picked);
     } else if picked == "unsnooze" || picked == "unmute" {
-        s.store.show(if picked == "unmute" { "It isn't muted." } else { "It isn't snoozed." });
+        s.store.show(if picked == "unmute" { "It isn’t muted." } else { "It isn’t snoozed." });
     } else if held.is_some_and(|h| h.muted()) {
-        s.store.show("It's muted. Unmute it first.");
+        s.store.show("It’s muted. Unmute it first.");
     } else {
         let noun = item.kind().noun();
         s.store.show(&cannot_snooze(noun));
@@ -352,7 +352,7 @@ const COMMANDS: &[Command] = &[
     cmd(V, "previous-open-thread", "Previous Open Thread", None, previous_open_thread),
     cmd(V, "next-thread", "Next Thread", None, next_thread),
     cmd(V, "previous-thread", "Previous Thread", None, previous_thread),
-    cmd(V, "toggle-viewed", "Mark File as Viewed", None, toggle_viewed),
+    cmd(V, "toggle-viewed", "Toggle File Viewed", None, toggle_viewed),
     cmd(V, "reply", "Reply to Thread", None, reply),
     cmd(V, "comment", "Write a Comment", None, comment),
     sep("View"),
@@ -408,13 +408,19 @@ pub fn listed(s: &App) -> Vec<Listed> {
         .collect()
 }
 
-/// The menu's title, or one that says more out of the menu's context: which account.
+/// The menu's title, or one that says more out of the menu's context: which account, which list,
+/// which tab.
 fn title(s: &App, c: &Command) -> String {
     let account = match c.id {
         "account-0" => 0,
         "account-1" => 1,
         // Friday's morning after is Monday's.
         "snooze-morning" => return format!("Snooze Until {}", crate::data::snooze::morning_word(&chrono::Local::now())),
+        "mode-0" | "mode-1" | "mode-2" | "mode-3" => return format!("Show {}", c.title),
+        "go-overview" | "go-changes" | "go-conversation" => return format!("Show {}", c.title),
+        "inbox" => return "Show Inbox".into(),
+        "filter" => return "Filter the List".into(),
+        "find" => return "Find in the List".into(),
         _ => return c.title.to_string(),
     };
     s.store.forges().get(account).map_or_else(|| c.title.to_string(), |f| format!("Switch to {}", f.name()))
@@ -524,15 +530,15 @@ fn not_now(s: &App, id: &str) -> Option<String> {
         "close-others" if !store.tabs.iter().any(|t| *t != item.id) => Some("No other tabs are open.".into()),
         "approve" if store.pending_count(item) > 0 => None,
         "approve" | "review" if !item.is_open() => Some(closed()),
-        "approve" if mine => Some(format!("Nobody approves their own {noun}.")),
+        "approve" if mine => Some(format!("You can’t approve your own {noun}.")),
         "approve" if !idle => Some(wait()),
-        "review" if !crate::ui::detail::offers_review(s, item) => Some(format!("Hold a comment on your {noun} first.")),
+        "review" if !crate::ui::detail::offers_review(s, item) => Some(format!("Leave a comment to send with the review first.")),
         "edit-title" | "edit-reviewers" | "update-branch" | "close-request" | "ask-again" | "reopen" if !mine => Some(only_mine()),
         "edit-title" | "edit-reviewers" | "update-branch" | "close-request" | "ask-again" if !item.is_open() => Some(closed()),
         "ask-again" if crate::ui::manage::waiting_on(item).is_empty() => Some("Nobody is waiting to review it.".into()),
         "reopen" if item.state != "closed" => Some(format!("This {noun} isn’t closed.")),
         "update-branch" | "close-request" | "ask-again" | "reopen" if !idle => Some(wait()),
-        "toggle-viewed" if s.tab(&item.id) != Tab::Changes => Some("Open the Changes tab first.".into()),
+        "toggle-viewed" | "previous-file" if s.tab(&item.id) != Tab::Changes => Some("Open the Changes tab first.".into()),
         "unsnooze" if !held.is_some_and(|h| !h.muted()) => Some("It isn’t snoozed.".into()),
         "unmute" if !held.is_some_and(|h| h.muted()) => Some("It isn’t muted.".into()),
         "snooze-morning" | "snooze-change" | "mute" if held.is_some_and(|h| h.muted()) => Some("It’s muted. Unmute it first.".into()),

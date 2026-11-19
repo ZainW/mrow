@@ -324,7 +324,7 @@ fn queue(rows: El) -> El {
                         s.store.unfold_stacks(open);
                     }
                     if matches!(s.store.mode, QueueMode::ToReview | QueueMode::Mine) {
-                        s.store.snoozed_open = open;
+                        s.store.set_snoozed_open(open);
                     }
                 }
                 rune::Key::Enter => {
@@ -352,6 +352,8 @@ pub fn section_header(p: &Pal, title: &str) -> El {
 fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool, sidebar_width: f32) -> El {
     let stale = item.is_open() && item.my_state.needs_review() && !item.draft && (chrono::Utc::now() - item.requested_at).num_seconds() > 2 * 86_400;
     let when = if item.is_open() { item.requested_at } else { item.merged_at.unwrap_or(item.updated_at) };
+    // Quiet text on the selected row's fill steps up a shade, to stay readable.
+    let quiet = if selected { p.secondary } else { p.tertiary };
     let time_help = if !item.is_open() {
         let state = item.state.clone();
         let mut chars = state.chars();
@@ -383,7 +385,7 @@ fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool, sideb
         .child(
             text(short_time(when))
                 .font(ui(12.0, MEDIUM).features("'tnum' 1"))
-                .color(if stale { p.accent } else { p.tertiary })
+                .color(if stale { p.accent } else { quiet })
                 .single_line()
                 .pt(1.5)
                 .help(time_help),
@@ -398,8 +400,8 @@ fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool, sideb
     let meta = row()
         .gap(6.0)
         .center_y()
-        .child(text(reference).font(reference_font).color(p.tertiary).single_line().truncate_head().min_w(whole.min(room).ceil()))
-        .child(text("·").font(ui(12.0, 400.0)).color(p.tertiary))
+        .child(text(reference).font(reference_font).color(quiet).single_line().truncate_head().min_w(whole.min(room).ceil()))
+        .child(text("·").font(ui(12.0, 400.0)).color(quiet))
         .child(text(item.author.name.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
         .child(el().grow(1.0).min_w(4.0))
         .child(badges(p, item));
@@ -561,12 +563,13 @@ fn held_row(p: &Pal, item: &MergeRequest, back: &str, muted: bool, selected: boo
         .items_start()
         .child(text(item.title.clone()).font(ui(13.0, MEDIUM).lines(1.3)).color(p.secondary).single_line().truncate().grow(1.0).shrink().min_w(0.0))
         .child(el().size(16.0, 16.0).child(undo));
+    let quiet = if selected { p.secondary } else { p.tertiary };
     let meta = row()
         .gap(6.0)
         .center_y()
-        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate_head().shrink().min_w(0.0))
-        .child(text("·").font(ui(12.0, 400.0)).color(p.tertiary))
-        .child(text(back.to_string()).font(ui(12.0, 400.0)).color(p.tertiary).single_line());
+        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(quiet).single_line().truncate_head().shrink().min_w(0.0))
+        .child(text("·").font(ui(12.0, 400.0)).color(quiet))
+        .child(text(back.to_string()).font(ui(12.0, 400.0)).color(quiet).single_line());
     let body = col().gap(4.0).grow(1.0).shrink().min_w(0.0).child(title_row).child(meta);
     // Its text lines up with the list's titles, past the unread dot's column.
     let card = row().key("card").w_full().gap(8.0).pl(24.0).pr(12.0).py(8.0).radius(7.0).hover_group().child(body);

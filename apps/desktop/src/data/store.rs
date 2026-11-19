@@ -786,6 +786,18 @@ impl Store {
         };
     }
 
+    /// Opens or closes the snoozed fold. Closing it over a held request moves the selection to
+    /// the list's last row, so the keys go on from a row that's drawn.
+    pub fn set_snoozed_open(&mut self, open: bool) {
+        if !open && self.selected().is_some_and(|m| self.is_held(m)) {
+            self.snoozed_open = false;
+            if let Some(last) = self.visible_items().pop() {
+                self.select(Some(last.id));
+            }
+        }
+        self.snoozed_open = open;
+    }
+
     pub fn select_offset(&mut self, offset: i64) {
         let items = self.visible_items();
         if items.is_empty() {
