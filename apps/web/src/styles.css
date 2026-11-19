@@ -2412,6 +2412,221 @@ button.thread-where {
   line-height: 1.55;
 }
 
+/* Home: whose account each agent uses, in the margin */
+.note-agents {
+  display: grid;
+  gap: 10px;
+}
+.note-agents + p {
+  margin-top: 16px;
+}
+.note-agents dt {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Home: memory, Mrow beside GitHub in Chrome. One series, so Mrow carries the accent and the
+   rest stay ink; every bar has its value beside it. */
+.memory table {
+  width: 100%;
+  border-collapse: collapse;
+  border-top: 1px solid var(--line);
+}
+.memory tr {
+  border-bottom: 1px solid var(--line);
+}
+.memory th,
+.memory td {
+  padding: 14px 0;
+  text-align: left;
+  vertical-align: middle;
+}
+.memory th {
+  width: 17em;
+  padding-right: 24px;
+  font-weight: 400;
+}
+.memory-who {
+  display: block;
+  font: 600 15px/1.35 var(--sans);
+}
+.memory-what {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+.memory td {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* Holds a row's height when the cell is a flex box inside the table row. */
+  min-height: 74px;
+}
+.memory-bar {
+  position: relative;
+  flex: none;
+  min-width: 4px;
+  height: 12px;
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--text) 34%, transparent);
+}
+/* Mrow's bar: solid to what it used, hatched to how high it went with the other graphics driver. */
+.ours .memory-bar {
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 45%, transparent) 0 2px,
+    transparent 2px 5px
+  );
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.memory-fill {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  border-radius: 0 4px 4px 0;
+}
+.ours .memory-fill {
+  background: var(--accent);
+}
+.memory-value {
+  flex: none;
+  display: grid;
+  font: 500 15px/1.3 var(--sans);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ours .memory-value {
+  font-weight: 650;
+}
+.memory-upto {
+  color: var(--text-3);
+  font-size: 12.5px;
+  font-weight: 450;
+}
+.memory-how {
+  margin-top: 16px;
+  color: var(--text-3);
+  font-size: 13px;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+@media (max-width: 720px) {
+  .memory tr {
+    display: block;
+    padding: 12px 0 14px;
+  }
+  .memory th,
+  .memory td {
+    display: flex;
+    width: auto;
+    padding: 0;
+  }
+  .memory th {
+    flex-direction: column;
+  }
+  .memory td {
+    min-height: 0;
+    margin-top: 10px;
+  }
+}
+
+/* Home: Mrow beside GitHub in Chrome and a hosted service */
+.compare {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+  line-height: 1.45;
+}
+.compare th,
+.compare td {
+  padding: 13px 16px;
+  text-align: left;
+  vertical-align: top;
+  text-wrap: pretty;
+}
+.compare thead th {
+  padding-block: 14px;
+  font-weight: 600;
+}
+.compare tbody tr {
+  border-top: 1px solid var(--line);
+}
+.compare tbody th {
+  width: 9em;
+  padding-left: 0;
+  color: var(--text-2);
+  font-weight: 500;
+}
+.compare td {
+  color: var(--text-2);
+}
+.compare .ours {
+  width: 28%;
+  background: var(--paper);
+  color: var(--text);
+  box-shadow:
+    inset 1px 0 0 var(--line),
+    inset -1px 0 0 var(--line);
+}
+.compare thead .ours {
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  box-shadow:
+    inset 1px 0 0 var(--line),
+    inset -1px 0 0 var(--line),
+    inset 0 1px 0 var(--line);
+}
+.compare tbody tr:last-child .ours {
+  border-radius: 0 0 var(--radius-card) var(--radius-card);
+  box-shadow:
+    inset 1px 0 0 var(--line),
+    inset -1px 0 0 var(--line),
+    inset 0 -1px 0 var(--line);
+}
+@media (max-width: 720px) {
+  .compare thead {
+    display: none;
+  }
+  .compare,
+  .compare tbody,
+  .compare tr,
+  .compare th,
+  .compare td {
+    display: block;
+    width: auto;
+  }
+  .compare tbody tr {
+    padding: 14px 0 16px;
+  }
+  .compare tbody th {
+    padding: 0 0 8px;
+    color: var(--text);
+    font-weight: 600;
+  }
+  .compare td,
+  .compare .ours,
+  .compare tbody tr:last-child .ours {
+    display: grid;
+    width: auto;
+    grid-template-columns: 9.5em minmax(0, 1fr);
+    gap: 12px;
+    padding: 4px 0;
+    background: none;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .compare td::before {
+    content: attr(data-col);
+    color: var(--text-3);
+  }
+  .compare td.ours::before {
+    color: var(--accent);
+    font-weight: 600;
+  }
+}
+
 /* Privacy flow */
 .flow {
   display: grid;

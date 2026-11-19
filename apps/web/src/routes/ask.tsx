@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { Chapter, KeyList, PageHead } from '../components/Chapter'
+import { Chapter, KeyList, Keys, PageHead } from '../components/Chapter'
 import { DraftFigure } from '../components/figures'
 import { Page } from '../components/Layout'
 import { seo } from '../lib/site'
@@ -9,9 +9,9 @@ export const Route = createFileRoute('/ask')({
   head: () =>
     seo({
       path: '/ask',
-      title: 'Ask an agent about the change, in Mrow',
+      title: 'Ask your own agent about the change, in Mrow',
       description:
-        'A chat beside the review with Cursor, Claude, opencode or pi. It reads your clone, drafts review comments, and posts nothing until you do.',
+        'A chat beside the review with the agent you already use: Cursor, Claude Code, opencode or pi, on your own plan. It reads your clone, drafts review comments, and posts nothing until you do.',
     }),
   component: Ask,
 })
@@ -43,10 +43,11 @@ const NEEDS: [string, ReactNode][] = [
 function Ask() {
   return (
     <Page>
-      <PageHead title="Ask an agent about the change">
+      <PageHead title="Ask your own agent about the change">
         <p>
-          Press ⌘L and a chat opens beside the review. Ask where else a function is called, what a change might break,
-          or for a comment worth leaving. The agent reads your own clone; it can’t change anything, and it posts nothing.
+          Press <Keys keys={['⌘L']} /> and a chat opens beside the review, with the agent you already use. Ask where
+          else a function is called, what a change might break, or for a comment worth leaving. The agent reads your own
+          clone; it can’t change anything, and it posts nothing.
         </p>
       </PageHead>
 
@@ -65,13 +66,22 @@ function Ask() {
         }
       >
         <p>
-          Mrow runs the agent you pick: Cursor, Claude, opencode or pi. Your first question carries the description, the
+          Mrow runs the agent you pick: Cursor, Claude Code, opencode or pi. It runs on your own sign-in and plan, with
+          the model and effort you choose, and Mrow doesn’t stand between you and the model. There’s no Mrow AI plan,
+          and nothing to pay on top of what you already pay for the agent.
+        </p>
+        <p>
+          Your first question carries the description, the
           diff and the threads, and the agent can read and search your local clone as it’s checked out. Mrow finds the
           clone from the remotes in the usual folders, or you point it at one.
         </p>
         <p>
           You get one chat per request. It stays with the agent it started on and is kept across relaunches. The first
           question also carries a short set of writing rules, so answers come back plain.
+        </p>
+        <p>
+          You don’t have to wait for an answer to finish. Send a message while the agent is working and it stops and
+          takes that as the next question; esc puts it back in the box.
         </p>
       </Chapter>
 

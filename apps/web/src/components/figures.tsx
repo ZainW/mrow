@@ -376,3 +376,109 @@ export function FlowFigure() {
     </div>
   )
 }
+
+/** Memory in use, measured 2026-11-19 (the figure's note says how). Whole megabytes. */
+const MEMORY: { who: string; what: string; mb: number; upTo?: number; ours?: boolean }[] = [
+  { who: 'Mrow', what: 'The whole app, a 40-file, 12,000-line diff open', mb: 33, upTo: 79, ours: true },
+  { who: 'One GitHub tab', what: 'A pull request’s changes, in Chrome', mb: 157 },
+  { who: 'Five GitHub tabs', what: 'Five pull requests, a tab each', mb: 444 },
+  { who: 'Chrome, with those five', what: 'The tabs and the browser around them', mb: 903 },
+]
+
+/** Mrow's memory beside GitHub's in Chrome. A table, so it reads without the bars. */
+export function MemoryFigure() {
+  const max = Math.max(...MEMORY.map((m) => m.upTo ?? m.mb))
+  return (
+    <figure className="memory">
+      <table>
+        <caption className="sr-only">Memory in use, in megabytes</caption>
+        <thead className="sr-only">
+          <tr>
+            <th scope="col">What</th>
+            <th scope="col">Memory</th>
+          </tr>
+        </thead>
+        <tbody>
+          {MEMORY.map((m) => (
+            <tr key={m.who} className={m.ours ? 'ours' : undefined}>
+              <th scope="row">
+                <span className="memory-who">{m.who}</span>
+                <span className="memory-what">{m.what}</span>
+              </th>
+              <td>
+                <span className="memory-bar" aria-hidden="true" style={{ width: `calc(${(m.upTo ?? m.mb) / max} * (100% - 7.5em))` }}>
+                  <span className="memory-fill" style={{ width: `${(m.mb / (m.upTo ?? m.mb)) * 100}%` }} />
+                </span>
+                <span className="memory-value">
+                  {m.mb} MB
+                  {m.upTo && <span className="memory-upto">up to {m.upTo}</span>}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <figcaption className="memory-how">
+        Memory in use (proportional set size), measured on 19 November 2026 on Linux, with an AMD Ryzen AI Max+ 395 and
+        Radeon 8060S graphics. Mrow is a release build in a window, showing a made-up review; it reached 79 MB on runs
+        where the graphics stack also loaded NVIDIA’s driver. Chrome is Chrome for Testing 158 with a fresh profile,
+        signed out of GitHub, each tab scrolled until every file’s diff had loaded. The pull requests were
+        facebook/react #38278, #38135 and #38172, which measured 151 to 158 MB, then #38209 and #38215 for five. A tab
+        is its own process; the browser is every Chrome process.
+      </figcaption>
+    </figure>
+  )
+}
+
+/** The agents Mrow can run, and whose account each one uses. */
+export const AGENT_ACCOUNTS: [string, string][] = [
+  ['Cursor', 'Your Cursor plan'],
+  ['Claude Code', 'Your Claude plan or API key'],
+  ['opencode', 'Any provider you’ve signed it in to'],
+  ['pi', 'Any provider you’ve signed it in to'],
+]
+
+const COMPARE: { row: string; mrow: string; github: string; hosted: string }[] = [
+  { row: 'What it is', mrow: 'An app on your computer', github: 'A tab in your browser', hosted: 'A website in your browser' },
+  { row: 'Memory', mrow: 'About 33 MB for everything', github: 'About 157 MB per pull request', hosted: 'A browser tab per review' },
+  {
+    row: 'Your token',
+    mrow: 'Stays in gh or glab; Mrow never reads it',
+    github: 'Your browser’s GitHub session',
+    hosted: 'Held on their servers, through an app you authorize',
+  },
+  { row: 'Your code', mrow: 'Your clone, on your disk', github: 'Stays on GitHub', hosted: 'Passes through their servers' },
+  { row: 'AI', mrow: 'The agent you already use, kept to reading', github: 'Copilot, on GitHub’s plans', hosted: 'Theirs, on their bill' },
+  { row: 'Price', mrow: 'Free, MIT-licensed', github: 'Comes with GitHub', hosted: 'Usually a monthly seat' },
+]
+
+/** Mrow beside GitHub in a browser and a hosted review service. */
+export function CompareFigure() {
+  return (
+    <table className="compare">
+      <caption className="sr-only">Mrow compared with GitHub in Chrome and a hosted review service</caption>
+      <thead>
+        <tr>
+          <td />
+          <th scope="col" className="ours">
+            Mrow
+          </th>
+          <th scope="col">GitHub in Chrome</th>
+          <th scope="col">A hosted review service</th>
+        </tr>
+      </thead>
+      <tbody>
+        {COMPARE.map((c) => (
+          <tr key={c.row}>
+            <th scope="row">{c.row}</th>
+            <td className="ours" data-col="Mrow">
+              {c.mrow}
+            </td>
+            <td data-col="GitHub in Chrome">{c.github}</td>
+            <td data-col="A hosted review service">{c.hosted}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}

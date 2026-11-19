@@ -20,7 +20,8 @@ function Privacy() {
     <Page>
       <PageHead title="What Mrow talks to">
         <p>
-          Mrow has no server, no sign-up and no analytics. Here is everything it connects to, and when.
+          Mrow has no server, no web version, no sign-up and no analytics. It’s an app on your computer and nothing
+          else. Here is everything it connects to, and when.
         </p>
       </PageHead>
 

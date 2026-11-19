@@ -31,7 +31,7 @@ and shows it beside the downloads; nothing is fetched at run time.
 
 | Path | What |
 |---|---|
-| `/` | The pitch, the interactive window, a line on each page, the download |
+| `/` | The pitch, the interactive window, why it (your own agent, memory beside a GitHub tab, tokens in gh, free), a comparison, a line on each page, the download |
 | `/reviewing` | The four lists, a review in three tabs, finishing a review (resolve, pending comments, verdicts), tabs, the two accounts |
 | `/mine` | Your own requests by whose move it is, what's left before a merge, stacks, the inbox and notifications |
 | `/ask` | The chat with Cursor, Claude, opencode or pi, drafted comments, how each agent is kept to reading |
