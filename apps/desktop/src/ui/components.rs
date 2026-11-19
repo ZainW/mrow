@@ -143,7 +143,7 @@ impl ChromeButton {
                         .center()
                         .inert()
                         .child(text(shown).font(ui(11.0, SEMIBOLD).features("'tnum' 1")).color(p.paper).single_line());
-                    b = b.gap(4.0).pl((28.0 - self.icon_size) / 2.0).pr(6.0).child(pill);
+                    b = b.gap(4.0).pl(((28.0 - self.icon_size) / 2.0).max(0.0)).pr(6.0).child(pill);
                 }
                 None => b = b.w(28.0),
             },
@@ -166,7 +166,7 @@ impl ChromeButton {
                 }
             }
         }
-        if let Some(w) = self.width {
+        if let Some(w) = self.width.filter(|_| self.badge.is_none()) {
             b = b.w(w);
         }
         let fill = match self.style {
