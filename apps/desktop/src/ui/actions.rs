@@ -379,7 +379,7 @@ const COMMANDS: &[Command] = &[
     cmd(R, "reopen", "Reopen", None, crate::ui::manage::reopen),
     sep("Review"),
     // Snoozing and muting. Mute has no key: it's the stronger, rarer one.
-    cmd(R, "snooze-morning", "Snooze Until Tomorrow", Some("cmd+shift+s"), snooze_until_tomorrow),
+    cmd(R, "snooze-morning", "Snooze Until Morning", Some("cmd+shift+s"), snooze_until_tomorrow),
     cmd(R, "snooze-change", "Snooze Until It Changes", None, snooze_until_it_changes),
     cmd(R, "unsnooze", "Unsnooze", None, unsnooze),
     cmd(R, "mute", "Mute", None, mute),
@@ -413,6 +413,8 @@ fn title(s: &App, c: &Command) -> String {
     let account = match c.id {
         "account-0" => 0,
         "account-1" => 1,
+        // Friday's morning after is Monday's.
+        "snooze-morning" => return format!("Snooze Until {}", crate::data::snooze::morning_word(&chrono::Local::now())),
         _ => return c.title.to_string(),
     };
     s.store.forges().get(account).map_or_else(|| c.title.to_string(), |f| format!("Switch to {}", f.name()))
@@ -530,6 +532,7 @@ fn not_now(s: &App, id: &str) -> Option<String> {
         "ask-again" if crate::ui::manage::waiting_on(item).is_empty() => Some("Nobody is waiting to review it.".into()),
         "reopen" if item.state != "closed" => Some(format!("This {noun} isn’t closed.")),
         "update-branch" | "close-request" | "ask-again" | "reopen" if !idle => Some(wait()),
+        "toggle-viewed" if s.tab(&item.id) != Tab::Changes => Some("Open the Changes tab first.".into()),
         "unsnooze" if !held.is_some_and(|h| !h.muted()) => Some("It isn’t snoozed.".into()),
         "unmute" if !held.is_some_and(|h| h.muted()) => Some("It isn’t muted.".into()),
         "snooze-morning" | "snooze-change" | "mute" if held.is_some_and(|h| h.muted()) => Some("It’s muted. Unmute it first.".into()),

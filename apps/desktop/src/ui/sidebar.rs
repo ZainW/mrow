@@ -323,7 +323,9 @@ fn queue(rows: El) -> El {
                     if s.store.mode == QueueMode::Mine {
                         s.store.unfold_stacks(open);
                     }
-                    s.store.snoozed_open = open;
+                    if matches!(s.store.mode, QueueMode::ToReview | QueueMode::Mine) {
+                        s.store.snoozed_open = open;
+                    }
                 }
                 rune::Key::Enter => {
                     if let Some(item) = s.store.selected() {
@@ -468,14 +470,15 @@ impl Fold {
 }
 
 /// The fold's lines for the current list: a count, and when it's open each request with when it
-/// comes back. `alone` says the list has nothing else, which a line above the fold says.
+/// comes back. `alone` says the list has nothing else, which a line above the fold says unless
+/// a filter is what emptied it.
 pub fn fold_lines(store: &Store, alone: bool) -> Vec<Fold> {
     let held = store.held_items();
     if held.is_empty() {
         return vec![];
     }
     let mut lines = Vec::new();
-    if alone {
+    if alone && !store.filtering() {
         lines.push(Fold::Note(if store.mode == QueueMode::Mine { "Nothing else of yours is open." } else { "Nothing else is waiting on you." }));
     }
     let muted = held.iter().filter(|(_, h)| h.hold.muted()).count();
@@ -657,7 +660,8 @@ fn footer(s: &App, p: &Pal, dark: bool) -> El {
         let label = match (&offline, store.from_cache(), short_time(last)) {
             (Some(_), _, _) => "Offline".to_string(),
             // Lists from the last run, until the refresh lands: say how old they are.
-            (None, true, ago) if ago != "now" => format!("Updated {ago} ago"),
+            // A duration ("3d"), not a date ("Nov 3"), which reads fine without "ago".
+            (None, true, ago) if ago != "now" && !ago.ends_with(|c: char| c.is_ascii_digit()) => format!("Updated {ago} ago"),
             (None, _, ago) => format!("Updated {ago}"),
         };
         let tip = match offline {

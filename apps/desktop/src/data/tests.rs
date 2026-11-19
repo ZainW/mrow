@@ -1996,6 +1996,18 @@ mod snooze {
     }
 
     #[test]
+    fn a_list_without_diff_stats_is_no_push() {
+        let mut item = request("1");
+        (item.additions, item.deletions, item.file_count) = (0, 0, 0);
+        let s = held(&item, Hold::Change, false);
+        let mut sized = item.clone();
+        (sized.additions, sized.deletions, sized.file_count) = (12, 3, 2);
+        assert_eq!(wakes(&s, Some(&sized), Utc::now()), None, "the stats arriving isn't a push");
+        let s = held(&sized, Hold::Change, false);
+        assert_eq!(wakes(&s, Some(&item), Utc::now()), None, "nor them going missing");
+    }
+
+    #[test]
     fn one_of_mine_wakes_on_reviewers_not_on_my_own_push() {
         let mut item = request("2");
         item.my_state = ReviewState::Unknown;

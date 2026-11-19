@@ -1036,10 +1036,12 @@ pub fn toggle_viewed(s: &mut App, tx: &mut Tx) -> bool {
     set_viewed(s, &item, &files[f], now);
     let viewed: Vec<bool> = files.iter().map(|file| s.store.viewed(file, &item) == Viewed::Yes).collect();
     let next = if now { next_unviewed(&viewed, f) } else { Some(f) };
+    go(s, tx, Jump::File(Some(next.unwrap_or(f))));
     if next.is_none() {
+        // The jump back to its header unfolds it; the file just marked stays folded.
+        s.collapsed.insert(format!("{}|{}", item.id, files[f].id()));
         s.store.show("You’ve viewed every file");
     }
-    go(s, tx, Jump::File(Some(next.unwrap_or(f))));
     true
 }
 

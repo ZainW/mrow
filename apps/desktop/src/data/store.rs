@@ -1899,6 +1899,11 @@ impl Store {
         item.is_open() && (self.is_mine(item) || item.my_state.needs_review())
     }
 
+    /// Whether a filter is narrowing the current list.
+    pub fn filtering(&self) -> bool {
+        !self.filter.trim().is_empty() || self.author_filter.is_some() || (self.mode == QueueMode::Mine && self.mine_filter.is_some())
+    }
+
     /// The held requests the current list would show, soonest back first, muted last: what its
     /// snoozed fold holds. Only To review and Mine have one.
     pub fn held_items(&self) -> Vec<(MergeRequest, Snooze)> {
@@ -1970,6 +1975,9 @@ impl Store {
         if !woken.is_empty() {
             self.save_holds();
         }
+        if self.holds.is_empty() {
+            self.snoozed_open = false;
+        }
     }
 
     /// Lets go of holds on requests that finished, or that every list of their account left a
@@ -1987,6 +1995,9 @@ impl Store {
         if holds != self.holds {
             self.holds = holds;
             self.save_holds();
+        }
+        if self.holds.is_empty() {
+            self.snoozed_open = false;
         }
     }
 

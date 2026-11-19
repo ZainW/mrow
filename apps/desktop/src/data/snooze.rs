@@ -187,7 +187,9 @@ pub fn changed(snooze: &Snooze, item: &MergeRequest) -> bool {
         let more_threads = matches!((was.threads, now.threads), (Some(a), Some(b)) if b > a);
         reviewed || !now.approved_by.is_subset(&was.approved_by) || (now.failed && !was.failed) || more_threads
     } else {
-        asked_again(was, &now) || now.size != was.size
+        // A size of nothing is a list that left the stats out, not a push.
+        let pushed = was.size != (0, 0, 0) && now.size != (0, 0, 0) && now.size != was.size;
+        asked_again(was, &now) || pushed
     }
 }
 

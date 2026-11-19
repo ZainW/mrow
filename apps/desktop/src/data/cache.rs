@@ -110,25 +110,29 @@ impl Disk {
 
     /// Writes the queue off the UI thread. Writes land in the order they were asked for.
     pub fn write_queue(&self, queue: &SavedQueue) {
-        static ORDER: AtomicU64 = AtomicU64::new(0);
-        static LAST: Mutex<u64> = Mutex::new(0);
         let Ok(bytes) = serde_json::to_vec(queue) else { return };
-        let turn = ORDER.fetch_add(1, Ordering::Relaxed) + 1;
+        let turn = QUEUE_TURN.fetch_add(1, Ordering::Relaxed) + 1;
         let path = self.queue_file();
-        io(move || {
-            let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-            if turn > *last {
-                write_atomic(&path, &bytes);
-                *last = turn;
-            }
-        });
+        io(move || write_queue_turn(&path, &bytes, turn));
     }
 
-    /// Writes it now, on this thread: when quitting.
+    /// Writes it now, on this thread: when quitting. Writes asked for before it are skipped.
     pub fn write_queue_now(&self, queue: &SavedQueue) {
         if let Ok(bytes) = serde_json::to_vec(queue) {
-            write_atomic(&self.queue_file(), &bytes);
+            write_queue_turn(&self.queue_file(), &bytes, QUEUE_TURN.fetch_add(1, Ordering::Relaxed) + 1);
         }
+    }
+}
+
+/// The last queue write asked for, and the last one written: an older one never lands over a newer.
+static QUEUE_TURN: AtomicU64 = AtomicU64::new(0);
+static QUEUE_WRITTEN: Mutex<u64> = Mutex::new(0);
+
+fn write_queue_turn(path: &Path, bytes: &[u8], turn: u64) {
+    let mut last = QUEUE_WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+    if turn > *last {
+        write_atomic(path, bytes);
+        *last = turn;
     }
 }
 
@@ -317,6 +321,7 @@ impl Saved {
         let keep = |key: &String| key.split_once(' ').is_some_and(|(_, id)| Some(id) == selected);
         self.asked.retain(|k, _| keep(k));
         self.basis.retain(|k, _| keep(k));
+        self.kept.retain(|id, _| Some(id.as_str()) == selected);
     }
 }
 
