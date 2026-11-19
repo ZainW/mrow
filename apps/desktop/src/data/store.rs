@@ -8,6 +8,7 @@ use std::rc::Rc;
 use chrono::{Local, Utc};
 
 use super::bg::Bg;
+use super::cache::{self, Detail, Disk, SavedAccount, SavedQueue};
 use super::diff::{self, DiffLine, Gap, Reveal, Shown};
 use super::forge::{Forge, QueueResult};
 use super::inbox::{self, Event, Notice};
@@ -261,6 +262,11 @@ pub enum Msg {
         request: u64,
         result: Result<String, String>,
     },
+    /// A request's details as kept on disk, when they still match it.
+    Cached {
+        id: String,
+        detail: Option<Box<Detail>>,
+    },
 }
 
 pub struct Store {
@@ -346,6 +352,8 @@ pub struct Store {
     /// The requests whose changes and threads were loaded before they were opened, and when:
     /// their threads load again on the visit if they've aged since.
     pub fetched_ahead: HashMap<String, Date>,
+    /// What's kept on disk for the next launch (see `cache`), in the window's store only.
+    saved: cache::Saved,
 }
 
 impl Default for Store {
@@ -397,6 +405,7 @@ impl Default for Store {
             shown: HashMap::new(),
             context_version: 0,
             fetched_ahead: HashMap::new(),
+            saved: cache::Saved::default(),
         }
     }
 }
@@ -749,6 +758,7 @@ impl Store {
             self.load_discussions(&item);
         }
         self.load_details_if_needed(&item);
+        self.keep_detail(&item.id);
         self.fetch_ahead();
     }
 
@@ -980,6 +990,7 @@ impl Store {
                     account.mine_error = q.mine_error;
                     account.error = None;
                     account.last_refreshed = Some(Utc::now());
+                    self.saved.restored.remove(&forge);
                 }
                 Err(e) => account.error = Some(e),
             }
@@ -1019,6 +1030,7 @@ impl Store {
         }
         self.diffs.retain(|k, _| Some(k) == selected.as_ref());
         self.discussions.retain(|k, _| Some(k) == selected.as_ref());
+        self.saved.forget(selected.as_deref());
         self.forget_jobs(selected.as_deref());
         self.forget_file_texts(selected.as_deref());
         if let Some(item) = self.selected().cloned() {
@@ -1036,6 +1048,9 @@ impl Store {
         }
         self.overlays = overlays;
         self.advance_walks();
+        if let Some(queue) = self.saved_queue() {
+            self.saved.disk.as_ref().inspect(|d| d.write_queue(&queue));
+        }
         effects.badge = Some(self.badge());
         effects
     }
@@ -1048,6 +1063,9 @@ impl Store {
     pub fn load_details_if_needed(&mut self, item: &MergeRequest) {
         if self.offline {
             return;
+        }
+        if !self.diffs.contains_key(&item.id) && !self.discussions.contains_key(&item.id) {
+            self.read_saved_detail(item);
         }
         if !self.diffs.contains_key(&item.id) {
             self.load_diffs(item);
@@ -1071,6 +1089,7 @@ impl Store {
             self.diffs.insert(item.id.clone(), Loadable::Loading);
         }
         let request = self.start_request(format!("diffs {}", item.id));
+        self.saved.asked.insert(format!("diffs {}", item.id), item.updated_at);
         let item = item.clone();
         self.bg.spawn(move || Msg::Diffs { id: item.id.clone(), request, result: item.kind().diffs(&item) });
     }
@@ -1083,6 +1102,7 @@ impl Store {
             self.discussions.insert(item.id.clone(), Loadable::Loading);
         }
         let request = self.start_request(format!("threads {}", item.id));
+        self.saved.asked.insert(format!("threads {}", item.id), item.updated_at);
         let item = item.clone();
         self.bg.spawn(move || Msg::Threads { id: item.id.clone(), request, result: item.kind().discussions(&item) });
     }
@@ -1554,10 +1574,15 @@ impl Store {
                                 Some(r) => self.diff_refs.insert(id.clone(), r),
                                 None => self.diff_refs.remove(&id),
                             };
-                            self.diffs.insert(id, Loadable::Loaded(Rc::new(files)));
+                            self.diffs.insert(id.clone(), Loadable::Loaded(Rc::new(files)));
+                            self.saved.landed(format!("diffs {id}"));
+                            self.keep_detail(&id);
                         }
+                        // A reload that fails keeps what's shown.
                         Err(e) => {
-                            self.diffs.insert(id, Loadable::Failed(e));
+                            if self.diffs.get(&id).and_then(Loadable::value).is_none() {
+                                self.diffs.insert(id, Loadable::Failed(e));
+                            }
                         }
                     }
                 }
@@ -1565,11 +1590,20 @@ impl Store {
                     if self.requests.get(&format!("threads {id}")) != Some(&request) {
                         continue;
                     }
-                    let value = match result {
-                        Ok(threads) => Loadable::Loaded(Rc::new(threads.into_iter().filter(|t| !t.notes.iter().all(|n| n.system)).collect())),
-                        Err(e) => Loadable::Failed(e),
-                    };
-                    self.discussions.insert(id, value);
+                    match result {
+                        Ok(threads) => {
+                            let threads = threads.into_iter().filter(|t| !t.notes.iter().all(|n| n.system)).collect();
+                            self.discussions.insert(id.clone(), Loadable::Loaded(Rc::new(threads)));
+                            self.saved.landed(format!("threads {id}"));
+                            self.keep_detail(&id);
+                        }
+                        // A reload that fails keeps what's shown.
+                        Err(e) => {
+                            if self.discussions.get(&id).and_then(Loadable::value).is_none() {
+                                self.discussions.insert(id, Loadable::Failed(e));
+                            }
+                        }
+                    }
                 }
                 Msg::Resolved { id, thread, was, result } => match result {
                     Ok(()) => {
@@ -1643,6 +1677,11 @@ impl Store {
                 }
                 Msg::Edited { was, result, message, ticket } => self.landed_edit(was, result, message, ticket),
                 Msg::FileText { key, request, result } => self.landed_file_text(key, request, result),
+                Msg::Cached { id, detail } => {
+                    if let Some(detail) = detail {
+                        self.land_cached(id, *detail);
+                    }
+                }
             }
         }
         if let Some(message) = self.pending_toast.take() {
@@ -2249,6 +2288,169 @@ impl Store {
     }
 }
 
+// MARK: Saved
+
+/// The host an account is fetched from, as set (blank for the CLI's default).
+fn host(forge: Forge) -> String {
+    prefs::read(|p| match forge {
+        Forge::Gitlab => p.hostname.clone(),
+        Forge::Github => p.github_host.clone(),
+    })
+}
+
+impl Store {
+    /// Opens the window filled: each account's lists as the last refresh left them, the request
+    /// that was on screen, and its details when they still match it. The live refresh replaces
+    /// them; until then the footer says how old they are. The inbox isn't asked: it compares each
+    /// refresh with the last one it saw, which these lists are, so the first refresh after this
+    /// finds what changed since then, no more and no less. From now on this store keeps `disk`
+    /// up to date.
+    pub fn restore(&mut self, disk: Disk) {
+        if self.offline {
+            return;
+        }
+        let saved = disk.read_queue();
+        self.saved.disk = Some(disk);
+        let Some(saved) = saved else { return };
+        let forges = self.forges();
+        for (forge, a) in saved.accounts {
+            if !forges.contains(&forge) || a.host != host(forge) || self.accounts.contains_key(&forge) {
+                continue;
+            }
+            let account = Account {
+                me: Some(a.me),
+                open: a.open,
+                done: a.done,
+                mine: a.mine,
+                mine_error: a.mine_error,
+                error: None,
+                last_refreshed: Some(a.refreshed_at),
+            };
+            self.accounts.insert(forge, account);
+            self.saved.restored.insert(forge);
+        }
+        if self.saved.restored.is_empty() || self.selected_id.is_some() {
+            return;
+        }
+        let forge = self.forge;
+        let next = saved
+            .selected
+            .filter(|id| self.item(id).is_some())
+            .or_else(|| self.tab_items().into_iter().find(|m| m.kind() == forge).map(|m| m.id))
+            .or_else(|| self.visible_items().first().map(|m| m.id.clone()));
+        let Some(item) = next.and_then(|id| self.item(&id).cloned()) else { return };
+        if item.kind() != self.forge {
+            self.set_forge(item.kind());
+        }
+        // As a launch's first refresh opens one: what's new on it since last time stays new.
+        self.start_visit(&item.id);
+        self.selected_id = Some(item.id.clone());
+        // Read now, so the first frame has it. When it's there, the refresh's landing reloads it.
+        let kept = self.saved.disk.as_ref().and_then(|d| d.read_detail(&item.id, item.updated_at));
+        match kept {
+            Some(detail) => self.land_cached(item.id.clone(), detail),
+            None => {
+                self.load_diffs(&item);
+                self.load_discussions(&item);
+            }
+        }
+    }
+
+    /// Whether the account on show is still showing lists from disk.
+    pub fn from_cache(&self) -> bool {
+        self.saved.restored.contains(&self.forge)
+    }
+
+    /// Every account as it stands, for the next launch.
+    fn saved_queue(&self) -> Option<SavedQueue> {
+        if self.offline || self.saved.disk.is_none() {
+            return None;
+        }
+        let accounts = self
+            .accounts
+            .iter()
+            .filter_map(|(forge, a)| {
+                let account = SavedAccount {
+                    host: host(*forge),
+                    me: a.me.clone()?,
+                    open: a.open.clone(),
+                    done: a.done.clone(),
+                    mine: a.mine.clone(),
+                    mine_error: a.mine_error.clone(),
+                    refreshed_at: a.last_refreshed?,
+                };
+                Some((*forge, account))
+            })
+            .collect();
+        Some(SavedQueue { version: cache::VERSION, saved_at: Utc::now(), selected: self.selected_id.clone(), accounts })
+    }
+
+    /// Writes the queue now, with the request on screen: when quitting.
+    pub fn save_now(&self) {
+        if let (Some(queue), Some(disk)) = (self.saved_queue(), &self.saved.disk) {
+            disk.write_queue_now(&queue);
+        }
+    }
+
+    /// Starts reading a request's kept details, to show while its own load runs.
+    fn read_saved_detail(&mut self, item: &MergeRequest) {
+        let Some(disk) = self.saved.disk.clone() else { return };
+        let (id, at) = (item.id.clone(), item.updated_at);
+        self.bg.spawn(move || {
+            let detail = disk.read_detail(&id, at).map(Box::new);
+            Msg::Cached { id, detail }
+        });
+    }
+
+    /// Shows kept details where nothing has loaded yet, while they still match the request.
+    fn land_cached(&mut self, id: String, detail: Detail) {
+        if self.item(&id).is_none_or(|m| m.updated_at != detail.updated_at) {
+            return;
+        }
+        let print = cache::fingerprint(detail.updated_at, &detail.files, detail.refs.as_ref(), &detail.threads);
+        let diffs = self.diffs.get(&id).and_then(Loadable::value).is_none();
+        let threads = self.discussions.get(&id).and_then(Loadable::value).is_none();
+        if diffs {
+            match detail.refs {
+                Some(r) => self.diff_refs.insert(id.clone(), r),
+                None => self.diff_refs.remove(&id),
+            };
+            self.diffs.insert(id.clone(), Loadable::Loaded(Rc::new(detail.files)));
+            self.saved.basis.insert(format!("diffs {id}"), detail.updated_at);
+        }
+        if threads {
+            self.discussions.insert(id.clone(), Loadable::Loaded(Rc::new(detail.threads)));
+            self.saved.basis.insert(format!("threads {id}"), detail.updated_at);
+        }
+        if diffs && threads {
+            self.saved.kept.insert(id, print);
+        }
+    }
+
+    /// Keeps a request's changes and threads for the next launch, once both have loaded for it
+    /// as it stands now (a load asked before it last changed doesn't count).
+    fn keep_detail(&mut self, id: &str) {
+        if self.offline || self.saved.disk.is_none() || self.selected_id.as_deref() != Some(id) {
+            return;
+        }
+        let Some(updated_at) = self.item(id).map(|m| m.updated_at) else { return };
+        let current = |kind: &str| self.saved.basis.get(&format!("{kind} {id}")) == Some(&updated_at);
+        if !current("diffs") || !current("threads") {
+            return;
+        }
+        let (Some(Loadable::Loaded(files)), Some(Loadable::Loaded(threads))) = (self.diffs.get(id), self.discussions.get(id)) else { return };
+        let refs = self.diff_refs.get(id);
+        let print = cache::fingerprint(updated_at, files, refs, threads);
+        if self.saved.kept.get(id) == Some(&print) {
+            return;
+        }
+        if let Some(disk) = &self.saved.disk {
+            disk.write_detail(id, updated_at, files, refs, threads);
+        }
+        self.saved.kept.insert(id.to_string(), print);
+    }
+}
+
 // MARK: Loading ahead
 
 /// How many requests load ahead at once.
@@ -2294,7 +2496,8 @@ impl Store {
 
     /// Starts loading `ahead`'s requests. Never offline.
     fn fetch_ahead(&mut self) {
-        if self.offline {
+        // Lists from disk are about to be replaced, and what loads ahead of them with them.
+        if self.offline || self.refreshing && !self.saved.restored.is_empty() {
             return;
         }
         for item in self.ahead() {

@@ -53,6 +53,8 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if !s.started {
         s.started = true;
         if !s.store.offline && !HEADLESS.load(Ordering::Relaxed) {
+            // What the last run showed, until the refresh lands.
+            s.store.restore(data::cache::Disk::standard());
             s.store.refresh();
             changed = true;
         }
@@ -830,6 +832,8 @@ fn main() {
         .on_reopen(|_: &mut App, _visible: bool, _: &mut Tx| true)
         .on_quit(|s: &mut App, _: &mut Tx| {
             s.ask.shutdown();
+            // With the request on screen, so the next launch opens on it.
+            s.store.save_now();
             // A launch that came while quitting starts the next Mrow, which can claim the name now.
             rune::release_instance();
         });

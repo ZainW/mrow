@@ -1572,3 +1572,293 @@ mod shown_on_success {
         assert!(!now.title.to_lowercase().starts_with("draft"), "{}", now.title);
     }
 }
+
+/// What the window last showed, kept on disk so a launch opens filled.
+mod saved {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    use chrono::Utc;
+
+    use crate::data::cache::{self, Disk, MAX_DETAILS, VERSION};
+    use crate::data::forge::{Forge, QueueResult};
+    use crate::data::inbox::Kind;
+    use crate::data::models::{Discussion, FileDiff, MergeRequest, ReviewState};
+    use crate::data::prefs;
+    use crate::data::store::{Account, Loadable, Msg, Store};
+
+    /// A folder of its own under the system's temporary one, gone afterwards. These tests run
+    /// one at a time while one is held: they share the settings, which the inbox keeps its
+    /// snapshot in.
+    struct Dir(PathBuf, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl Dir {
+        fn new(name: &str) -> Dir {
+            static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+            let path = std::env::temp_dir().join(format!("mrow-saved-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            Dir(path, turn)
+        }
+
+        fn disk(&self) -> Disk {
+            Disk::at(&self.0)
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A store that keeps its lists on disk like the window's, but never reaches a forge.
+    fn live(dir: &Dir) -> Store {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let mut store = Store::default();
+        store.bg.inert = true;
+        store.restore(dir.disk());
+        store
+    }
+
+    /// A refresh that brings back `accounts`.
+    fn fetch(store: &mut Store, accounts: &BTreeMap<Forge, Account>) {
+        let result =
+            |a: &Account| QueueResult { me: a.me.clone().unwrap(), open: a.open.clone(), done: a.done.clone(), mine: a.mine.clone(), mine_error: None };
+        let fetch = store.start_refresh();
+        store.land_queue(fetch, accounts.iter().map(|(f, a)| (*f, Ok(result(a)))).collect());
+    }
+
+    /// Lands a request's changes and threads as its first loads would.
+    fn load(store: &mut Store, id: &str, files: Vec<FileDiff>, threads: Vec<Discussion>) {
+        // The first load of each for this request is numbered 1.
+        store.bg.send(Msg::Diffs { id: id.into(), request: 1, result: Ok((files, None)) });
+        store.bg.send(Msg::Threads { id: id.into(), request: 1, result: Ok(threads) });
+        store.poll(0.0);
+    }
+
+    #[test]
+    fn a_reload_after_a_change_is_kept_only_once_both_halves_land() {
+        let dir = Dir::new("reload");
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = live(&dir);
+        fetch(&mut store, &accounts);
+        let id = store.selected_id.clone().unwrap();
+        load(&mut store, &id, diffs[&id].clone(), threads[&id].clone());
+        let before = store.item(&id).unwrap().updated_at;
+        assert!(dir.disk().read_detail(&id, before).is_some());
+
+        // A push: the next refresh says it changed, and its details load again (the second time).
+        let mut later = accounts.clone();
+        let now = before + chrono::Duration::minutes(5);
+        later.values_mut().flat_map(|a| a.open.iter_mut().chain(&mut a.mine)).filter(|m| m.id == id).for_each(|m| m.updated_at = now);
+        fetch(&mut store, &later);
+        store.bg.send(Msg::Threads { id: id.clone(), request: 2, result: Ok(threads[&id].clone()) });
+        store.poll(0.0);
+        assert!(dir.disk().read_detail(&id, now).is_none(), "the changes on screen are from before the push");
+        store.bg.send(Msg::Diffs { id: id.clone(), request: 2, result: Ok((diffs[&id].clone(), None)) });
+        store.poll(0.0);
+        assert!(dir.disk().read_detail(&id, now).is_some());
+    }
+
+    fn lists(a: &Account) -> (Vec<MergeRequest>, Vec<MergeRequest>, Vec<MergeRequest>) {
+        (a.open.clone(), a.done.clone(), a.mine.clone())
+    }
+
+    #[test]
+    fn a_launch_opens_on_what_the_last_refresh_showed_until_the_next_lands() {
+        let dir = Dir::new("round-trip");
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut first = live(&dir);
+        assert!(first.accounts.is_empty() && !first.from_cache(), "nothing kept yet");
+        fetch(&mut first, &accounts);
+        let id = first.selected_id.clone().expect("a refresh opens one");
+        load(&mut first, &id, diffs[&id].clone(), threads[&id].clone());
+        assert!(cache::has_detail(&dir.disk(), &id), "the request on screen keeps its details");
+
+        let saved = dir.disk().read_queue().expect("written after the refresh");
+        assert_eq!(saved.version, VERSION);
+        assert_eq!(saved.selected.as_deref(), Some(id.as_str()));
+
+        let mut next = live(&dir);
+        assert!(next.from_cache());
+        for (forge, a) in &accounts {
+            let got = &next.accounts[forge];
+            assert_eq!(lists(got), lists(a), "{forge:?}");
+            assert_eq!(got.me, a.me);
+            assert_eq!(got.last_refreshed, first.accounts[forge].last_refreshed, "as old as the refresh it came from");
+        }
+        assert_eq!(next.selected_id.as_deref(), Some(id.as_str()), "on the request that was on screen");
+        assert_eq!(next.diffs.get(&id).and_then(Loadable::value).map(|f| f.as_ref().clone()), Some(diffs[&id].clone()), "its changes at once");
+        let shown = next.discussions.get(&id).and_then(Loadable::value).map(|t| t.len());
+        assert_eq!(shown, Some(threads[&id].iter().filter(|t| !t.notes.iter().all(|n| n.system)).count()));
+
+        // The refresh replaces it all.
+        let mut later = accounts.clone();
+        later.get_mut(&Forge::Gitlab).unwrap().open.retain(|m| m.id == id);
+        fetch(&mut next, &later);
+        assert!(!next.from_cache());
+        assert_eq!(next.accounts[&Forge::Gitlab].open.len(), 1);
+        assert_eq!(dir.disk().read_queue().unwrap().accounts[&Forge::Gitlab].open.len(), 1, "and what's kept follows it");
+    }
+
+    #[test]
+    fn details_are_reused_only_while_the_request_hasnt_changed() {
+        let dir = Dir::new("stale");
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut first = live(&dir);
+        fetch(&mut first, &accounts);
+        let id = first.selected_id.clone().unwrap();
+        load(&mut first, &id, diffs[&id].clone(), threads[&id].clone());
+        let at = first.item(&id).unwrap().updated_at;
+        assert!(dir.disk().read_detail(&id, at).is_some());
+        assert!(dir.disk().read_detail(&id, at + chrono::Duration::seconds(1)).is_none(), "changed since: a push, a comment");
+
+        // The queue kept says it changed since its details were.
+        let mut saved = dir.disk().read_queue().unwrap();
+        for m in saved.accounts.values_mut().flat_map(|a| a.open.iter_mut().chain(&mut a.mine)) {
+            if m.id == id {
+                m.updated_at += chrono::Duration::minutes(5);
+            }
+        }
+        dir.disk().write_queue_now(&saved);
+        let next = live(&dir);
+        assert_eq!(next.selected_id.as_deref(), Some(id.as_str()));
+        assert_eq!(next.diffs.get(&id), Some(&Loadable::Loading), "loads instead of showing what may be out of date");
+    }
+
+    #[test]
+    fn a_broken_or_older_file_is_ignored_and_written_over() {
+        let dir = Dir::new("broken");
+        let (accounts, _, _) = crate::fixtures::load();
+        let path = cache::queue_path(&dir.disk());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        for bad in [r#"{"version":1,"saved_at":"2026-01-0"#.to_string(), "not json".into(), String::new(), r#"{"version":1}"#.into()] {
+            std::fs::write(&path, &bad).unwrap();
+            assert!(dir.disk().read_queue().is_none(), "{bad:?}");
+            let store = live(&dir);
+            assert!(store.accounts.is_empty() && !store.from_cache());
+        }
+
+        // Another version, whole and well-formed, is ignored too.
+        let mut first = live(&dir);
+        fetch(&mut first, &accounts);
+        let mut queue = dir.disk().read_queue().unwrap();
+        queue.version = VERSION + 1;
+        std::fs::write(&path, serde_json::to_vec(&queue).unwrap()).unwrap();
+        assert!(dir.disk().read_queue().is_none());
+        let mut store = live(&dir);
+        assert!(store.accounts.is_empty());
+        fetch(&mut store, &accounts);
+        assert_eq!(dir.disk().read_queue().map(|q| q.version), Some(VERSION), "the refresh writes it over");
+
+        // A broken request file goes.
+        let item = &accounts[&Forge::Gitlab].open[0];
+        dir.disk().write_detail(&item.id, item.updated_at, &[], None, &[]);
+        assert!(dir.disk().read_detail(&item.id, item.updated_at).is_some());
+        let file = std::fs::read_dir(dir.0.join("details")).unwrap().flatten().next().unwrap().path();
+        let json = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, json.replace(&format!("\"version\":{VERSION}"), "\"version\":0")).unwrap();
+        assert!(dir.disk().read_detail(&item.id, item.updated_at).is_none(), "another version");
+        std::fs::write(&file, &json[..json.len() / 2]).unwrap();
+        assert!(dir.disk().read_detail(&item.id, item.updated_at).is_none(), "cut short");
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn only_the_most_recently_used_details_are_kept() {
+        let dir = Dir::new("lru");
+        let disk = dir.disk();
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let item = &accounts[&Forge::Gitlab].open[0];
+        let (files, discussions) = (&diffs[&item.id], &threads[&item.id]);
+        let ids: Vec<String> = (0..MAX_DETAILS + 5).map(|i| format!("gitlab:acme/web!{i}")).collect();
+        let base = SystemTime::now() - Duration::from_secs(3600);
+        for (i, id) in ids.iter().enumerate() {
+            disk.write_detail(id, item.updated_at, files, None, discussions);
+            cache::set_used(&disk, id, base + Duration::from_secs(i as u64));
+        }
+        // Pruning runs on each write, before the next is stamped: the first five went in turn.
+        let kept: Vec<bool> = ids.iter().map(|id| cache::has_detail(&disk, id)).collect();
+        assert_eq!(kept.iter().filter(|k| **k).count(), MAX_DETAILS);
+        assert!(kept[..5].iter().all(|k| !k) && kept[5..].iter().all(|k| *k), "{kept:?}");
+
+        // Reading one uses it, so the next to go is the one after it.
+        let back = disk.read_detail(&ids[5], item.updated_at).expect("kept whole");
+        assert_eq!(&back.files, files);
+        disk.write_detail("gitlab:acme/web!new", item.updated_at, files, None, discussions);
+        assert!(cache::has_detail(&disk, &ids[5]));
+        assert!(!cache::has_detail(&disk, &ids[6]));
+
+        // And within the bytes allowed, newest first.
+        let size = std::fs::read_dir(dir.0.join("details")).unwrap().flatten().map(|e| e.metadata().unwrap().len()).max().unwrap();
+        cache::prune(&dir.0.join("details"), 100, size * 3 + size / 2);
+        assert_eq!(std::fs::read_dir(dir.0.join("details")).unwrap().count(), 3);
+        assert!(cache::has_detail(&disk, "gitlab:acme/web!new") && cache::has_detail(&disk, &ids[5]));
+    }
+
+    /// Settings belong to the whole process, and other tests reset them as they start. A mark
+    /// set before a step and still there after says none did in between.
+    fn undisturbed<T>(step: impl FnOnce() -> T) -> Option<T> {
+        const MARK: f64 = 301.25;
+        prefs::update(|p| p.sidebar_width = MARK);
+        let out = step();
+        (prefs::read(|p| p.sidebar_width) == MARK).then_some(out)
+    }
+
+    /// Three launches: the first refresh, a launch that finds the same, and one after a review
+    /// was asked while Mrow was closed. Returns what the last found, or None when another test
+    /// reset the settings on the way.
+    fn three_launches(dir: &Dir) -> Option<Vec<(String, Kind)>> {
+        let (accounts, _, _) = crate::fixtures::load();
+        let mut first = live(dir);
+        let snapshot = undisturbed(|| {
+            fetch(&mut first, &accounts);
+            assert!(first.inbox.is_empty(), "a first look is no news");
+            prefs::read(|p| p.inbox_snapshot.clone())
+        })??;
+
+        let mut next = live(dir);
+        let snapshot = undisturbed(|| {
+            prefs::update(|p| p.inbox_snapshot = Some(snapshot.clone()));
+            assert!(next.from_cache());
+            assert!(next.inbox.is_empty());
+            assert_eq!(prefs::read(|p| p.inbox_snapshot.clone()).as_ref(), Some(&snapshot), "the cache doesn't count as a look");
+            fetch(&mut next, &accounts);
+            assert!(next.inbox.is_empty(), "nothing changed: {:?}", next.inbox);
+            prefs::read(|p| p.inbox_snapshot.clone())
+        })??;
+
+        let mut later = accounts.clone();
+        let gitlab = later.get_mut(&Forge::Gitlab).unwrap();
+        let mut asked = gitlab.open[0].clone();
+        asked.id = "gitlab:fieldnotes/ledger!999".into();
+        asked.iid = "999".into();
+        asked.my_state = ReviewState::Unreviewed;
+        asked.requested_at = Utc::now();
+        asked.first_requested_at = asked.requested_at;
+        asked.requested_at_is_guess = false;
+        gitlab.open.push(asked);
+        let mut third = live(dir);
+        undisturbed(|| {
+            prefs::update(|p| p.inbox_snapshot = Some(snapshot));
+            assert!(third.item("gitlab:fieldnotes/ledger!999").is_none(), "not in what was kept");
+            fetch(&mut third, &later);
+            third.inbox.iter().map(|e| (e.request.clone(), e.kind)).collect()
+        })
+    }
+
+    #[test]
+    fn opening_filled_brings_no_news_and_hides_none() {
+        let dir = Dir::new("inbox");
+        for _ in 0..50 {
+            if let Some(found) = three_launches(&dir) {
+                assert_eq!(found, [("gitlab:fieldnotes/ledger!999".to_string(), Kind::ReviewAsked)], "news, once");
+                return;
+            }
+        }
+        panic!("other tests kept resetting the settings");
+    }
+}

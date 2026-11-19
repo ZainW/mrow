@@ -478,8 +478,18 @@ fn footer(s: &App, p: &Pal, dark: bool) -> El {
         r = r.child(update_button(p, &ready.version));
     } else if let Some(last) = store.last_refreshed() {
         let offline = store.error();
-        let label = if offline.is_some() { "Offline".to_string() } else { format!("Updated {}", short_time(last)) };
-        let tip = offline.unwrap_or_else(|| last.with_timezone(&chrono::Local).format("%H:%M").to_string());
+        let at = last.with_timezone(&chrono::Local).format("%H:%M").to_string();
+        let label = match (&offline, store.from_cache(), short_time(last)) {
+            (Some(_), _, _) => "Offline".to_string(),
+            // Lists from the last run, until the refresh lands: say how old they are.
+            (None, true, ago) if ago != "now" => format!("Updated {ago} ago"),
+            (None, _, ago) => format!("Updated {ago}"),
+        };
+        let tip = match offline {
+            Some(error) => error,
+            None if store.from_cache() => format!("Saved at {at}, from the last time Mrow ran. Refreshing…"),
+            None => at,
+        };
         r = r.child(text(label).font(ui(12.0, 400.0)).color(if store.error().is_some() { p.red } else { p.tertiary }).single_line().help(tip));
     }
     r.child(ChromeButton::new("appearance", "Switch Appearance").icon(&I::APPEARANCE, 14.0).build(p).on_press(move |_: &mut App| {
