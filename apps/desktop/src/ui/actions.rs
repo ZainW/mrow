@@ -60,7 +60,8 @@ pub fn focus_filter(s: &mut App, tx: &mut Tx) {
         s.set_sidebar_visible(true);
     }
     s.settings_open = false;
-    tx.focus("filter/input", true);
+    // Once shown: from the palette, its closing would otherwise hand focus back where it was.
+    tx.focus_when_shown("filter/input", true);
     tx.select_all_text("filter/input");
 }
 
@@ -102,7 +103,7 @@ pub fn review(s: &mut App, tx: &mut Tx) {
         return;
     }
     s.review_panel = Some(item.id);
-    tx.focus("review-summary/input", false);
+    tx.focus_when_shown("review-summary/input", false);
 }
 
 pub fn mark_all_read(s: &mut App, _: &mut Tx) {
@@ -296,6 +297,8 @@ const COMMANDS: &[Command] = &[
     cmd(F, "keep", "Keep Open in Tab", Some("cmd+t"), keep_in_tab),
     cmd(F, "close-tab", "Close Tab", Some("cmd+w"), close_tab),
     cmd(F, "close-others", "Close Other Tabs", Some("cmd+alt+w"), close_other_tabs),
+    cmd(V, "palette", "Command Palette…", Some("cmd+shift+p"), crate::ui::palette::toggle),
+    sep("View"),
     cmd(V, "mode-0", "To review", Some("cmd+1"), |s, tx| mode(s, tx, QueueMode::ToReview)),
     cmd(V, "mode-1", "Reviewed", Some("cmd+2"), |s, tx| mode(s, tx, QueueMode::Reviewed)),
     cmd(V, "mode-2", "Mine", Some("cmd+3"), |s, tx| mode(s, tx, QueueMode::Mine)),
@@ -346,6 +349,117 @@ const COMMANDS: &[Command] = &[
     cmd(W, "next-tab", "Show Next Tab", Some("cmd+shift+bracketright"), next_tab),
     cmd(W, "previous-tab", "Show Previous Tab", Some("cmd+shift+bracketleft"), previous_tab),
 ];
+
+/// A command as the palette lists it: its title, and its keys as this platform writes them.
+pub struct Listed {
+    pub id: &'static str,
+    pub title: String,
+    pub keys: Option<String>,
+    pub run: fn(&mut App, &mut Tx),
+}
+
+/// The commands the palette offers, in the table's order: those that would do something now.
+/// The rest are left out rather than dimmed, so every row the keyboard lands on runs.
+pub fn listed(s: &App) -> Vec<Listed> {
+    COMMANDS
+        .iter()
+        .filter(|c| !c.id.is_empty() && c.id != "palette" && not_now(s, c.id).is_none())
+        .map(|c| Listed { id: c.id, title: title(s, c), keys: hint(c).map(|k| crate::ui::components::keys(&glyphs(k))), run: c.run })
+        .collect()
+}
+
+/// The menu's title, or one that says more out of the menu's context: which account.
+fn title(s: &App, c: &Command) -> String {
+    let account = match c.id {
+        "account-0" => 0,
+        "account-1" => 1,
+        _ => return c.title.to_string(),
+    };
+    s.store.forges().get(account).map_or_else(|| c.title.to_string(), |f| format!("Switch to {}", f.name()))
+}
+
+/// The keys `on_key` or the menu bar answers to for `c` on this platform, as a chord.
+fn hint(c: &Command) -> Option<&'static str> {
+    match c.id {
+        "next-file" => Some("j"),
+        "previous-file" => Some("k"),
+        _ if cfg!(not(target_os = "macos")) => c.other.or(c.keys),
+        _ => c.keys,
+    }
+}
+
+/// "cmd+shift+a" as the Mac writes it, "⇧⌘A", for `components::keys` to relabel elsewhere.
+fn glyphs(chord: &str) -> String {
+    let parts: Vec<&str> = chord.split('+').collect();
+    let (key, mods) = parts.split_last().expect("a key");
+    let mut out = String::new();
+    for (name, glyph) in [("ctrl", '⌃'), ("alt", '⌥'), ("shift", '⇧'), ("cmd", '⌘')] {
+        if mods.contains(&name) {
+            out.push(glyph);
+        }
+    }
+    match *key {
+        "comma" => out.push(','),
+        "bracketleft" => out.push('['),
+        "bracketright" => out.push(']'),
+        k => out.push_str(&k.to_uppercase()),
+    }
+    out
+}
+
+/// Why the command `id` would do nothing in this state, or None when it would run. Most act on
+/// the selected request; some on a request of mine, or one I can still review.
+fn not_now(s: &App, id: &str) -> Option<String> {
+    let store = &s.store;
+    let noun = store.forge.noun();
+    let idle = store.busy.is_none();
+    let wait = || "Wait for the last change to land.".to_string();
+    // Commands that need nothing selected.
+    match id {
+        "account-0" | "account-1" => {
+            let index = if id == "account-0" { 0 } else { 1 };
+            return match store.forges().get(index) {
+                None => Some("Add a second account in Settings first.".into()),
+                Some(f) if *f == store.forge => Some(format!("You’re on {} already.", f.name())),
+                Some(_) => None,
+            };
+        }
+        "next" | "previous" => return store.visible_items().is_empty().then(|| "The list is empty.".into()),
+        "next-tab" | "previous-tab" => {
+            let previewing = store.selected().is_some_and(|m| !store.tabs.contains(&m.id));
+            let room = store.tabs.len() > 1 || (previewing && !store.tabs.is_empty());
+            return (!room).then(|| "There’s no other tab to show.".into());
+        }
+        "keep" | "close-tab" | "close-others" | "open" | "copy-link" | "ask" | "new-chat" | "choose-model" | "go-overview" | "go-changes"
+        | "go-conversation" | "next-file" | "previous-file" | "approve" | "review" | "edit-title" | "edit-reviewers" | "update-branch" | "close-request"
+        | "ask-again" | "reopen" => {}
+        _ => return None,
+    }
+    let Some(item) = store.selected() else { return Some(format!("Open a {noun} first.")) };
+    let mine = store.is_mine(item);
+    let closed = || format!("This {noun} isn’t open.");
+    let only_mine = || format!("That works on your own {noun}s only.");
+    match id {
+        "keep" if store.tabs.contains(&item.id) => Some("It’s open in a tab already.".into()),
+        "close-others" if !store.tabs.iter().any(|t| *t != item.id) => Some("No other tabs are open.".into()),
+        "approve" if store.pending_count(item) > 0 => None,
+        "approve" | "review" if !item.is_open() => Some(closed()),
+        "approve" if mine => Some(format!("Nobody approves their own {noun}.")),
+        "approve" if !idle => Some(wait()),
+        "review" if !crate::ui::detail::offers_review(s, item) => Some(format!("Hold a comment on your {noun} first.")),
+        "edit-title" | "edit-reviewers" | "update-branch" | "close-request" | "ask-again" | "reopen" if !mine => Some(only_mine()),
+        "edit-title" | "edit-reviewers" | "update-branch" | "close-request" | "ask-again" if !item.is_open() => Some(closed()),
+        "ask-again" if crate::ui::manage::waiting_on(item).is_empty() => Some("Nobody is waiting to review it.".into()),
+        "reopen" if item.state != "closed" => Some(format!("This {noun} isn’t closed.")),
+        "update-branch" | "close-request" | "ask-again" | "reopen" if !idle => Some(wait()),
+        _ => None,
+    }
+}
+
+/// Commands the palette leaves out now, with why, for a query that finds only those.
+pub fn unavailable(s: &App) -> Vec<(String, String)> {
+    COMMANDS.iter().filter(|c| !c.id.is_empty() && c.id != "palette").filter_map(|c| Some((title(s, c), not_now(s, c.id)?))).collect()
+}
 
 /// The menu bar, built from `COMMANDS`.
 pub fn menu_items() -> Vec<MenuItem<App>> {
@@ -458,6 +572,17 @@ mod tests {
             let glyphs = command.keys.unwrap().replace("cmd+alt+", "⌥⌘");
             assert_eq!(glyphs, tab.hint(), "{}", tab.title());
         }
+    }
+
+    #[test]
+    fn the_palette_writes_keys_as_the_menu_bar_does() {
+        assert_eq!(glyphs("cmd+shift+a"), "⇧⌘A");
+        assert_eq!(glyphs("cmd+alt+bracketright"), "⌥⌘]");
+        assert_eq!(glyphs("cmd+ctrl+s"), "⌃⌘S");
+        assert_eq!(glyphs("cmd+comma"), "⌘,");
+        assert_eq!(glyphs("j"), "J");
+        let palette = COMMANDS.iter().find(|c| c.id == "palette").expect("the palette is a command");
+        assert_eq!(glyphs(palette.keys.unwrap()), "⇧⌘P");
     }
 
     #[test]

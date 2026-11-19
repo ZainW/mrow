@@ -546,6 +546,18 @@ fn scene_inbox_empty(s: &mut App) {
     s.inbox_open = true;
 }
 
+/// The command palette, nothing typed: every command that would run on the selected review.
+fn scene_palette(s: &mut App) {
+    fixture(s);
+    s.palette = Some(ui::palette::Palette { query: rune::TextEdit::new(""), pick: 0 });
+}
+
+/// The palette with a query that finds commands and a request in the list by its title.
+fn scene_palette_query(s: &mut App) {
+    fixture(s);
+    s.palette = Some(ui::palette::Palette { query: rune::TextEdit::new("ex"), pick: 1 });
+}
+
 fn scene_github(s: &mut App) {
     fixture(s);
     s.store.switch_forge(Forge::Github);
@@ -636,6 +648,8 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("inbox", scene_inbox),
     ("inbox-mine", scene_inbox_mine),
     ("inbox-empty", scene_inbox_empty),
+    ("palette", scene_palette),
+    ("palette-query", scene_palette_query),
     ("github", scene_github),
     ("empty", scene_empty),
     ("no-sidebar", scene_no_sidebar),

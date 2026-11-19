@@ -22,7 +22,7 @@ const MORE_BUTTON: &str = "manage-more";
 const TITLE_FIELD: &str = "edit-title/input";
 
 /// The reviewers a request is waiting on: the ones "Ask Again" asks from a menu.
-fn waiting_on(item: &MergeRequest) -> Vec<Reviewer> {
+pub fn waiting_on(item: &MergeRequest) -> Vec<Reviewer> {
     item.reviewers.iter().filter(|r| r.state.needs_review() && !r.approved).cloned().collect()
 }
 
@@ -62,7 +62,7 @@ pub fn edit_title(s: &mut App, tx: &mut Tx) {
     let Some(item) = my_selected(s).filter(|m| m.is_open()) else { return };
     to_overview(s, tx, &item.id);
     s.edit_request(&item.id);
-    tx.focus(TITLE_FIELD, true);
+    tx.focus_when_shown(TITLE_FIELD, true);
 }
 
 pub fn edit_reviewers(s: &mut App, tx: &mut Tx) {
