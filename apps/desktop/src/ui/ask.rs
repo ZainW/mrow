@@ -151,7 +151,7 @@ pub fn open_agent_menu(s: &mut App, tx: &mut Tx, chat: &str) {
 }
 
 pub fn focus_composer(tx: &mut Tx) {
-    tx.focus(format!("{COMPOSER}/input"), false);
+    tx.focus_when_shown(format!("{COMPOSER}/input"), false);
 }
 
 fn greeting(s: &App, p: &Pal, item: &MergeRequest) -> El {

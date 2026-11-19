@@ -397,7 +397,7 @@ fn bar(s: &App, page: &Page, open: Tab, room: Room) -> El {
 
 /// Whether the bar offers Approve: on an open request that isn't mine (nobody approves their
 /// own), whichever tab is open.
-fn approves(item: &MergeRequest, mine: bool) -> bool {
+pub fn approves(item: &MergeRequest, mine: bool) -> bool {
     item.is_open() && !mine
 }
 

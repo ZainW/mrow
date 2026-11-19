@@ -136,6 +136,8 @@ pub struct App {
     pub people_pick: usize,
     /// The title and description of one of my requests, open for editing.
     pub request_edit: Option<RequestEdit>,
+    /// The command palette, while it's open (⇧⌘P).
+    pub palette: Option<crate::ui::palette::Palette>,
 }
 
 /// A request of mine being edited on its overview. While it saves the page shows the new text;
@@ -239,6 +241,7 @@ impl Default for App {
             people_filter: TextEdit::new(""),
             people_pick: 0,
             request_edit: None,
+            palette: None,
         }
     }
 }

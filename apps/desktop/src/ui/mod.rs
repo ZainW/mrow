@@ -12,6 +12,7 @@ pub mod manage;
 pub mod markdown;
 pub mod menus;
 pub mod mine;
+pub mod palette;
 pub mod pipeline;
 pub mod settings;
 pub mod sidebar;
@@ -103,6 +104,10 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         for layer in settings::sheet(s, p, k) {
             root = root.child(layer);
         }
+    }
+    // Last, over everything: it can open from anywhere, the settings sheet included.
+    if let Some(palette) = palette::panel(s, p, k) {
+        root = root.child(palette);
     }
     root
 }
