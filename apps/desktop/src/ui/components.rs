@@ -33,6 +33,7 @@ pub struct ChromeButton {
     width: Option<f32>,
     pad: f32,
     count: Option<usize>,
+    badge: Option<usize>,
     dot: bool,
 }
 
@@ -51,6 +52,7 @@ impl ChromeButton {
             width: None,
             pad: 10.0,
             count: None,
+            badge: None,
             dot: false,
         }
     }
@@ -88,6 +90,12 @@ impl ChromeButton {
         self.count = Some(n);
         self
     }
+    /// A count in an accent pill beside an icon button's glyph: how many new things wait behind
+    /// it. The button widens to hold it rather than laying it over the glyph.
+    pub fn badge(mut self, n: usize) -> Self {
+        self.badge = Some(n).filter(|n| *n > 0);
+        self
+    }
     /// An accent dot at a text button's end: something new behind it.
     pub fn dot(mut self, on: bool) -> Self {
         self.dot = on;
@@ -115,13 +123,30 @@ impl ChromeButton {
             if self.spinning {
                 glyph = glyph.key("spin").looping(rune::LoopSpec::rotation(1.0));
             }
-            let slot = el().w(if self.style == Chrome::Icon { 28.0 } else { self.icon_size }).h(28.0).center().child(glyph);
-            b = b.child(slot);
+            let badged = self.style == Chrome::Icon && self.badge.is_some();
+            let slot_w = if self.style == Chrome::Icon && !badged { 28.0 } else { self.icon_size };
+            b = b.child(el().w(slot_w).h(28.0).center().child(glyph));
         }
         match self.style {
-            Chrome::Icon => {
-                b = b.w(28.0);
-            }
+            Chrome::Icon => match self.badge {
+                // The glyph keeps the inset it has in a bare 28 pt button; the pill sits a
+                // little closer to it than to the button's edge, so the two read as one.
+                Some(n) => {
+                    let shown = if n > 99 { "99+".to_string() } else { n.to_string() };
+                    let pill = el()
+                        .key("count")
+                        .h(16.0)
+                        .min_w(16.0)
+                        .px(4.5)
+                        .radius(8.0)
+                        .fill(p.accent)
+                        .center()
+                        .inert()
+                        .child(text(shown).font(ui(11.0, SEMIBOLD).features("'tnum' 1")).color(p.paper).single_line());
+                    b = b.gap(4.0).pl((28.0 - self.icon_size) / 2.0).pr(6.0).child(pill);
+                }
+                None => b = b.w(28.0),
+            },
             Chrome::Text | Chrome::Field => {
                 b = b.px(self.pad).child(
                     text(self.title.clone())

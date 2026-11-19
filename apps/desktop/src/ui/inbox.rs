@@ -32,32 +32,19 @@ pub fn toggle(s: &mut App, tx: &mut Tx) {
     s.inbox_open = !s.inbox_open;
 }
 
-/// The bell, with a count of what's new on it.
+/// The bell, with a count of what's new beside it.
 pub fn bell(s: &App, p: &Pal) -> El {
     let count = s.store.news_count();
     let open = s.inbox_open;
-    let mut b = ChromeButton::new(BELL, "Inbox")
+    ChromeButton::new(BELL, "Inbox")
         .icon(&I::BELL, 15.0)
+        .badge(count)
         .hint(keys("⇧⌘I"))
         .on(open)
         .build(p)
         .label(if count > 0 { format!("Inbox, {count} new") } else { "Inbox".to_string() })
-        .expanded(open);
-    if count > 0 {
-        let shown = if count > 99 { "99+".to_string() } else { count.to_string() };
-        let badge = el()
-            .h(15.0)
-            .min_w(15.0)
-            .px(4.0)
-            .radius(7.5)
-            .fill(p.accent)
-            .center()
-            .child(text(shown).font(ui(11.0, SEMIBOLD).features("'tnum' 1")).color(p.paper).single_line());
-        // On the bell's shoulder, not its middle; a ring of the sidebar's colour keeps the count
-        // off the outline.
-        b = b.child(el().key("count").pin(Some(16.0), Some(0.0), None, None).padding(1.5).radius(9.0).fill(p.chrome).inert().child(badge));
-    }
-    b.on_press_tx(toggle)
+        .expanded(open)
+        .on_press_tx(toggle)
 }
 
 fn caption(p: &Pal, title: &str) -> El {
