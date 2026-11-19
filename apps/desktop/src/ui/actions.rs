@@ -261,8 +261,13 @@ fn hold_selected(s: &mut App, tx: &mut Tx, picked: &str) {
     } else if held.is_some_and(|h| h.muted()) {
         s.store.show("It's muted. Unmute it first.");
     } else {
-        s.store.show("Only reviews waiting on you and your own open requests can be snoozed.");
+        let noun = item.kind().noun();
+        s.store.show(&cannot_snooze(noun));
     }
+}
+
+fn cannot_snooze(noun: &str) -> String {
+    format!("Only reviews waiting on you and your own open {noun}s can be snoozed.")
 }
 
 pub fn snooze_until_tomorrow(s: &mut App, tx: &mut Tx) {
@@ -418,6 +423,13 @@ fn hint(c: &Command) -> Option<&'static str> {
     match c.id {
         "next-file" => Some("j"),
         "previous-file" => Some("k"),
+        "next-open-thread" => Some("n"),
+        "previous-open-thread" => Some("p"),
+        "next-thread" => Some("shift+n"),
+        "previous-thread" => Some("shift+p"),
+        "toggle-viewed" => Some("v"),
+        "reply" => Some("r"),
+        "comment" => Some("c"),
         _ if cfg!(not(target_os = "macos")) => c.other.or(c.keys),
         _ => c.keys,
     }
@@ -465,13 +477,44 @@ fn not_now(s: &App, id: &str) -> Option<String> {
             let room = store.tabs.len() > 1 || (previewing && !store.tabs.is_empty());
             return (!room).then(|| "There’s no other tab to show.".into());
         }
-        "keep" | "close-tab" | "close-others" | "open" | "copy-link" | "ask" | "new-chat" | "choose-model" | "go-overview" | "go-changes"
-        | "go-conversation" | "next-file" | "previous-file" | "approve" | "review" | "edit-title" | "edit-reviewers" | "update-branch" | "close-request"
-        | "ask-again" | "reopen" => {}
+        "keep"
+        | "close-tab"
+        | "close-others"
+        | "open"
+        | "copy-link"
+        | "ask"
+        | "new-chat"
+        | "choose-model"
+        | "go-overview"
+        | "go-changes"
+        | "go-conversation"
+        | "next-file"
+        | "previous-file"
+        | "approve"
+        | "review"
+        | "edit-title"
+        | "edit-reviewers"
+        | "update-branch"
+        | "close-request"
+        | "ask-again"
+        | "reopen"
+        | "next-open-thread"
+        | "previous-open-thread"
+        | "next-thread"
+        | "previous-thread"
+        | "toggle-viewed"
+        | "reply"
+        | "comment"
+        | "snooze-morning"
+        | "snooze-change"
+        | "unsnooze"
+        | "mute"
+        | "unmute" => {}
         _ => return None,
     }
     let Some(item) = store.selected() else { return Some(format!("Open a {noun} first.")) };
     let mine = store.is_mine(item);
+    let held = store.hold_of(&item.id).map(|h| h.hold);
     let closed = || format!("This {noun} isn’t open.");
     let only_mine = || format!("That works on your own {noun}s only.");
     match id {
@@ -487,6 +530,10 @@ fn not_now(s: &App, id: &str) -> Option<String> {
         "ask-again" if crate::ui::manage::waiting_on(item).is_empty() => Some("Nobody is waiting to review it.".into()),
         "reopen" if item.state != "closed" => Some(format!("This {noun} isn’t closed.")),
         "update-branch" | "close-request" | "ask-again" | "reopen" if !idle => Some(wait()),
+        "unsnooze" if !held.is_some_and(|h| !h.muted()) => Some("It isn’t snoozed.".into()),
+        "unmute" if !held.is_some_and(|h| h.muted()) => Some("It isn’t muted.".into()),
+        "snooze-morning" | "snooze-change" | "mute" if held.is_some_and(|h| h.muted()) => Some("It’s muted. Unmute it first.".into()),
+        "snooze-morning" | "snooze-change" | "mute" if !store.can_snooze(item) => Some(cannot_snooze(noun)),
         _ => None,
     }
 }

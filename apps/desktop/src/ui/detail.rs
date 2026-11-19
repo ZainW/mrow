@@ -910,7 +910,7 @@ pub fn go(s: &mut App, tx: &mut Tx, jump: Jump) {
         Jump::Thread(thread) => land(tx, Tab::Conversation, format!("thread:{thread}"), 0.0),
         Jump::Composer => {
             tx.scroll_into_view_in(Tab::Conversation.list_key(), "composer");
-            tx.focus(draft_field_key(&DraftKey::Comment(id)), false);
+            tx.focus_when_shown(draft_field_key(&DraftKey::Comment(id)), false);
         }
     }
 }
@@ -1065,7 +1065,7 @@ pub fn reply_to_picked(s: &mut App, tx: &mut Tx) -> bool {
     let Some(thread) = threads.iter().find(|t| t.id == thread).filter(|t| takes_replies(t)) else { return false };
     tx.instant();
     s.replying.insert(format!("{}|{}", item.id, thread.id));
-    tx.focus(draft_field_key(&DraftKey::Reply(item.id.clone(), thread.id.clone())), false);
+    tx.focus_when_shown(draft_field_key(&DraftKey::Reply(item.id.clone(), thread.id.clone())), false);
     true
 }
 
@@ -2385,13 +2385,25 @@ mod tests {
     #[test]
     fn a_row_between_diff_lines_counts_as_the_line_after_it() {
         let gap = Gap { at: 4, new_start: 1, old_start: 1, len: Some(3) };
-        let rows = [Row::FileList, Row::FileHeader(0), Row::Top(0), Row::Shown(0, 2, 2), Row::Gap(0, gap), Row::Line(0, 4), Row::Footer(0), Row::FileHeader(1)];
+        let rows = [
+            Row::ListHead,
+            Row::Entry(1),
+            Row::ListEnd,
+            Row::FileHeader(0),
+            Row::Top(0),
+            Row::Shown(0, 2, 2),
+            Row::Gap(0, gap),
+            Row::Line(0, 4),
+            Row::Footer(0),
+            Row::FileHeader(1),
+        ];
         assert_eq!(diff_place(&rows, 0), (0, 0));
-        assert_eq!(diff_place(&rows, 1), (0, 0));
-        assert_eq!(diff_place(&rows, 3), (0, 4), "a line shown from a gap sits before the line after the gap");
-        assert_eq!(diff_place(&rows, 5), (0, 4));
-        assert_eq!(diff_place(&rows, 6), (0, usize::MAX), "a file's end comes after its last line");
-        assert_eq!(diff_place(&rows, 7), (1, 0));
+        assert_eq!(diff_place(&rows, 1), (0, 0), "the file list's rows sit above every diff");
+        assert_eq!(diff_place(&rows, 3), (0, 0));
+        assert_eq!(diff_place(&rows, 5), (0, 4), "a line shown from a gap sits before the line after the gap");
+        assert_eq!(diff_place(&rows, 7), (0, 4));
+        assert_eq!(diff_place(&rows, 8), (0, usize::MAX), "a file's end comes after its last line");
+        assert_eq!(diff_place(&rows, 9), (1, 0));
         let talk = [Row::Thread(0), Row::Thread(1), Row::Composer];
         assert_eq!(talk_place(&talk, 1), (1, 0));
         assert_eq!(talk_place(&talk, 2), (usize::MAX, 0), "under the last thread, P goes back to it");
