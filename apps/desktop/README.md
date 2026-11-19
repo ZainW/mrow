@@ -79,7 +79,8 @@ badge is macOS-only for now.
   isn't. Mrow has to stay open while it does.
 - **Reviews**: three tabs under a bar that keeps Approve / Revoke and the way out to the forge
   in reach. Overview is the ask and the description rendered natively; Changes is the list of
-  files, then every file's diff with syntax highlighting and line numbers (comment threads under
+  files (by folder past eight, the folders open as deep as fits the first screen), then every
+  file's diff with syntax highlighting and line numbers (comment threads under
   their line); Conversation is every thread, then a comment box. Each tab keeps its place, a
   thread's file and line jump to that line in Changes, and each file shows its thread count,
   filled when there's a reply you haven't seen.

@@ -262,6 +262,11 @@ impl FileDiff {
         format!("{}→{}", self.old_path, self.new_path)
     }
 
+    /// Where the file is now: a deleted one where it was.
+    pub fn path(&self) -> &str {
+        if self.new_path.is_empty() { &self.old_path } else { &self.new_path }
+    }
+
     pub fn prepared(mut self) -> Self {
         self.lines = DiffLine::parse(&self.diff);
         self.digest = fnv1a(&self.diff);

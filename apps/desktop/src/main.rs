@@ -279,6 +279,31 @@ fn scene_big_diff(s: &mut App) {
     s.store.diffs.insert(id, crate::data::store::Loadable::Loaded(std::rc::Rc::new(fixtures::big_diff(40, 300))));
 }
 
+/// The big diff's file list partly read: `src/` and two folders in it open, some files viewed.
+fn scene_big_diff_viewed(s: &mut App) {
+    scene_big_diff(s);
+    let Some(item) = s.store.selected().cloned() else { return };
+    let files = s.store.diffs.get(&item.id).and_then(|l| l.value()).cloned().unwrap_or_default();
+    for path in ["src/", "src/export/", "src/db/", "web/"] {
+        s.folders.insert(format!("{}|{path}", item.id), true);
+    }
+    for file in files.iter().filter(|f| f.new_path.starts_with("src/db/") || f.new_path.starts_with("src/export/csv/") || f.new_path == "src/export/job.rs") {
+        s.store.set_viewed(true, file, &item);
+    }
+}
+
+/// A request touching a thousand files with every folder of its list open, for timing a scroll
+/// through a long file list.
+fn scene_huge_diff(s: &mut App) {
+    scene_changes(s);
+    let id = s.store.selected_id.clone().unwrap_or_default();
+    let files = fixtures::big_diff(1000, 20);
+    for folder in data::file_tree::FileTree::new(&files).folders {
+        s.folders.insert(format!("{id}|{}", folder.path), true);
+    }
+    s.store.diffs.insert(id, crate::data::store::Loadable::Loaded(std::rc::Rc::new(files)));
+}
+
 /// The changes with the lines around them: the short gap over the first hunk still folded, and
 /// the long one between two hunks shown twenty lines up from the second.
 fn scene_diff_context(s: &mut App) {
@@ -588,6 +613,8 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("toast", scene_toast),
     ("update", scene_update),
     ("big-diff", scene_big_diff),
+    ("big-diff-viewed", scene_big_diff_viewed),
+    ("huge-diff", scene_huge_diff),
     ("diff-context", scene_diff_context),
     ("ask", scene_ask),
     ("ask-chat", scene_ask_chat),

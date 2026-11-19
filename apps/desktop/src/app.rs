@@ -75,6 +75,9 @@ pub struct App {
     pub drag_from: f32,
     /// Files folded away, as "merge request id|file id".
     pub collapsed: HashSet<String>,
+    /// Folders of the Changes tab's file list opened or closed by hand, as "merge request id|path",
+    /// open or not. The others are as the list's length decides (`FileTree::opens`).
+    pub folders: HashMap<String, bool>,
     pub drafts: HashMap<DraftKey, TextEdit>,
     /// The diff line with its comment box open.
     pub line_comment: Option<DraftKey>,
@@ -204,6 +207,7 @@ impl Default for App {
             sidebar_width: p.sidebar_width as f32,
             drag_from: 0.0,
             collapsed: HashSet::new(),
+            folders: HashMap::new(),
             drafts: HashMap::new(),
             line_comment: None,
             replying: HashSet::new(),
