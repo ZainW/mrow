@@ -6,6 +6,7 @@ pub mod bg;
 pub mod cache;
 pub mod cli;
 pub mod diff;
+pub mod file_tree;
 pub mod forge;
 pub mod github;
 pub mod gitlab;

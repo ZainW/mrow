@@ -829,10 +829,62 @@ pub fn events() -> Vec<Event> {
     ]
 }
 
-/// A large review for timing: `files` Rust files of `lines` lines each.
+/// The paths of a large review, a ledger export's: some files at the top, a deep `src/` and a
+/// web client beside it, a lone file under `docs/`.
+const BIG_DIFF_PATHS: [&str; 40] = [
+    "Cargo.toml",
+    "docs/exports.md",
+    "migrations/0042_cursor_columns.sql",
+    "migrations/0043_export_batches.sql",
+    "src/api/exports.rs",
+    "src/api/routes.rs",
+    "src/config.rs",
+    "src/db/pool.rs",
+    "src/db/replica.rs",
+    "src/db/replica/health.rs",
+    "src/db/replica/lag.rs",
+    "src/export/batch.rs",
+    "src/export/csv/escape.rs",
+    "src/export/csv/header.rs",
+    "src/export/csv/mod.rs",
+    "src/export/csv/row.rs",
+    "src/export/cursor.rs",
+    "src/export/job.rs",
+    "src/export/mod.rs",
+    "src/export/writer.rs",
+    "src/ledger/entry.rs",
+    "src/ledger/mod.rs",
+    "src/ledger/paging.rs",
+    "src/ledger/totals.rs",
+    "src/lib.rs",
+    "src/main.rs",
+    "tests/export_csv.rs",
+    "tests/export_paging.rs",
+    "tests/fixtures/ledger_small.csv",
+    "tests/fixtures/ledger_wide.csv",
+    "tests/replica_lag.rs",
+    "web/src/exports/ExportButton.tsx",
+    "web/src/exports/ExportDialog.tsx",
+    "web/src/exports/api.ts",
+    "web/src/exports/format.ts",
+    "web/src/exports/progress.ts",
+    "web/src/settings/ExportSettings.tsx",
+    "web/src/settings/defaults.ts",
+    "web/tests/exports.test.ts",
+    "web/tests/settings.test.ts",
+];
+
+/// A large review for timing: `files` files of up to `lines` lines each, sorted by path as the
+/// forges list them. Past the forty of a ledger export, generated tables in folders of forty.
 pub fn big_diff(files: usize, lines: usize) -> Vec<FileDiff> {
-    (0..files)
-        .map(|f| {
+    let mut paths: Vec<String> = BIG_DIFF_PATHS.iter().take(files).map(|p| p.to_string()).collect();
+    paths.extend((BIG_DIFF_PATHS.len()..files).map(|f| format!("src/schema/table_{:02}/column_{f:04}.rs", f / 40)));
+    paths.sort();
+    paths
+        .iter()
+        .enumerate()
+        .map(|(f, path)| {
+            let lines = lines / 2 + (f * 37) % (lines / 2 + 1);
             let mut diff = format!("@@ -1,{lines} +1,{lines} @@ impl Ledger {{\n");
             for i in 0..lines {
                 match i % 7 {
@@ -843,8 +895,7 @@ pub fn big_diff(files: usize, lines: usize) -> Vec<FileDiff> {
                     _ => diff.push_str(&format!("     fn entry_{i}(&self) -> Result<Entry, Error> {{ self.rows.get({i}).cloned().ok_or(Error::Missing) }}\n")),
                 }
             }
-            let path = format!("src/ledger/part_{f:02}.rs");
-            file(&path, &path, &diff, false)
+            file(path, path, &diff, false)
         })
         .collect()
 }

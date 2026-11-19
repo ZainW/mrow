@@ -22,6 +22,7 @@ use rune_kit::{Kit, Spinner, TextArea};
 
 use crate::app::{App, DraftKey};
 use crate::data::diff::{DiffLine, Gap, LineKind, REVEAL_STEP, Reveal};
+use crate::data::file_tree::{FileTree, Node};
 use crate::data::models::{Discussion, FileDiff, MergeRequest, Note, Verdict};
 use crate::data::store::{Loadable, Viewed, relative};
 use crate::ui::components::{
@@ -153,7 +154,13 @@ enum Row {
     Loading,
     Failed(String),
     Empty(&'static str),
-    FileList,
+    /// The file list's first row: how many files I've viewed.
+    ListHead,
+    /// A folder of the file list, by its index in the page's `FileTree`.
+    Folder(usize),
+    /// A file's row in the file list.
+    Entry(usize),
+    ListEnd,
     FileHeader(usize),
     Notice(usize, String, bool),
     Top(usize),
@@ -186,7 +193,10 @@ impl Row {
             Row::Loading => "loading".into(),
             Row::Failed(_) => "failed".into(),
             Row::Empty(_) => "empty".into(),
-            Row::FileList => "files".into(),
+            Row::ListHead => "files".into(),
+            Row::Folder(d) => format!("folder:{d}"),
+            Row::Entry(f) => format!("entry:{}", files[*f].id()),
+            Row::ListEnd => "files-end".into(),
             Row::FileHeader(f) => format!("file:{}", files[*f].id()),
             Row::Notice(f, ..) => format!("notice:{}", files[*f].id()),
             Row::Top(f) => format!("top:{}", files[*f].id()),
@@ -205,6 +215,8 @@ impl Row {
 struct Page {
     item: MergeRequest,
     files: Rc<Vec<FileDiff>>,
+    /// The files by folder, for the file list.
+    tree: Rc<FileTree>,
     /// The changes arrived (possibly with no files), and the threads.
     changes: bool,
     talk: bool,
@@ -254,6 +266,7 @@ pub fn detail(s: &App, p: &Pal, _k: &Kit, item: &MergeRequest, room: Room) -> El
     let page = Rc::new(Page {
         item: item.clone(),
         files,
+        tree: lists.tree.clone(),
         changes: matches!(diffs, Some(Loadable::Loaded(_))),
         talk: matches!(talk, Some(Loadable::Loaded(_))),
         threads,
@@ -554,6 +567,7 @@ struct PageRows {
     talk_rows: Rc<Vec<Row>>,
     talk_keys: Rc<Vec<String>>,
     placed: Rc<Placed>,
+    tree: Rc<FileTree>,
     fresh: bool,
     /// Counts the times the rows were worked out, so the list re-reads its keys only then.
     version: u64,
@@ -569,6 +583,8 @@ struct Inputs {
     head: Option<String>,
     /// How each file is folded: 0 open, 1 collapsed, 2 a large file expanded.
     folds: Vec<u8>,
+    /// The file list's folders opened or closed by hand: their paths, and whether they're open.
+    folders: Vec<(String, bool)>,
     /// The store's `context_version`: how much of the files' gaps shows, and their texts.
     context: u64,
 }
@@ -589,6 +605,7 @@ impl Inputs {
             && same(&self.talk, &other.talk)
             && self.head == other.head
             && self.folds == other.folds
+            && self.folders == other.folders
             && self.context == other.context
     }
 }
@@ -627,6 +644,9 @@ fn page_rows(
             })
             .collect()
     };
+    let prefix = format!("{}|", item.id);
+    let mut folders: Vec<(String, bool)> = s.folders.iter().filter_map(|(key, &open)| key.strip_prefix(&prefix).map(|path| (path.to_string(), open))).collect();
+    folders.sort();
     let inputs = Inputs {
         item: item.id.clone(),
         seen: s.store.seen_before.get(&item.id).copied(),
@@ -634,6 +654,7 @@ fn page_rows(
         talk: talk.cloned(),
         head,
         folds,
+        folders,
         context: s.store.context_version,
     };
     let cached = PAGE_ROWS.with(|c| c.borrow().as_ref().and_then(|(was, rows)| was.same(&inputs).then(|| rows.clone())));
@@ -642,11 +663,17 @@ fn page_rows(
     }
     let threads: &[Discussion] = talk.and_then(Loadable::value).map_or(&[], |t| t.as_slice());
     let placed = Placed::new(threads, inputs.head.as_deref(), files);
+    let tree = FileTree::new(files);
     let mut rows = Vec::new();
     match diffs {
         Some(Loadable::Loaded(_)) if files.is_empty() => rows.push(Row::Empty("No changes.")),
         Some(Loadable::Loaded(_)) => {
-            rows.push(Row::FileList);
+            rows.push(Row::ListHead);
+            rows.extend(tree.rows(|d| folder_open(s, item, &tree, d)).into_iter().map(|node| match node {
+                Node::Folder(d) => Row::Folder(d),
+                Node::File(f) => Row::Entry(f),
+            }));
+            rows.push(Row::ListEnd);
             for (f, file) in files.iter().enumerate() {
                 rows.push(Row::FileHeader(f));
                 if inputs.folds[f] == 1 {
@@ -683,6 +710,7 @@ fn page_rows(
         talk_rows: Rc::new(talk_rows),
         talk_keys: Rc::new(talk_keys),
         placed: Rc::new(placed),
+        tree: Rc::new(tree),
         fresh,
         version,
     };
@@ -857,7 +885,12 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
             .max_w(READING_WIDTH)
             .child(text(format!("Couldn’t load the {what}: {message}")).font(ui(13.0, 400.0)).color(p.red).wrap().grow(1.0).shrink().min_w(0.0)),
         Row::Empty(message) => el().child(text(*message).font(ui(13.0, 400.0)).color(p.tertiary)),
-        Row::FileList => file_list(s, p, page),
+        Row::ListHead => list_head(s, p, page),
+        Row::Folder(d) => folder_row(s, p, page, *d),
+        Row::Entry(f) => entry_row(s, p, page, *f),
+        Row::ListEnd => {
+            el().w_full().pb(14.0).child(el().w_full().h(6.0).fill(p.well).corners([0.0, 0.0, 10.0, 10.0]).border_sides([0.0, 1.0, 1.0, 1.0], p.line))
+        }
         Row::FileHeader(f) => file_header(s, p, page, *f),
         Row::Notice(f, message, expands) => notice(p, page, *f, message, *expands),
         Row::Top(_) => el().w_full().h(4.0).fill(p.paper).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line),
@@ -1013,7 +1046,7 @@ fn viewed_mark(p: &Pal, state: Viewed, ink: rune::Color) -> El {
     match state {
         Viewed::Yes => filled_mark(&I::DISC, &I::SMALL_CHECK, p.green, ink, 12.0).help("Viewed"),
         Viewed::Changed => filled_mark(&I::DISC, &I::DOT, p.amber, ink, 12.0).help("Changed since you viewed it"),
-        Viewed::No => icon(&I::PLAIN_CIRCLE, 12.0).color(p.line).help("Not viewed yet"),
+        Viewed::No => icon(&I::PLAIN_CIRCLE, 12.0).color(p.tertiary).help("Not viewed yet"),
     }
 }
 
@@ -1176,68 +1209,166 @@ fn i_approved(s: &App, item: &MergeRequest) -> bool {
 
 // MARK: Changes
 
-fn file_list(s: &App, p: &Pal, page: &Page) -> El {
-    let item = &page.item;
+/// The file list's head: how many of the files I've viewed, in words and as a bar.
+fn list_head(s: &App, p: &Pal, page: &Page) -> El {
     let files = &page.files;
-    let viewed = s.store.viewed_count(files, item);
+    let viewed = s.store.viewed_count(files, &page.item);
     let done = viewed == files.len() && viewed > 0;
-    let mut c = col().w_full().py(6.0).radius(10.0).fill(p.well).border(1.0, p.line).child(
+    list_edge(p, true).child(
         row()
             .h(26.0)
             .px(12.0)
             .gap(8.0)
             .center_y()
-            .child(text(format!("{viewed} of {} viewed", files.len())).font(ui(12.0, MEDIUM)).color(if done { p.green } else { p.secondary }))
+            .child(text(format!("{viewed} of {} viewed", files.len())).font(ui(12.0, MEDIUM).features("'tnum' 1")).color(if done {
+                p.green
+            } else {
+                p.secondary
+            }))
             .child(el().grow(1.0))
             .child(progress_bar(p, if files.is_empty() { 0.0 } else { viewed as f32 / files.len() as f32 }, 90.0)),
-    );
-    for (f, file) in files.iter().enumerate() {
-        let state = s.store.viewed(file, item);
-        let (glyph, tint) = if file.new_file {
-            (&I::DOC_PLUS, p.green)
-        } else if file.deleted_file {
-            (&I::DOC_MINUS, p.red)
-        } else if file.renamed_file {
-            (&I::DOC_ARROW, p.tertiary)
-        } else {
-            (&I::PENCIL_SQUARE, p.tertiary)
-        };
-        c = c.child(
-            row()
-                .key(format!("file-entry-{f}"))
-                .role("button")
-                .label(file.new_path.clone())
-                .h(26.0)
-                .px(12.0)
-                .gap(8.0)
-                .center_y()
-                .hover(p.hover)
-                .child(el().w(14.0).center().child(icon(glyph, 12.0).color(tint)))
-                .child(
-                    text(file.new_path.clone())
-                        .font(mono(12.0, 400.0))
-                        .color(if state == Viewed::Yes { p.tertiary } else { p.text })
-                        .single_line()
-                        .truncate_head()
-                        .grow(1.0)
-                        .shrink()
-                        .min_w(0.0),
-                )
-                .child(counts(p, file).opacity(if state == Viewed::Yes { 0.6 } else { 1.0 }))
-                .child(viewed_mark(p, state, p.well))
-                .on_press_tx(move |s: &mut App, tx: &mut Tx| go(s, tx, Jump::File(Some(f)))),
-        );
-    }
-    el().w_full().pb(14.0).child(c)
+    )
 }
 
-fn counts(p: &Pal, file: &FileDiff) -> El {
+/// A slice of the file list's card: its sides, and with `top` its rounded top too. The list is
+/// one card drawn a row at a time, so a request touching thousands of files builds only the
+/// rows in sight.
+fn list_edge(p: &Pal, top: bool) -> El {
+    let edge = col().w_full().px(1.0).fill(p.well);
+    if top { edge.pt(6.0).corners([10.0, 10.0, 0.0, 0.0]).border_sides([1.0, 1.0, 0.0, 1.0], p.line) } else { edge.border_sides([0.0, 1.0, 0.0, 1.0], p.line) }
+}
+
+/// What remembers whether a folder of `item`'s file list is open.
+fn folder_key(item: &MergeRequest, path: &str) -> String {
+    format!("{}|{path}", item.id)
+}
+
+/// Whether folder `d` of `item`'s file list is open: as it was left, or as the list's length
+/// decides.
+fn folder_open(s: &App, item: &MergeRequest, tree: &FileTree, d: usize) -> bool {
+    s.folders.get(&folder_key(item, &tree.folders[d].path)).copied().unwrap_or_else(|| tree.opens(d))
+}
+
+/// How far a row of the file list sits in for each folder it's in: a child's icon lines up
+/// under its folder's name.
+const LIST_INDENT: f32 = 22.0;
+
+/// A folder of the file list: its path from the folder it's in, how many files it holds (or of
+/// them I've viewed, once I've viewed some), their lines, and a viewed mark for the lot. A click
+/// opens or closes it, at once.
+fn folder_row(s: &App, p: &Pal, page: &Page, d: usize) -> El {
+    let item = &page.item;
+    let folder = &page.tree.folders[d];
+    let key = folder_key(item, &folder.path);
+    let open = folder_open(s, item, &page.tree, d);
+    let states: Vec<Viewed> = folder.files.iter().map(|&f| s.store.viewed(&page.files[f], item)).collect();
+    let viewed = states.iter().filter(|v| **v == Viewed::Yes).count();
+    let total = folder.files.len();
+    let state = if viewed == total {
+        Viewed::Yes
+    } else if states.contains(&Viewed::Changed) {
+        Viewed::Changed
+    } else {
+        Viewed::No
+    };
+    let tally = match (viewed, total) {
+        (0, 1) => "1 file".to_string(),
+        (0, n) => format!("{n} files"),
+        (v, n) if v == n => format!("{n} viewed"),
+        (v, n) => format!("{v} of {n} viewed"),
+    };
+    let tip = match state {
+        Viewed::Yes => "Every file viewed",
+        Viewed::Changed => "A file changed since you viewed it",
+        Viewed::No if viewed > 0 => "Some files viewed",
+        Viewed::No => "Not viewed yet",
+    };
+    let row = row()
+        .key(format!("folder-{d}"))
+        .role("button")
+        .label(format!("{}, {tally}", folder.path))
+        .expanded(open)
+        .help(folder.path.clone())
+        .h(26.0)
+        .pl(12.0 + folder.depth as f32 * LIST_INDENT)
+        .pr(12.0)
+        .gap(8.0)
+        .center_y()
+        .hover(p.hover)
+        .child(el().w(14.0).center().child(icon(if open { &I::CHEVRON_DOWN } else { &I::CHEVRON_RIGHT }, 11.0).color(p.tertiary)))
+        .child(
+            text(folder.label().to_string())
+                .font(mono(12.0, MEDIUM))
+                .color(if state == Viewed::Yes { p.tertiary } else { p.text })
+                .single_line()
+                .truncate_head()
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0),
+        )
+        .child(text(tally).font(ui(12.0, 400.0).features("'tnum' 1")).color(p.tertiary).single_line())
+        .child(counts(p, folder.added, folder.removed).opacity(if state == Viewed::Yes { 0.6 } else { 1.0 }))
+        .child(viewed_mark(p, state, p.well).help(tip))
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            tx.instant();
+            s.folders.insert(key.clone(), !open);
+        });
+    list_edge(p, false).child(row)
+}
+
+/// A file of the file list: what kind of change it is, its name (its whole path in a flat
+/// list), its lines and whether I've viewed it. A click goes to its diff.
+fn entry_row(s: &App, p: &Pal, page: &Page, f: usize) -> El {
+    let file = &page.files[f];
+    let state = s.store.viewed(file, &page.item);
+    let (glyph, tint) = if file.new_file {
+        (&I::DOC_PLUS, p.green)
+    } else if file.deleted_file {
+        (&I::DOC_MINUS, p.red)
+    } else if file.renamed_file {
+        (&I::DOC_ARROW, p.tertiary)
+    } else {
+        (&I::PENCIL_SQUARE, p.tertiary)
+    };
+    let path = file.path();
+    let name = &path[page.tree.label_at[f]..];
+    let whole = if file.renamed_file && file.old_path != file.new_path { format!("{} → {path}", file.old_path) } else { path.to_string() };
+    let row = row()
+        .key(format!("file-entry-{f}"))
+        .role("button")
+        .label(whole.clone())
+        .help(whole)
+        .h(26.0)
+        .pl(12.0 + page.tree.depth[f] as f32 * LIST_INDENT)
+        .pr(12.0)
+        .gap(8.0)
+        .center_y()
+        .hover(p.hover)
+        .child(el().w(14.0).center().child(icon(glyph, 12.0).color(tint)))
+        .child(
+            text(name.to_string())
+                .font(mono(12.0, 400.0))
+                .color(if state == Viewed::Yes { p.tertiary } else { p.text })
+                .single_line()
+                .truncate_head()
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0),
+        )
+        .child(counts(p, file.added, file.removed).opacity(if state == Viewed::Yes { 0.6 } else { 1.0 }))
+        .child(viewed_mark(p, state, p.well))
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| go(s, tx, Jump::File(Some(f))));
+    list_edge(p, false).child(row)
+}
+
+/// Lines added and removed, each left out at none.
+fn counts(p: &Pal, added: usize, removed: usize) -> El {
     let mut r = row().gap(6.0);
-    if file.added > 0 {
-        r = r.child(text(format!("+{}", file.added)).font(mono(12.0, MEDIUM)).color(p.green).single_line());
+    if added > 0 {
+        r = r.child(text(format!("+{added}")).font(mono(12.0, MEDIUM)).color(p.green).single_line());
     }
-    if file.removed > 0 {
-        r = r.child(text(format!("−{}", file.removed)).font(mono(12.0, MEDIUM)).color(p.red).single_line());
+    if removed > 0 {
+        r = r.child(text(format!("−{removed}")).font(mono(12.0, MEDIUM)).color(p.red).single_line());
     }
     r
 }
@@ -1290,7 +1421,7 @@ fn file_header(s: &App, p: &Pal, page: &Page, f: usize) -> El {
     if let Some(count) = comment_count(p, threads.len(), fresh) {
         name = name.child(count);
     }
-    name = name.child(counts(p, file));
+    name = name.child(counts(p, file.added, file.removed));
     let mr = item.id.clone();
     let fid = id.clone();
     let name = name.on_press(move |s: &mut App| s.toggle_collapsed(&mr, &fid));
