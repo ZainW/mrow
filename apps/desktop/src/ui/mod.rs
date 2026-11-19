@@ -215,6 +215,10 @@ fn tab_chip(p: &Pal, item: &MergeRequest, active: bool, preview: bool, unread: b
         .key(format!("tab-{}", item.id))
         .role("tab")
         .label(item.full_reference())
+        // Squeezed by a narrow window, tabs give up their titles instead of running under the
+        // filter field; the glyph and the reference stay.
+        .shrink()
+        .min_w(64.0)
         .h(28.0)
         .pl(6.0)
         .pr(10.0)

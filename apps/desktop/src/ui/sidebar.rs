@@ -65,14 +65,19 @@ fn account_switcher(store: &Store, p: &Pal) -> El {
         let color = if store.error().is_some() { p.red } else { p.tertiary };
         names = names.child(text(sub).font(ui(12.0, 400.0)).color(color).single_line().truncate());
     }
-    let others: usize = store.forges().into_iter().filter(|f| *f != forge).map(|f| store.waiting_count(f)).sum();
+    // What waits in the other accounts, each beside its forge's mark, so the count says where.
+    let others: Vec<_> = store.forges().into_iter().filter(|f| *f != forge).map(|f| (f, store.waiting_count(f))).filter(|(_, n)| *n > 0).collect();
+    let mut label = format!("Account: {}", forge.name());
+    for (other, n) in &others {
+        label.push_str(&format!(", {n} waiting in {}", other.name()));
+    }
     let mut r = row()
         .key("account")
         .grow(1.0)
         .shrink()
         .min_w(0.0)
         .role("button")
-        .label(format!("Account: {}", forge.name()))
+        .label(label)
         .h(38.0)
         .px(8.0)
         .gap(8.0)
@@ -85,15 +90,19 @@ fn account_switcher(store: &Store, p: &Pal) -> El {
         .child(names.shrink().min_w(0.0))
         .child(icon(&I::CHEVRON_UP_DOWN, 10.0).color(p.tertiary))
         .child(el().grow(1.0));
-    if others > 0 {
+    for (other, n) in others {
         r = r.child(
-            el().h(17.0)
-                .px(6.0)
-                .radius(8.5)
+            row()
+                .h(18.0)
+                .pl(3.0)
+                .pr(6.0)
+                .gap(4.0)
+                .center_y()
+                .radius(9.0)
                 .fill(p.accent_soft)
-                .center()
-                .help(format!("{others} waiting in your other account"))
-                .child(text(others.to_string()).font(ui(11.0, SEMIBOLD)).color(p.accent).single_line()),
+                .help(format!("{n} waiting in {}", other.name()))
+                .child(forge_mark(p, other, 12.0))
+                .child(text(n.to_string()).font(ui(11.0, SEMIBOLD).features("'tnum' 1")).color(p.accent).single_line()),
         );
     }
     r.on_press_tx(|s: &mut App, tx: &mut Tx| menus::accounts(s, tx))
@@ -269,9 +278,9 @@ fn list(s: &App, p: &Pal) -> El {
             Line::Header(t) => std::borrow::Cow::Owned(format!("h-{t}")),
             Line::Item(m, ..) => std::borrow::Cow::Owned(m.id.clone()),
         },
-        move |_: &App, i| match &lines[i] {
+        move |s: &App, i| match &lines[i] {
             Line::Header(t) => section_header(&pal, t),
-            Line::Item(m, selected, unread) => sidebar_row(&pal, m, *selected, *unread),
+            Line::Item(m, selected, unread) => sidebar_row(&pal, m, *selected, *unread, s.sidebar_width),
         },
     );
     queue(rows)
@@ -326,7 +335,7 @@ pub fn section_header(p: &Pal, title: &str) -> El {
     el().w_full().px(18.0).pt(14.0).pb(4.0).child(text(title.to_string()).font(ui(12.0, MEDIUM)).color(p.tertiary).single_line())
 }
 
-fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El {
+fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool, sidebar_width: f32) -> El {
     let stale = item.is_open() && item.my_state.needs_review() && !item.draft && (chrono::Utc::now() - item.requested_at).num_seconds() > 2 * 86_400;
     let when = if item.is_open() { item.requested_at } else { item.merged_at.unwrap_or(item.updated_at) };
     let time_help = if !item.is_open() {
@@ -365,10 +374,17 @@ fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El
                 .pt(1.5)
                 .help(time_help),
         );
+    // The reference is what identifies the request, so the author's name gives way first. Only
+    // a project name long enough to take most of the line is cut, from its start, keeping the
+    // number whole.
+    let reference = item.short_reference();
+    let reference_font = mono(12.0, 400.0);
+    let whole = rune::text::measure(&reference, &[], reference_font, None).0;
+    let room = (sidebar_width - 52.0) * 0.6;
     let meta = row()
         .gap(6.0)
         .center_y()
-        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0))
+        .child(text(reference).font(reference_font).color(p.tertiary).single_line().truncate_head().min_w(whole.min(room).ceil()))
         .child(text("·").font(ui(12.0, 400.0)).color(p.tertiary))
         .child(text(item.author.name.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
         .child(el().grow(1.0).min_w(4.0))
