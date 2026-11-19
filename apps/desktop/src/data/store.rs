@@ -15,6 +15,7 @@ use super::inbox::{self, Event, Notice};
 use super::mine::{self, Stack, Standing, Status, WalkStep};
 use super::models::*;
 use super::prefs;
+use super::snooze::{self, Hold, Snooze};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Loadable<T> {
@@ -293,6 +294,12 @@ pub struct Store {
     pub last_seen: BTreeMap<String, f64>,
     /// What changed, newest first: the bell's list.
     pub inbox: Vec<Event>,
+    /// Requests snoozed or muted out of To review and Mine, by ID.
+    pub holds: BTreeMap<String, Snooze>,
+    /// The snoozed fold at the end of the list shows what's in it.
+    pub snoozed_open: bool,
+    /// The waiting count changed outside a refresh: the next `poll` puts it on the Dock.
+    badge_stale: bool,
     /// My requests merged from here: their leaving the list is my doing, not news.
     merged_here: HashSet<String>,
     /// When each merge request was last seen before this visit to it, for the replies that came
@@ -373,6 +380,9 @@ impl Default for Store {
             tabs: p.tabs,
             last_seen: p.last_seen,
             inbox: p.inbox,
+            holds: p.snoozed,
+            snoozed_open: false,
+            badge_stale: false,
             merged_here: HashSet::new(),
             seen_before: HashMap::new(),
             viewed_files: p.viewed_files,
@@ -444,7 +454,7 @@ impl Store {
     /// What's waiting on me in one account, for the switcher.
     pub fn waiting_count(&self, forge: Forge) -> usize {
         let drafts = prefs::read(|p| p.show_drafts);
-        self.accounts.get(&forge).map_or(0, |a| a.open.iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft)).count())
+        self.accounts.get(&forge).map_or(0, |a| a.open.iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft) && !self.is_held(m)).count())
     }
 
     /// Shows another account's queue, keeping the selection if it's from there, otherwise moving
@@ -487,7 +497,7 @@ impl Store {
     pub fn items(&self, mode: QueueMode) -> Vec<MergeRequest> {
         let (drafts, oldest) = prefs::read(|p| (p.show_drafts, p.oldest_first));
         let mut items: Vec<MergeRequest> = match mode {
-            QueueMode::ToReview => self.open().iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft)).cloned().collect(),
+            QueueMode::ToReview => self.open().iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft) && !self.is_held(m)).cloned().collect(),
             QueueMode::Reviewed => self.open().iter().filter(|m| !m.my_state.needs_review()).cloned().collect(),
             QueueMode::Mine => self.mine_listed().cloned().collect(),
             QueueMode::Done => self.done().to_vec(),
@@ -517,18 +527,23 @@ impl Store {
         sections
     }
 
+    /// The rows the keys step through, the open snoozed fold's last.
     pub fn visible_items(&self) -> Vec<MergeRequest> {
-        if self.mode == QueueMode::Mine {
-            return self
-                .mine_lines()
+        let mut items: Vec<MergeRequest> = if self.mode == QueueMode::Mine {
+            self.mine_lines()
                 .into_iter()
                 .filter_map(|l| match l {
                     MineLine::Item { item, .. } => Some(item),
                     _ => None,
                 })
-                .collect();
+                .collect()
+        } else {
+            self.sections().into_iter().flat_map(|s| s.items).collect()
+        };
+        if self.snoozed_open {
+            items.extend(self.held_items().into_iter().map(|(m, _)| m));
         }
-        self.sections().into_iter().flat_map(|s| s.items).collect()
+        items
     }
 
     /// The number beside a list's name. For Mine, the ones that are my move.
@@ -548,7 +563,7 @@ impl Store {
     /// Mine as the list shows it. One merged from here leaves the list at once, but stays on
     /// hand (and on screen, if selected) until the queue confirms it.
     fn mine_listed(&self) -> impl Iterator<Item = &MergeRequest> {
-        self.mine().iter().filter(|m| m.is_open())
+        self.mine().iter().filter(|m| m.is_open() && !self.is_held(m))
     }
 
     pub fn mine_error(&self) -> Option<&str> {
@@ -1039,8 +1054,11 @@ impl Store {
             self.load_diffs(&item);
             self.load_discussions(&item);
         }
+        // Before the inbox looks, so a change that ends a snooze is told like any other.
+        self.wake_holds();
         // Before the walks move on: a part they merged is still on record as theirs.
         effects.notify = self.note_changes(&fresh, every_loaded);
+        self.prune_holds(&loaded, &fresh);
         // After the inbox has compared what the forge said with what it said last time.
         let overlays = std::mem::take(&mut self.overlays);
         for o in overlays.iter().filter(|o| loaded.contains(&o.forge)) {
@@ -1055,9 +1073,9 @@ impl Store {
         effects
     }
 
-    /// The Dock badge: reviews waiting on me, across every account.
+    /// The Dock badge: reviews waiting on me, across every account, less the snoozed ones.
     fn badge(&self) -> usize {
-        self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review() && !m.draft).count()
+        self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review() && !m.draft && !self.is_held(m)).count()
     }
 
     pub fn load_details_if_needed(&mut self, item: &MergeRequest) {
@@ -1697,6 +1715,23 @@ impl Store {
             self.toast = None;
             changed = true;
         }
+        // A snooze until tomorrow ends on the clock, between refreshes too. Scenes and
+        // benchmarks keep their snoozes as set.
+        if let Some(at) = snooze::next_wake(&self.holds).filter(|_| !self.offline) {
+            let wait = (at - Utc::now()).num_milliseconds() as f64 / 1000.0;
+            if wait <= 0.0 {
+                self.wake_holds();
+                self.badge_stale = true;
+                changed = true;
+            } else {
+                let at = now + wait;
+                effects.wake_at = Some(effects.wake_at.map_or(at, |w| w.min(at)));
+            }
+        }
+        if std::mem::take(&mut self.badge_stale) {
+            effects.badge = Some(self.badge());
+            changed = true;
+        }
         if changed {
             self.fetch_ahead();
         }
@@ -1739,7 +1774,9 @@ impl Store {
         let now = Utc::now();
         let (next, mut found) = inbox::detect(&prev, &looks, &merged_here, now);
         found.retain(|e| inbox::level(&levels, e.kind) != inbox::Level::Off);
-        let notices = inbox::notices(&found, &levels, banners);
+        snooze::quiet(&mut found, &self.holds);
+        let loud: Vec<Event> = found.iter().filter(|e| !e.done).cloned().collect();
+        let notices = inbox::notices(&loud, &levels, banners);
         inbox::add(&mut self.inbox, found);
         // A review request is dealt with once it no longer waits on me.
         let waiting: HashSet<&str> = looks.iter().flat_map(|l| l.open.iter()).filter(|m| m.my_state.needs_review()).map(|m| m.id.as_str()).collect();
@@ -1844,6 +1881,119 @@ impl Store {
         self.merge(item);
         if self.busy.is_some() {
             self.merged_here.insert(item.id.clone());
+        }
+    }
+
+    // MARK: Snoozing
+
+    pub fn is_held(&self, item: &MergeRequest) -> bool {
+        self.holds.contains_key(&item.id)
+    }
+
+    pub fn hold_of(&self, id: &str) -> Option<&Snooze> {
+        self.holds.get(id)
+    }
+
+    /// Whether a request can be snoozed: one waiting on my review, or one of my open ones.
+    pub fn can_snooze(&self, item: &MergeRequest) -> bool {
+        item.is_open() && (self.is_mine(item) || item.my_state.needs_review())
+    }
+
+    /// The held requests the current list would show, soonest back first, muted last: what its
+    /// snoozed fold holds. Only To review and Mine have one.
+    pub fn held_items(&self) -> Vec<(MergeRequest, Snooze)> {
+        let drafts = prefs::read(|p| p.show_drafts);
+        let items: Vec<&MergeRequest> = match self.mode {
+            QueueMode::ToReview => self.open().iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft)).collect(),
+            QueueMode::Mine => self.mine().iter().filter(|m| m.is_open()).collect(),
+            _ => return vec![],
+        };
+        // The list's filters hold for the fold too.
+        let query = self.filter.trim().to_lowercase();
+        let shown = |m: &&MergeRequest| {
+            (query.is_empty() || matches(m, &query))
+                && self.author_filter.as_ref().is_none_or(|a| *a == m.author.username)
+                && (self.mode != QueueMode::Mine || self.mine_filter.is_none_or(|f| self.status_of(m).standing.group() == f))
+        };
+        let mut held: Vec<(MergeRequest, Snooze)> = items.into_iter().filter(shown).filter_map(|m| Some((m.clone(), self.holds.get(&m.id)?.clone()))).collect();
+        let order = |s: &Snooze| match s.hold {
+            Hold::Time(at) => (0, at.timestamp()),
+            Hold::Change => (1, -s.since.timestamp()),
+            Hold::Mute => (2, -s.since.timestamp()),
+        };
+        held.sort_by_key(|(_, s)| order(s));
+        held
+    }
+
+    /// Snoozes or mutes a request. Its inbox events are dealt with, and a selection on it moves
+    /// to the next row (the one before, at the end of the list).
+    pub fn snooze(&mut self, id: &str, hold: Hold) {
+        let Some(item) = self.item(id).cloned() else { return };
+        if !self.can_snooze(&item) {
+            return;
+        }
+        let before = self.visible_items();
+        let mine = self.is_mine(&item);
+        self.holds.insert(item.id.clone(), Snooze::new(&item, hold, mine, Utc::now()));
+        self.save_holds();
+        self.mark_request_done(&item.id);
+        // Snoozed from a tab while another list shows, it stays on screen.
+        if let Some(at) = before.iter().position(|m| m.id == id).filter(|_| self.selected_id.as_deref() == Some(id)) {
+            let next = before[at + 1..].iter().chain(before[..at].iter().rev()).find(|m| !self.is_held(m)).map(|m| m.id.clone());
+            self.select(next);
+        }
+        let noun = item.kind().noun();
+        self.show(&match hold {
+            Hold::Time(at) => format!("Snoozed until {}", snooze::until(at, &Local::now())),
+            Hold::Change => "Snoozed until it changes".into(),
+            Hold::Mute => format!("Muted this {noun}"),
+        });
+        self.badge_stale = true;
+    }
+
+    /// Puts a held request back in its list.
+    pub fn unsnooze(&mut self, id: &str) {
+        let Some(was) = self.holds.remove(id) else { return };
+        self.save_holds();
+        self.show(if was.hold.muted() { "Unmuted" } else { "Unsnoozed" });
+        if self.holds.is_empty() {
+            self.snoozed_open = false;
+        }
+        self.badge_stale = true;
+    }
+
+    /// Ends the holds that are due: on the clock, or because the request changed.
+    fn wake_holds(&mut self) {
+        let mut holds = std::mem::take(&mut self.holds);
+        let woken = snooze::wake(&mut holds, |id| self.every_item().find(|m| m.id == id && m.is_open()), Utc::now());
+        self.holds = holds;
+        if !woken.is_empty() {
+            self.save_holds();
+        }
+    }
+
+    /// Lets go of holds on requests that finished, or that every list of their account left a
+    /// while ago. Only an account that fully loaded (mine included) can say a request is gone.
+    fn prune_holds(&mut self, loaded: &[Forge], fresh: &[(Forge, Vec<MergeRequest>)]) {
+        let now = Utc::now();
+        let mut holds = self.holds.clone();
+        for forge in loaded {
+            let Some(a) = self.accounts.get(forge).filter(|a| a.error.is_none() && a.mine_error.is_none() && a.mine.len() < MINE_PAGE_FLOOR) else { continue };
+            let open: HashSet<&str> = a.open.iter().chain(&a.mine).filter(|m| m.is_open()).map(|m| m.id.as_str()).collect();
+            let lagged = fresh.iter().filter(|(f, _)| f == forge).flat_map(|(_, l)| l);
+            let ended: HashSet<&str> = a.done.iter().chain(lagged).map(|m| m.id.as_str()).collect();
+            snooze::prune(&mut holds, *forge, &open, &ended, now);
+        }
+        if holds != self.holds {
+            self.holds = holds;
+            self.save_holds();
+        }
+    }
+
+    fn save_holds(&self) {
+        if !self.offline {
+            let holds = self.holds.clone();
+            prefs::update(|p| p.snoozed = holds);
         }
     }
 

@@ -395,7 +395,7 @@ fn bar(s: &App, page: &Page, open: Tab, room: Room) -> El {
     if room > Room::Tight {
         r = r.child(forge_button(p, item, narrow));
     }
-    if page.mine {
+    if page.mine || crate::ui::menus::snoozes(s, item) {
         r = r.child(crate::ui::manage::more_button(s, p, item));
     }
     let pending = s.store.pending_count(item);

@@ -17,6 +17,7 @@ pub mod mine;
 pub mod models;
 pub mod paths;
 pub mod prefs;
+pub mod snooze;
 pub mod store;
 pub mod styler;
 pub mod update;

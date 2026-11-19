@@ -8,6 +8,7 @@ use chrono::{Duration, Utc};
 use crate::data::forge::Forge;
 use crate::data::inbox::{Event, Kind};
 use crate::data::models::*;
+use crate::data::snooze::{self, Hold, Snooze};
 use crate::data::store::Account;
 
 fn ago(hours: i64) -> Date {
@@ -827,6 +828,46 @@ pub fn events() -> Vec<Event> {
         event(Gitlab, "fieldnotes/ledger", "229", Kind::Closed, "Merged", "Rename the export settings", 22 * 60, true),
         event(Gitlab, "fieldnotes/hooks", "88", Kind::AskedAgain, "Devika Rao asked again", "Retry webhook deliveries with jittered backoff", 30 * 60, true),
     ]
+}
+
+/// Three more reviews asked of Robin on GitLab, for the snoozed fold to hold.
+pub fn more_reviews() -> Vec<MergeRequest> {
+    let spec = |iid, title, project, author, hours, counts| Spec {
+        forge: Forge::Gitlab,
+        iid,
+        title,
+        project,
+        author,
+        hours,
+        state: "opened",
+        draft: false,
+        my_state: ReviewState::Unreviewed,
+        pipeline: Some(PipelineStatus::Success),
+        branch: "topic",
+        counts,
+    };
+    vec![
+        mr(spec("97", "Rate-limit webhook replays per tenant", "fieldnotes/hooks", ("sam", "Samuel Achterberg"), 20, (35, 6, 2)), ""),
+        mr(spec("312", "Bump the PDF renderer to 4.2", "fieldnotes/billing", ("dev.k", "Devika Rao"), 52, (3, 3, 1)), ""),
+        mr(spec("58", "Rename the tray icon assets", "fieldnotes/desktop", ("dev.k", "Devika Rao"), 9 * 24, (0, 0, 14)), ""),
+    ]
+}
+
+/// Holds on some of `items` by number: back tomorrow morning, back when it changes, or muted.
+/// `mine` says they're Robin's own.
+pub fn holds(items: &[MergeRequest], picks: &[(&str, Hold)], mine: bool) -> BTreeMap<String, Snooze> {
+    picks
+        .iter()
+        .filter_map(|(iid, hold)| {
+            let item = items.iter().find(|m| m.iid == *iid)?;
+            Some((item.id.clone(), Snooze::new(item, *hold, mine, ago(1))))
+        })
+        .collect()
+}
+
+/// Tomorrow morning as a snooze until tomorrow sets it.
+pub fn tomorrow() -> Hold {
+    Hold::Time(snooze::morning_after(&chrono::Local::now()))
 }
 
 /// The paths of a large review, a ledger export's: some files at the top, a deep `src/` and a
