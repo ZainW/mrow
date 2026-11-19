@@ -222,6 +222,24 @@ fn scene_thread_line(s: &mut App) {
     s.pending_jump = Some(Jump::Line("t1".into()));
 }
 
+/// N in the changes: the first open thread picked under its line, marked as where R replies.
+fn scene_thread_keys(s: &mut App) {
+    fixture(s);
+    s.pending_jump = ui::detail::pick_thread(s, Tab::Changes, "t1");
+}
+
+/// ⇧N in the conversation: a resolved thread picked, its Reply naming R.
+fn scene_talk_keys(s: &mut App) {
+    fixture(s);
+    s.pending_jump = ui::detail::pick_thread(s, Tab::Conversation, "t4");
+}
+
+/// J onto the second file: its header marked as the file V would mark viewed.
+fn scene_file_keys(s: &mut App) {
+    fixture(s);
+    s.pending_jump = Some(Jump::File(Some(1)));
+}
+
 /// The review panel open over the conversation, a summary written, two comments held.
 fn scene_submit_review(s: &mut App) {
     scene_discussion(s);
@@ -558,6 +576,9 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("discussion", scene_discussion),
     ("start-file", scene_start_file),
     ("thread-line", scene_thread_line),
+    ("thread-keys", scene_thread_keys),
+    ("talk-keys", scene_talk_keys),
+    ("file-keys", scene_file_keys),
     ("submit-review", scene_submit_review),
     ("edit-draft", scene_edit_draft),
     ("edit-comment", scene_edit_comment),

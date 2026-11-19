@@ -188,6 +188,34 @@ fn previous_file(s: &mut App, tx: &mut Tx) {
     crate::ui::detail::step(s, tx, -1);
 }
 
+fn next_open_thread(s: &mut App, tx: &mut Tx) {
+    crate::ui::detail::step_thread(s, tx, true, true);
+}
+
+fn previous_open_thread(s: &mut App, tx: &mut Tx) {
+    crate::ui::detail::step_thread(s, tx, false, true);
+}
+
+fn next_thread(s: &mut App, tx: &mut Tx) {
+    crate::ui::detail::step_thread(s, tx, true, false);
+}
+
+fn previous_thread(s: &mut App, tx: &mut Tx) {
+    crate::ui::detail::step_thread(s, tx, false, false);
+}
+
+fn toggle_viewed(s: &mut App, tx: &mut Tx) {
+    crate::ui::detail::toggle_viewed(s, tx);
+}
+
+fn reply(s: &mut App, tx: &mut Tx) {
+    crate::ui::detail::reply_to_picked(s, tx);
+}
+
+fn comment(s: &mut App, tx: &mut Tx) {
+    crate::ui::detail::write_comment(s, tx);
+}
+
 pub fn check_for_updates(s: &mut App, _: &mut Tx) {
     if let Some(line) = s.updater.check_now() {
         s.store.show(&line);
@@ -267,10 +295,17 @@ const COMMANDS: &[Command] = &[
     cmd(V, "go-overview", "Overview", Some("cmd+alt+1"), |s, tx| detail_tab(s, tx, Tab::Overview)),
     cmd(V, "go-changes", "Changes", Some("cmd+alt+2"), |s, tx| detail_tab(s, tx, Tab::Changes)),
     cmd(V, "go-conversation", "Conversation", Some("cmd+alt+3"), |s, tx| detail_tab(s, tx, Tab::Conversation)),
-    // J and K, matched in `on_key` on every platform: a menu key equivalent would take the letter
-    // from text fields.
+    // The keys through a review, all plain letters matched in `on_key` on every platform (see
+    // `LETTERS`): a menu key equivalent would take the letter from text fields.
     cmd(V, "next-file", "Next File", None, next_file),
     cmd(V, "previous-file", "Previous File", None, previous_file),
+    cmd(V, "next-open-thread", "Next Open Thread", None, next_open_thread),
+    cmd(V, "previous-open-thread", "Previous Open Thread", None, previous_open_thread),
+    cmd(V, "next-thread", "Next Thread", None, next_thread),
+    cmd(V, "previous-thread", "Previous Thread", None, previous_thread),
+    cmd(V, "toggle-viewed", "Mark File as Viewed", None, toggle_viewed),
+    cmd(V, "reply", "Reply to Thread", None, reply),
+    cmd(V, "comment", "Write a Comment", None, comment),
     sep("View"),
     cmd(V, "sidebar", "Toggle Sidebar", Some("cmd+ctrl+s"), toggle_sidebar),
     cmd(V, "ask", "Ask an Agent", Some("cmd+l"), toggle_ask),
@@ -335,14 +370,40 @@ fn chords() -> &'static [(rune::Chord, fn(&mut App, &mut Tx))] {
     })
 }
 
-/// J and K step through the changes file by file. Plain letters: Rune offers them to a focused text
-/// field first and to `on_key` only when no field takes them, so they never steal typing.
-const NEXT_FILE: rune::Chord = rune::Chord::new(rune::ChordKey::Char('j'));
-const PREVIOUS_FILE: rune::Chord = rune::Chord::new(rune::ChordKey::Char('k'));
+/// The keys through a review: J and K file by file, N and P from open thread to open thread (as
+/// GitLab's own N and P go through unresolved ones), ⇧N and ⇧P through every thread, V to mark
+/// the file viewed and go on, R to reply to the thread, C to comment. Plain letters: Rune offers
+/// them to a focused text field first and to `on_key` only when no field takes them, so they never
+/// steal typing. Each returns whether it took the key.
+const fn letter(c: char) -> rune::Chord {
+    rune::Chord::new(rune::ChordKey::Char(c))
+}
 
-/// Keys the menu bar doesn't carry: ⌃Tab between tabs, Escape out of the settings sheet, J and
-/// K between the changed files, and off macOS every command's keys.
+const fn shifted(c: char) -> rune::Chord {
+    letter(c).with(rune::ChordMod::Shift)
+}
+
+const NEXT_FILE: rune::Chord = letter('j');
+const PREVIOUS_FILE: rune::Chord = letter('k');
+
+type Letter = (rune::Chord, fn(&mut App, &mut Tx) -> bool);
+
+const LETTERS: &[Letter] = &[
+    (NEXT_FILE, |s, tx| crate::ui::detail::step(s, tx, 1)),
+    (PREVIOUS_FILE, |s, tx| crate::ui::detail::step(s, tx, -1)),
+    (letter('n'), |s, tx| crate::ui::detail::step_thread(s, tx, true, true)),
+    (letter('p'), |s, tx| crate::ui::detail::step_thread(s, tx, false, true)),
+    (shifted('n'), |s, tx| crate::ui::detail::step_thread(s, tx, true, false)),
+    (shifted('p'), |s, tx| crate::ui::detail::step_thread(s, tx, false, false)),
+    (letter('v'), crate::ui::detail::toggle_viewed),
+    (letter('r'), crate::ui::detail::reply_to_picked),
+    (letter('c'), crate::ui::detail::write_comment),
+];
+
+/// Keys the menu bar doesn't carry: ⌃Tab between tabs, Escape out of the settings sheet, the
+/// letters through a review, and off macOS every command's keys.
 pub fn on_key(s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    let letter = if s.settings_open || s.inbox_open { None } else { LETTERS.iter().find(|(chord, _)| chord.matches_tx(ev, tx)).map(|(_, run)| *run) };
     match &ev.key {
         rune::Key::Tab if ev.mods.ctrl => {
             if ev.mods.shift {
@@ -375,8 +436,7 @@ pub fn on_key(s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
             s.confirm = None;
             true
         }
-        _ if !s.settings_open && !s.inbox_open && NEXT_FILE.matches_tx(ev, tx) => crate::ui::detail::step(s, tx, 1),
-        _ if !s.settings_open && !s.inbox_open && PREVIOUS_FILE.matches_tx(ev, tx) => crate::ui::detail::step(s, tx, -1),
+        _ if letter.is_some() => letter.is_some_and(|run| run(s, tx)),
         _ if cfg!(not(target_os = "macos")) => match chords().iter().find(|(chord, _)| chord.matches_tx(ev, tx)) {
             Some((_, run)) => {
                 run(s, tx);
@@ -420,6 +480,41 @@ mod tests {
             assert!(PREVIOUS_FILE.matches_on(&key("k", rune::Mods::default()), platform));
             let shift = rune::Mods { shift: true, ..Default::default() };
             assert!(!NEXT_FILE.matches_on(&key("J", shift), platform), "Shift+J is typing, not a jump");
+        }
+    }
+
+    #[test]
+    fn the_review_letters_are_plain_and_shifted_letters_on_every_platform() {
+        let key = |text: &str, mods: rune::Mods| rune::KeyEvent { key: rune::Key::Text(text.into()), mods };
+        let shift = rune::Mods { shift: true, ..Default::default() };
+        let cmd = rune::Mods { cmd: true, ..Default::default() };
+        let ctrl = rune::Mods { ctrl: true, ..Default::default() };
+        let taking = |ev: &rune::KeyEvent, platform| LETTERS.iter().filter(|(chord, _)| chord.matches_on(ev, platform)).count();
+        for platform in [rune::KeyPlatform::Mac, rune::KeyPlatform::Linux] {
+            for c in ["j", "k", "n", "p", "v", "r", "c"] {
+                assert_eq!(taking(&key(c, rune::Mods::default()), platform), 1, "{c} is one command's key");
+                assert_eq!(taking(&key(c, cmd), platform), 0, "⌘{c} belongs to the menu, not the review");
+                assert_eq!(taking(&key(c, ctrl), platform), 0, "Ctrl+{c} belongs to the menu, not the review");
+            }
+            for c in ["N", "P"] {
+                assert_eq!(taking(&key(c, shift), platform), 1, "⇧{c} goes through every thread");
+            }
+            for c in ["J", "K", "V", "R", "C"] {
+                assert_eq!(taking(&key(c, shift), platform), 0, "Shift+{c} is typing, not a command");
+            }
+        }
+    }
+
+    #[test]
+    fn every_review_letter_has_its_menu_command() {
+        // The plain letters' commands sit in the View menu with no key equivalent, so the menu
+        // bar never takes the letter from a text field.
+        for id in
+            ["next-file", "previous-file", "next-open-thread", "previous-open-thread", "next-thread", "previous-thread", "toggle-viewed", "reply", "comment"]
+        {
+            let command = COMMANDS.iter().find(|c| c.id == id).unwrap_or_else(|| panic!("a command {id}"));
+            assert_eq!(command.keys, None, "{id}");
+            assert_eq!(command.menu, V, "{id}");
         }
     }
 }
