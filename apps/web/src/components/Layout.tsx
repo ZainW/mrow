@@ -71,7 +71,7 @@ function SiteFooter() {
     <footer className="site-footer">
       <div className="footer-about">
         <Wordmark />
-        <p>Free, and it runs on your computer.</p>
+        <p>Free and open source. It runs on your computer, and nowhere else.</p>
         <p className="quiet">
           Not affiliated with GitHub, GitLab or the makers of the agents it can run. Everyone in the illustrations is made up.
         </p>
