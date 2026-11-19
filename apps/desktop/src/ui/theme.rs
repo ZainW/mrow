@@ -82,7 +82,7 @@ impl Pal {
             accent: pick("#B95A33", "#E08A66"),
             accent_soft: if dark { c("#E08A66").alpha(0.16) } else { c("#B95A33").alpha(0.12) },
             green: pick("#3F7D4E", "#7BC48D"),
-            red: pick("#B4443A", "#E5847A"),
+            red: pick("#B34157", "#E4828F"),
             amber: pick("#9A6B12", "#D9AE5C"),
             blue: pick("#3C6A9E", "#86AEDB"),
             added_line: if dark { c("#5FBF77").alpha(0.11) } else { c("#3F9A55").alpha(0.11) },
