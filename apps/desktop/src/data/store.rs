@@ -8,12 +8,14 @@ use std::rc::Rc;
 use chrono::{Local, Utc};
 
 use super::bg::Bg;
+use super::cache::{self, Detail, Disk, SavedAccount, SavedQueue};
 use super::diff::{self, DiffLine, Gap, Reveal, Shown};
 use super::forge::{Forge, QueueResult};
 use super::inbox::{self, Event, Notice};
 use super::mine::{self, Stack, Standing, Status, WalkStep};
 use super::models::*;
 use super::prefs;
+use super::snooze::{self, Hold, Snooze};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Loadable<T> {
@@ -261,6 +263,11 @@ pub enum Msg {
         request: u64,
         result: Result<String, String>,
     },
+    /// A request's details as kept on disk, when they still match it.
+    Cached {
+        id: String,
+        detail: Option<Box<Detail>>,
+    },
 }
 
 pub struct Store {
@@ -287,6 +294,12 @@ pub struct Store {
     pub last_seen: BTreeMap<String, f64>,
     /// What changed, newest first: the bell's list.
     pub inbox: Vec<Event>,
+    /// Requests snoozed or muted out of To review and Mine, by ID.
+    pub holds: BTreeMap<String, Snooze>,
+    /// The snoozed fold at the end of the list shows what's in it.
+    pub snoozed_open: bool,
+    /// The waiting count changed outside a refresh: the next `poll` puts it on the Dock.
+    badge_stale: bool,
     /// My requests merged from here: their leaving the list is my doing, not news.
     merged_here: HashSet<String>,
     /// When each merge request was last seen before this visit to it, for the replies that came
@@ -346,6 +359,8 @@ pub struct Store {
     /// The requests whose changes and threads were loaded before they were opened, and when:
     /// their threads load again on the visit if they've aged since.
     pub fetched_ahead: HashMap<String, Date>,
+    /// What's kept on disk for the next launch (see `cache`), in the window's store only.
+    saved: cache::Saved,
 }
 
 impl Default for Store {
@@ -365,6 +380,9 @@ impl Default for Store {
             tabs: p.tabs,
             last_seen: p.last_seen,
             inbox: p.inbox,
+            holds: p.snoozed,
+            snoozed_open: false,
+            badge_stale: false,
             merged_here: HashSet::new(),
             seen_before: HashMap::new(),
             viewed_files: p.viewed_files,
@@ -397,6 +415,7 @@ impl Default for Store {
             shown: HashMap::new(),
             context_version: 0,
             fetched_ahead: HashMap::new(),
+            saved: cache::Saved::default(),
         }
     }
 }
@@ -435,7 +454,7 @@ impl Store {
     /// What's waiting on me in one account, for the switcher.
     pub fn waiting_count(&self, forge: Forge) -> usize {
         let drafts = prefs::read(|p| p.show_drafts);
-        self.accounts.get(&forge).map_or(0, |a| a.open.iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft)).count())
+        self.accounts.get(&forge).map_or(0, |a| a.open.iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft) && !self.is_held(m)).count())
     }
 
     /// Shows another account's queue, keeping the selection if it's from there, otherwise moving
@@ -478,7 +497,7 @@ impl Store {
     pub fn items(&self, mode: QueueMode) -> Vec<MergeRequest> {
         let (drafts, oldest) = prefs::read(|p| (p.show_drafts, p.oldest_first));
         let mut items: Vec<MergeRequest> = match mode {
-            QueueMode::ToReview => self.open().iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft)).cloned().collect(),
+            QueueMode::ToReview => self.open().iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft) && !self.is_held(m)).cloned().collect(),
             QueueMode::Reviewed => self.open().iter().filter(|m| !m.my_state.needs_review()).cloned().collect(),
             QueueMode::Mine => self.mine_listed().cloned().collect(),
             QueueMode::Done => self.done().to_vec(),
@@ -508,18 +527,23 @@ impl Store {
         sections
     }
 
+    /// The rows the keys step through, the open snoozed fold's last.
     pub fn visible_items(&self) -> Vec<MergeRequest> {
-        if self.mode == QueueMode::Mine {
-            return self
-                .mine_lines()
+        let mut items: Vec<MergeRequest> = if self.mode == QueueMode::Mine {
+            self.mine_lines()
                 .into_iter()
                 .filter_map(|l| match l {
                     MineLine::Item { item, .. } => Some(item),
                     _ => None,
                 })
-                .collect();
+                .collect()
+        } else {
+            self.sections().into_iter().flat_map(|s| s.items).collect()
+        };
+        if self.snoozed_open {
+            items.extend(self.held_items().into_iter().map(|(m, _)| m));
         }
-        self.sections().into_iter().flat_map(|s| s.items).collect()
+        items
     }
 
     /// The number beside a list's name. For Mine, the ones that are my move.
@@ -539,7 +563,7 @@ impl Store {
     /// Mine as the list shows it. One merged from here leaves the list at once, but stays on
     /// hand (and on screen, if selected) until the queue confirms it.
     fn mine_listed(&self) -> impl Iterator<Item = &MergeRequest> {
-        self.mine().iter().filter(|m| m.is_open())
+        self.mine().iter().filter(|m| m.is_open() && !self.is_held(m))
     }
 
     pub fn mine_error(&self) -> Option<&str> {
@@ -749,6 +773,7 @@ impl Store {
             self.load_discussions(&item);
         }
         self.load_details_if_needed(&item);
+        self.keep_detail(&item.id);
         self.fetch_ahead();
     }
 
@@ -759,6 +784,18 @@ impl Store {
             Some(&at) => self.seen_before.insert(id.to_string(), at),
             None => self.seen_before.remove(id),
         };
+    }
+
+    /// Opens or closes the snoozed fold. Closing it over a held request moves the selection to
+    /// the list's last row, so the keys go on from a row that's drawn.
+    pub fn set_snoozed_open(&mut self, open: bool) {
+        if !open && self.selected().is_some_and(|m| self.is_held(m)) {
+            self.snoozed_open = false;
+            if let Some(last) = self.visible_items().pop() {
+                self.select(Some(last.id));
+            }
+        }
+        self.snoozed_open = open;
     }
 
     pub fn select_offset(&mut self, offset: i64) {
@@ -980,6 +1017,7 @@ impl Store {
                     account.mine_error = q.mine_error;
                     account.error = None;
                     account.last_refreshed = Some(Utc::now());
+                    self.saved.restored.remove(&forge);
                 }
                 Err(e) => account.error = Some(e),
             }
@@ -1019,6 +1057,7 @@ impl Store {
         }
         self.diffs.retain(|k, _| Some(k) == selected.as_ref());
         self.discussions.retain(|k, _| Some(k) == selected.as_ref());
+        self.saved.forget(selected.as_deref());
         self.forget_jobs(selected.as_deref());
         self.forget_file_texts(selected.as_deref());
         if let Some(item) = self.selected().cloned() {
@@ -1027,8 +1066,11 @@ impl Store {
             self.load_diffs(&item);
             self.load_discussions(&item);
         }
+        // Before the inbox looks, so a change that ends a snooze is told like any other.
+        self.wake_holds();
         // Before the walks move on: a part they merged is still on record as theirs.
         effects.notify = self.note_changes(&fresh, every_loaded);
+        self.prune_holds(&loaded, &fresh);
         // After the inbox has compared what the forge said with what it said last time.
         let overlays = std::mem::take(&mut self.overlays);
         for o in overlays.iter().filter(|o| loaded.contains(&o.forge)) {
@@ -1036,18 +1078,24 @@ impl Store {
         }
         self.overlays = overlays;
         self.advance_walks();
+        if let Some(queue) = self.saved_queue() {
+            self.saved.disk.as_ref().inspect(|d| d.write_queue(&queue));
+        }
         effects.badge = Some(self.badge());
         effects
     }
 
-    /// The Dock badge: reviews waiting on me, across every account.
+    /// The Dock badge: reviews waiting on me, across every account, less the snoozed ones.
     fn badge(&self) -> usize {
-        self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review() && !m.draft).count()
+        self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review() && !m.draft && !self.is_held(m)).count()
     }
 
     pub fn load_details_if_needed(&mut self, item: &MergeRequest) {
         if self.offline {
             return;
+        }
+        if !self.diffs.contains_key(&item.id) && !self.discussions.contains_key(&item.id) {
+            self.read_saved_detail(item);
         }
         if !self.diffs.contains_key(&item.id) {
             self.load_diffs(item);
@@ -1071,6 +1119,7 @@ impl Store {
             self.diffs.insert(item.id.clone(), Loadable::Loading);
         }
         let request = self.start_request(format!("diffs {}", item.id));
+        self.saved.asked.insert(format!("diffs {}", item.id), item.updated_at);
         let item = item.clone();
         self.bg.spawn(move || Msg::Diffs { id: item.id.clone(), request, result: item.kind().diffs(&item) });
     }
@@ -1083,6 +1132,7 @@ impl Store {
             self.discussions.insert(item.id.clone(), Loadable::Loading);
         }
         let request = self.start_request(format!("threads {}", item.id));
+        self.saved.asked.insert(format!("threads {}", item.id), item.updated_at);
         let item = item.clone();
         self.bg.spawn(move || Msg::Threads { id: item.id.clone(), request, result: item.kind().discussions(&item) });
     }
@@ -1554,10 +1604,15 @@ impl Store {
                                 Some(r) => self.diff_refs.insert(id.clone(), r),
                                 None => self.diff_refs.remove(&id),
                             };
-                            self.diffs.insert(id, Loadable::Loaded(Rc::new(files)));
+                            self.diffs.insert(id.clone(), Loadable::Loaded(Rc::new(files)));
+                            self.saved.landed(format!("diffs {id}"));
+                            self.keep_detail(&id);
                         }
+                        // A reload that fails keeps what's shown.
                         Err(e) => {
-                            self.diffs.insert(id, Loadable::Failed(e));
+                            if self.diffs.get(&id).and_then(Loadable::value).is_none() {
+                                self.diffs.insert(id, Loadable::Failed(e));
+                            }
                         }
                     }
                 }
@@ -1565,11 +1620,20 @@ impl Store {
                     if self.requests.get(&format!("threads {id}")) != Some(&request) {
                         continue;
                     }
-                    let value = match result {
-                        Ok(threads) => Loadable::Loaded(Rc::new(threads.into_iter().filter(|t| !t.notes.iter().all(|n| n.system)).collect())),
-                        Err(e) => Loadable::Failed(e),
-                    };
-                    self.discussions.insert(id, value);
+                    match result {
+                        Ok(threads) => {
+                            let threads = threads.into_iter().filter(|t| !t.notes.iter().all(|n| n.system)).collect();
+                            self.discussions.insert(id.clone(), Loadable::Loaded(Rc::new(threads)));
+                            self.saved.landed(format!("threads {id}"));
+                            self.keep_detail(&id);
+                        }
+                        // A reload that fails keeps what's shown.
+                        Err(e) => {
+                            if self.discussions.get(&id).and_then(Loadable::value).is_none() {
+                                self.discussions.insert(id, Loadable::Failed(e));
+                            }
+                        }
+                    }
                 }
                 Msg::Resolved { id, thread, was, result } => match result {
                     Ok(()) => {
@@ -1643,6 +1707,11 @@ impl Store {
                 }
                 Msg::Edited { was, result, message, ticket } => self.landed_edit(was, result, message, ticket),
                 Msg::FileText { key, request, result } => self.landed_file_text(key, request, result),
+                Msg::Cached { id, detail } => {
+                    if let Some(detail) = detail {
+                        self.land_cached(id, *detail);
+                    }
+                }
             }
         }
         if let Some(message) = self.pending_toast.take() {
@@ -1656,6 +1725,23 @@ impl Store {
         }
         if self.toast.is_some() && now >= self.toast_until && self.toast_until > 0.0 {
             self.toast = None;
+            changed = true;
+        }
+        // A snooze until tomorrow ends on the clock, between refreshes too. Scenes and
+        // benchmarks keep their snoozes as set.
+        if let Some(at) = snooze::next_wake(&self.holds).filter(|_| !self.offline) {
+            let wait = (at - Utc::now()).num_milliseconds() as f64 / 1000.0;
+            if wait <= 0.0 {
+                self.wake_holds();
+                self.badge_stale = true;
+                changed = true;
+            } else {
+                let at = now + wait;
+                effects.wake_at = Some(effects.wake_at.map_or(at, |w| w.min(at)));
+            }
+        }
+        if std::mem::take(&mut self.badge_stale) {
+            effects.badge = Some(self.badge());
             changed = true;
         }
         if changed {
@@ -1700,7 +1786,9 @@ impl Store {
         let now = Utc::now();
         let (next, mut found) = inbox::detect(&prev, &looks, &merged_here, now);
         found.retain(|e| inbox::level(&levels, e.kind) != inbox::Level::Off);
-        let notices = inbox::notices(&found, &levels, banners);
+        snooze::quiet(&mut found, &self.holds);
+        let loud: Vec<Event> = found.iter().filter(|e| !e.done).cloned().collect();
+        let notices = inbox::notices(&loud, &levels, banners);
         inbox::add(&mut self.inbox, found);
         // A review request is dealt with once it no longer waits on me.
         let waiting: HashSet<&str> = looks.iter().flat_map(|l| l.open.iter()).filter(|m| m.my_state.needs_review()).map(|m| m.id.as_str()).collect();
@@ -1805,6 +1893,130 @@ impl Store {
         self.merge(item);
         if self.busy.is_some() {
             self.merged_here.insert(item.id.clone());
+        }
+    }
+
+    // MARK: Snoozing
+
+    pub fn is_held(&self, item: &MergeRequest) -> bool {
+        self.holds.contains_key(&item.id)
+    }
+
+    pub fn hold_of(&self, id: &str) -> Option<&Snooze> {
+        self.holds.get(id)
+    }
+
+    /// Whether a request can be snoozed: one waiting on my review, or one of my open ones.
+    pub fn can_snooze(&self, item: &MergeRequest) -> bool {
+        item.is_open() && (self.is_mine(item) || item.my_state.needs_review())
+    }
+
+    /// Whether a filter is narrowing the current list.
+    pub fn filtering(&self) -> bool {
+        !self.filter.trim().is_empty() || self.author_filter.is_some() || (self.mode == QueueMode::Mine && self.mine_filter.is_some())
+    }
+
+    /// The held requests the current list would show, soonest back first, muted last: what its
+    /// snoozed fold holds. Only To review and Mine have one.
+    pub fn held_items(&self) -> Vec<(MergeRequest, Snooze)> {
+        let drafts = prefs::read(|p| p.show_drafts);
+        let items: Vec<&MergeRequest> = match self.mode {
+            QueueMode::ToReview => self.open().iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft)).collect(),
+            QueueMode::Mine => self.mine().iter().filter(|m| m.is_open()).collect(),
+            _ => return vec![],
+        };
+        // The list's filters hold for the fold too.
+        let query = self.filter.trim().to_lowercase();
+        let shown = |m: &&MergeRequest| {
+            (query.is_empty() || matches(m, &query))
+                && self.author_filter.as_ref().is_none_or(|a| *a == m.author.username)
+                && (self.mode != QueueMode::Mine || self.mine_filter.is_none_or(|f| self.status_of(m).standing.group() == f))
+        };
+        let mut held: Vec<(MergeRequest, Snooze)> = items.into_iter().filter(shown).filter_map(|m| Some((m.clone(), self.holds.get(&m.id)?.clone()))).collect();
+        let order = |s: &Snooze| match s.hold {
+            Hold::Time(at) => (0, at.timestamp()),
+            Hold::Change => (1, -s.since.timestamp()),
+            Hold::Mute => (2, -s.since.timestamp()),
+        };
+        held.sort_by_key(|(_, s)| order(s));
+        held
+    }
+
+    /// Snoozes or mutes a request. Its inbox events are dealt with, and a selection on it moves
+    /// to the next row (the one before, at the end of the list).
+    pub fn snooze(&mut self, id: &str, hold: Hold) {
+        let Some(item) = self.item(id).cloned() else { return };
+        if !self.can_snooze(&item) {
+            return;
+        }
+        let before = self.visible_items();
+        let mine = self.is_mine(&item);
+        self.holds.insert(item.id.clone(), Snooze::new(&item, hold, mine, Utc::now()));
+        self.save_holds();
+        self.mark_request_done(&item.id);
+        // Snoozed from a tab while another list shows, it stays on screen.
+        if let Some(at) = before.iter().position(|m| m.id == id).filter(|_| self.selected_id.as_deref() == Some(id)) {
+            let next = before[at + 1..].iter().chain(before[..at].iter().rev()).find(|m| !self.is_held(m)).map(|m| m.id.clone());
+            self.select(next);
+        }
+        let noun = item.kind().noun();
+        self.show(&match hold {
+            Hold::Time(at) => format!("Snoozed until {}", snooze::until(at, &Local::now())),
+            Hold::Change => "Snoozed until it changes".into(),
+            Hold::Mute => format!("Muted this {noun}"),
+        });
+        self.badge_stale = true;
+    }
+
+    /// Puts a held request back in its list.
+    pub fn unsnooze(&mut self, id: &str) {
+        let Some(was) = self.holds.remove(id) else { return };
+        self.save_holds();
+        self.show(if was.hold.muted() { "Unmuted" } else { "Unsnoozed" });
+        if self.holds.is_empty() {
+            self.snoozed_open = false;
+        }
+        self.badge_stale = true;
+    }
+
+    /// Ends the holds that are due: on the clock, or because the request changed.
+    fn wake_holds(&mut self) {
+        let mut holds = std::mem::take(&mut self.holds);
+        let woken = snooze::wake(&mut holds, |id| self.every_item().find(|m| m.id == id && m.is_open()), Utc::now());
+        self.holds = holds;
+        if !woken.is_empty() {
+            self.save_holds();
+        }
+        if self.holds.is_empty() {
+            self.snoozed_open = false;
+        }
+    }
+
+    /// Lets go of holds on requests that finished, or that every list of their account left a
+    /// while ago. Only an account that fully loaded (mine included) can say a request is gone.
+    fn prune_holds(&mut self, loaded: &[Forge], fresh: &[(Forge, Vec<MergeRequest>)]) {
+        let now = Utc::now();
+        let mut holds = self.holds.clone();
+        for forge in loaded {
+            let Some(a) = self.accounts.get(forge).filter(|a| a.error.is_none() && a.mine_error.is_none() && a.mine.len() < MINE_PAGE_FLOOR) else { continue };
+            let open: HashSet<&str> = a.open.iter().chain(&a.mine).filter(|m| m.is_open()).map(|m| m.id.as_str()).collect();
+            let lagged = fresh.iter().filter(|(f, _)| f == forge).flat_map(|(_, l)| l);
+            let ended: HashSet<&str> = a.done.iter().chain(lagged).map(|m| m.id.as_str()).collect();
+            snooze::prune(&mut holds, *forge, &open, &ended, now);
+        }
+        if holds != self.holds {
+            self.holds = holds;
+            self.save_holds();
+        }
+        if self.holds.is_empty() {
+            self.snoozed_open = false;
+        }
+    }
+
+    fn save_holds(&self) {
+        if !self.offline {
+            let holds = self.holds.clone();
+            prefs::update(|p| p.snoozed = holds);
         }
     }
 
@@ -2249,6 +2461,169 @@ impl Store {
     }
 }
 
+// MARK: Saved
+
+/// The host an account is fetched from, as set (blank for the CLI's default).
+fn host(forge: Forge) -> String {
+    prefs::read(|p| match forge {
+        Forge::Gitlab => p.hostname.clone(),
+        Forge::Github => p.github_host.clone(),
+    })
+}
+
+impl Store {
+    /// Opens the window filled: each account's lists as the last refresh left them, the request
+    /// that was on screen, and its details when they still match it. The live refresh replaces
+    /// them; until then the footer says how old they are. The inbox isn't asked: it compares each
+    /// refresh with the last one it saw, which these lists are, so the first refresh after this
+    /// finds what changed since then, no more and no less. From now on this store keeps `disk`
+    /// up to date.
+    pub fn restore(&mut self, disk: Disk) {
+        if self.offline {
+            return;
+        }
+        let saved = disk.read_queue();
+        self.saved.disk = Some(disk);
+        let Some(saved) = saved else { return };
+        let forges = self.forges();
+        for (forge, a) in saved.accounts {
+            if !forges.contains(&forge) || a.host != host(forge) || self.accounts.contains_key(&forge) {
+                continue;
+            }
+            let account = Account {
+                me: Some(a.me),
+                open: a.open,
+                done: a.done,
+                mine: a.mine,
+                mine_error: a.mine_error,
+                error: None,
+                last_refreshed: Some(a.refreshed_at),
+            };
+            self.accounts.insert(forge, account);
+            self.saved.restored.insert(forge);
+        }
+        if self.saved.restored.is_empty() || self.selected_id.is_some() {
+            return;
+        }
+        let forge = self.forge;
+        let next = saved
+            .selected
+            .filter(|id| self.item(id).is_some())
+            .or_else(|| self.tab_items().into_iter().find(|m| m.kind() == forge).map(|m| m.id))
+            .or_else(|| self.visible_items().first().map(|m| m.id.clone()));
+        let Some(item) = next.and_then(|id| self.item(&id).cloned()) else { return };
+        if item.kind() != self.forge {
+            self.set_forge(item.kind());
+        }
+        // As a launch's first refresh opens one: what's new on it since last time stays new.
+        self.start_visit(&item.id);
+        self.selected_id = Some(item.id.clone());
+        // Read now, so the first frame has it. When it's there, the refresh's landing reloads it.
+        let kept = self.saved.disk.as_ref().and_then(|d| d.read_detail(&item.id, item.updated_at));
+        match kept {
+            Some(detail) => self.land_cached(item.id.clone(), detail),
+            None => {
+                self.load_diffs(&item);
+                self.load_discussions(&item);
+            }
+        }
+    }
+
+    /// Whether the account on show is still showing lists from disk.
+    pub fn from_cache(&self) -> bool {
+        self.saved.restored.contains(&self.forge)
+    }
+
+    /// Every account as it stands, for the next launch.
+    fn saved_queue(&self) -> Option<SavedQueue> {
+        if self.offline || self.saved.disk.is_none() {
+            return None;
+        }
+        let accounts = self
+            .accounts
+            .iter()
+            .filter_map(|(forge, a)| {
+                let account = SavedAccount {
+                    host: host(*forge),
+                    me: a.me.clone()?,
+                    open: a.open.clone(),
+                    done: a.done.clone(),
+                    mine: a.mine.clone(),
+                    mine_error: a.mine_error.clone(),
+                    refreshed_at: a.last_refreshed?,
+                };
+                Some((*forge, account))
+            })
+            .collect();
+        Some(SavedQueue { version: cache::VERSION, saved_at: Utc::now(), selected: self.selected_id.clone(), accounts })
+    }
+
+    /// Writes the queue now, with the request on screen: when quitting.
+    pub fn save_now(&self) {
+        if let (Some(queue), Some(disk)) = (self.saved_queue(), &self.saved.disk) {
+            disk.write_queue_now(&queue);
+        }
+    }
+
+    /// Starts reading a request's kept details, to show while its own load runs.
+    fn read_saved_detail(&mut self, item: &MergeRequest) {
+        let Some(disk) = self.saved.disk.clone() else { return };
+        let (id, at) = (item.id.clone(), item.updated_at);
+        self.bg.spawn(move || {
+            let detail = disk.read_detail(&id, at).map(Box::new);
+            Msg::Cached { id, detail }
+        });
+    }
+
+    /// Shows kept details where nothing has loaded yet, while they still match the request.
+    fn land_cached(&mut self, id: String, detail: Detail) {
+        if self.item(&id).is_none_or(|m| m.updated_at != detail.updated_at) {
+            return;
+        }
+        let print = cache::fingerprint(detail.updated_at, &detail.files, detail.refs.as_ref(), &detail.threads);
+        let diffs = self.diffs.get(&id).and_then(Loadable::value).is_none();
+        let threads = self.discussions.get(&id).and_then(Loadable::value).is_none();
+        if diffs {
+            match detail.refs {
+                Some(r) => self.diff_refs.insert(id.clone(), r),
+                None => self.diff_refs.remove(&id),
+            };
+            self.diffs.insert(id.clone(), Loadable::Loaded(Rc::new(detail.files)));
+            self.saved.basis.insert(format!("diffs {id}"), detail.updated_at);
+        }
+        if threads {
+            self.discussions.insert(id.clone(), Loadable::Loaded(Rc::new(detail.threads)));
+            self.saved.basis.insert(format!("threads {id}"), detail.updated_at);
+        }
+        if diffs && threads {
+            self.saved.kept.insert(id, print);
+        }
+    }
+
+    /// Keeps a request's changes and threads for the next launch, once both have loaded for it
+    /// as it stands now (a load asked before it last changed doesn't count).
+    fn keep_detail(&mut self, id: &str) {
+        if self.offline || self.saved.disk.is_none() || self.selected_id.as_deref() != Some(id) {
+            return;
+        }
+        let Some(updated_at) = self.item(id).map(|m| m.updated_at) else { return };
+        let current = |kind: &str| self.saved.basis.get(&format!("{kind} {id}")) == Some(&updated_at);
+        if !current("diffs") || !current("threads") {
+            return;
+        }
+        let (Some(Loadable::Loaded(files)), Some(Loadable::Loaded(threads))) = (self.diffs.get(id), self.discussions.get(id)) else { return };
+        let refs = self.diff_refs.get(id);
+        let print = cache::fingerprint(updated_at, files, refs, threads);
+        if self.saved.kept.get(id) == Some(&print) {
+            return;
+        }
+        if let Some(disk) = &self.saved.disk {
+            disk.write_detail(id, updated_at, files, refs, threads);
+        }
+        self.saved.kept.insert(id.to_string(), print);
+    }
+}
+
 // MARK: Loading ahead
 
 /// How many requests load ahead at once.
@@ -2294,7 +2669,8 @@ impl Store {
 
     /// Starts loading `ahead`'s requests. Never offline.
     fn fetch_ahead(&mut self) {
-        if self.offline {
+        // Lists from disk are about to be replaced, and what loads ahead of them with them.
+        if self.offline || self.refreshing && !self.saved.restored.is_empty() {
             return;
         }
         for item in self.ahead() {

@@ -1572,3 +1572,599 @@ mod shown_on_success {
         assert!(!now.title.to_lowercase().starts_with("draft"), "{}", now.title);
     }
 }
+
+/// What the window last showed, kept on disk so a launch opens filled.
+mod saved {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    use chrono::Utc;
+
+    use crate::data::cache::{self, Disk, MAX_DETAILS, VERSION};
+    use crate::data::forge::{Forge, QueueResult};
+    use crate::data::inbox::Kind;
+    use crate::data::models::{Discussion, FileDiff, MergeRequest, ReviewState};
+    use crate::data::prefs;
+    use crate::data::store::{Account, Loadable, Msg, Store};
+
+    /// A folder of its own under the system's temporary one, gone afterwards. These tests run
+    /// one at a time while one is held: they share the settings, which the inbox keeps its
+    /// snapshot in.
+    struct Dir(PathBuf, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl Dir {
+        fn new(name: &str) -> Dir {
+            static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+            let path = std::env::temp_dir().join(format!("mrow-saved-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            Dir(path, turn)
+        }
+
+        fn disk(&self) -> Disk {
+            Disk::at(&self.0)
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A store that keeps its lists on disk like the window's, but never reaches a forge.
+    fn live(dir: &Dir) -> Store {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let mut store = Store::default();
+        store.bg.inert = true;
+        store.restore(dir.disk());
+        store
+    }
+
+    /// A refresh that brings back `accounts`.
+    fn fetch(store: &mut Store, accounts: &BTreeMap<Forge, Account>) {
+        let result =
+            |a: &Account| QueueResult { me: a.me.clone().unwrap(), open: a.open.clone(), done: a.done.clone(), mine: a.mine.clone(), mine_error: None };
+        let fetch = store.start_refresh();
+        store.land_queue(fetch, accounts.iter().map(|(f, a)| (*f, Ok(result(a)))).collect());
+    }
+
+    /// Lands a request's changes and threads as its first loads would.
+    fn load(store: &mut Store, id: &str, files: Vec<FileDiff>, threads: Vec<Discussion>) {
+        // The first load of each for this request is numbered 1.
+        store.bg.send(Msg::Diffs { id: id.into(), request: 1, result: Ok((files, None)) });
+        store.bg.send(Msg::Threads { id: id.into(), request: 1, result: Ok(threads) });
+        store.poll(0.0);
+    }
+
+    #[test]
+    fn a_reload_after_a_change_is_kept_only_once_both_halves_land() {
+        let dir = Dir::new("reload");
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = live(&dir);
+        fetch(&mut store, &accounts);
+        let id = store.selected_id.clone().unwrap();
+        load(&mut store, &id, diffs[&id].clone(), threads[&id].clone());
+        let before = store.item(&id).unwrap().updated_at;
+        assert!(dir.disk().read_detail(&id, before).is_some());
+
+        // A push: the next refresh says it changed, and its details load again (the second time).
+        let mut later = accounts.clone();
+        let now = before + chrono::Duration::minutes(5);
+        later.values_mut().flat_map(|a| a.open.iter_mut().chain(&mut a.mine)).filter(|m| m.id == id).for_each(|m| m.updated_at = now);
+        fetch(&mut store, &later);
+        store.bg.send(Msg::Threads { id: id.clone(), request: 2, result: Ok(threads[&id].clone()) });
+        store.poll(0.0);
+        assert!(dir.disk().read_detail(&id, now).is_none(), "the changes on screen are from before the push");
+        store.bg.send(Msg::Diffs { id: id.clone(), request: 2, result: Ok((diffs[&id].clone(), None)) });
+        store.poll(0.0);
+        assert!(dir.disk().read_detail(&id, now).is_some());
+    }
+
+    fn lists(a: &Account) -> (Vec<MergeRequest>, Vec<MergeRequest>, Vec<MergeRequest>) {
+        (a.open.clone(), a.done.clone(), a.mine.clone())
+    }
+
+    #[test]
+    fn a_launch_opens_on_what_the_last_refresh_showed_until_the_next_lands() {
+        let dir = Dir::new("round-trip");
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut first = live(&dir);
+        assert!(first.accounts.is_empty() && !first.from_cache(), "nothing kept yet");
+        fetch(&mut first, &accounts);
+        let id = first.selected_id.clone().expect("a refresh opens one");
+        load(&mut first, &id, diffs[&id].clone(), threads[&id].clone());
+        assert!(cache::has_detail(&dir.disk(), &id), "the request on screen keeps its details");
+
+        let saved = dir.disk().read_queue().expect("written after the refresh");
+        assert_eq!(saved.version, VERSION);
+        assert_eq!(saved.selected.as_deref(), Some(id.as_str()));
+
+        let mut next = live(&dir);
+        assert!(next.from_cache());
+        for (forge, a) in &accounts {
+            let got = &next.accounts[forge];
+            assert_eq!(lists(got), lists(a), "{forge:?}");
+            assert_eq!(got.me, a.me);
+            assert_eq!(got.last_refreshed, first.accounts[forge].last_refreshed, "as old as the refresh it came from");
+        }
+        assert_eq!(next.selected_id.as_deref(), Some(id.as_str()), "on the request that was on screen");
+        assert_eq!(next.diffs.get(&id).and_then(Loadable::value).map(|f| f.as_ref().clone()), Some(diffs[&id].clone()), "its changes at once");
+        let shown = next.discussions.get(&id).and_then(Loadable::value).map(|t| t.len());
+        assert_eq!(shown, Some(threads[&id].iter().filter(|t| !t.notes.iter().all(|n| n.system)).count()));
+
+        // The refresh replaces it all.
+        let mut later = accounts.clone();
+        later.get_mut(&Forge::Gitlab).unwrap().open.retain(|m| m.id == id);
+        fetch(&mut next, &later);
+        assert!(!next.from_cache());
+        assert_eq!(next.accounts[&Forge::Gitlab].open.len(), 1);
+        assert_eq!(dir.disk().read_queue().unwrap().accounts[&Forge::Gitlab].open.len(), 1, "and what's kept follows it");
+    }
+
+    #[test]
+    fn details_are_reused_only_while_the_request_hasnt_changed() {
+        let dir = Dir::new("stale");
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut first = live(&dir);
+        fetch(&mut first, &accounts);
+        let id = first.selected_id.clone().unwrap();
+        load(&mut first, &id, diffs[&id].clone(), threads[&id].clone());
+        let at = first.item(&id).unwrap().updated_at;
+        assert!(dir.disk().read_detail(&id, at).is_some());
+        assert!(dir.disk().read_detail(&id, at + chrono::Duration::seconds(1)).is_none(), "changed since: a push, a comment");
+
+        // The queue kept says it changed since its details were.
+        let mut saved = dir.disk().read_queue().unwrap();
+        for m in saved.accounts.values_mut().flat_map(|a| a.open.iter_mut().chain(&mut a.mine)) {
+            if m.id == id {
+                m.updated_at += chrono::Duration::minutes(5);
+            }
+        }
+        dir.disk().write_queue_now(&saved);
+        let next = live(&dir);
+        assert_eq!(next.selected_id.as_deref(), Some(id.as_str()));
+        assert_eq!(next.diffs.get(&id), Some(&Loadable::Loading), "loads instead of showing what may be out of date");
+    }
+
+    #[test]
+    fn a_broken_or_older_file_is_ignored_and_written_over() {
+        let dir = Dir::new("broken");
+        let (accounts, _, _) = crate::fixtures::load();
+        let path = cache::queue_path(&dir.disk());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        for bad in [r#"{"version":1,"saved_at":"2026-01-0"#.to_string(), "not json".into(), String::new(), r#"{"version":1}"#.into()] {
+            std::fs::write(&path, &bad).unwrap();
+            assert!(dir.disk().read_queue().is_none(), "{bad:?}");
+            let store = live(&dir);
+            assert!(store.accounts.is_empty() && !store.from_cache());
+        }
+
+        // Another version, whole and well-formed, is ignored too.
+        let mut first = live(&dir);
+        fetch(&mut first, &accounts);
+        let mut queue = dir.disk().read_queue().unwrap();
+        queue.version = VERSION + 1;
+        std::fs::write(&path, serde_json::to_vec(&queue).unwrap()).unwrap();
+        assert!(dir.disk().read_queue().is_none());
+        let mut store = live(&dir);
+        assert!(store.accounts.is_empty());
+        fetch(&mut store, &accounts);
+        assert_eq!(dir.disk().read_queue().map(|q| q.version), Some(VERSION), "the refresh writes it over");
+
+        // A broken request file goes.
+        let item = &accounts[&Forge::Gitlab].open[0];
+        dir.disk().write_detail(&item.id, item.updated_at, &[], None, &[]);
+        assert!(dir.disk().read_detail(&item.id, item.updated_at).is_some());
+        let file = std::fs::read_dir(dir.0.join("details")).unwrap().flatten().next().unwrap().path();
+        let json = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, json.replace(&format!("\"version\":{VERSION}"), "\"version\":0")).unwrap();
+        assert!(dir.disk().read_detail(&item.id, item.updated_at).is_none(), "another version");
+        std::fs::write(&file, &json[..json.len() / 2]).unwrap();
+        assert!(dir.disk().read_detail(&item.id, item.updated_at).is_none(), "cut short");
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn only_the_most_recently_used_details_are_kept() {
+        let dir = Dir::new("lru");
+        let disk = dir.disk();
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let item = &accounts[&Forge::Gitlab].open[0];
+        let (files, discussions) = (&diffs[&item.id], &threads[&item.id]);
+        let ids: Vec<String> = (0..MAX_DETAILS + 5).map(|i| format!("gitlab:acme/web!{i}")).collect();
+        let base = SystemTime::now() - Duration::from_secs(3600);
+        for (i, id) in ids.iter().enumerate() {
+            disk.write_detail(id, item.updated_at, files, None, discussions);
+            cache::set_used(&disk, id, base + Duration::from_secs(i as u64));
+        }
+        // Pruning runs on each write, before the next is stamped: the first five went in turn.
+        let kept: Vec<bool> = ids.iter().map(|id| cache::has_detail(&disk, id)).collect();
+        assert_eq!(kept.iter().filter(|k| **k).count(), MAX_DETAILS);
+        assert!(kept[..5].iter().all(|k| !k) && kept[5..].iter().all(|k| *k), "{kept:?}");
+
+        // Reading one uses it, so the next to go is the one after it.
+        let back = disk.read_detail(&ids[5], item.updated_at).expect("kept whole");
+        assert_eq!(&back.files, files);
+        disk.write_detail("gitlab:acme/web!new", item.updated_at, files, None, discussions);
+        assert!(cache::has_detail(&disk, &ids[5]));
+        assert!(!cache::has_detail(&disk, &ids[6]));
+
+        // And within the bytes allowed, newest first.
+        let size = std::fs::read_dir(dir.0.join("details")).unwrap().flatten().map(|e| e.metadata().unwrap().len()).max().unwrap();
+        cache::prune(&dir.0.join("details"), 100, size * 3 + size / 2);
+        assert_eq!(std::fs::read_dir(dir.0.join("details")).unwrap().count(), 3);
+        assert!(cache::has_detail(&disk, "gitlab:acme/web!new") && cache::has_detail(&disk, &ids[5]));
+    }
+
+    /// Settings belong to the whole process, and other tests reset them as they start. A mark
+    /// set before a step and still there after says none did in between.
+    fn undisturbed<T>(step: impl FnOnce() -> T) -> Option<T> {
+        const MARK: f64 = 301.25;
+        prefs::update(|p| p.sidebar_width = MARK);
+        let out = step();
+        (prefs::read(|p| p.sidebar_width) == MARK).then_some(out)
+    }
+
+    /// Three launches: the first refresh, a launch that finds the same, and one after a review
+    /// was asked while Mrow was closed. Returns what the last found, or None when another test
+    /// reset the settings on the way.
+    fn three_launches(dir: &Dir) -> Option<Vec<(String, Kind)>> {
+        let (accounts, _, _) = crate::fixtures::load();
+        let mut first = live(dir);
+        let snapshot = undisturbed(|| {
+            fetch(&mut first, &accounts);
+            assert!(first.inbox.is_empty(), "a first look is no news");
+            prefs::read(|p| p.inbox_snapshot.clone())
+        })??;
+
+        let mut next = live(dir);
+        let snapshot = undisturbed(|| {
+            prefs::update(|p| p.inbox_snapshot = Some(snapshot.clone()));
+            assert!(next.from_cache());
+            assert!(next.inbox.is_empty());
+            assert_eq!(prefs::read(|p| p.inbox_snapshot.clone()).as_ref(), Some(&snapshot), "the cache doesn't count as a look");
+            fetch(&mut next, &accounts);
+            assert!(next.inbox.is_empty(), "nothing changed: {:?}", next.inbox);
+            prefs::read(|p| p.inbox_snapshot.clone())
+        })??;
+
+        let mut later = accounts.clone();
+        let gitlab = later.get_mut(&Forge::Gitlab).unwrap();
+        let mut asked = gitlab.open[0].clone();
+        asked.id = "gitlab:fieldnotes/ledger!999".into();
+        asked.iid = "999".into();
+        asked.my_state = ReviewState::Unreviewed;
+        asked.requested_at = Utc::now();
+        asked.first_requested_at = asked.requested_at;
+        asked.requested_at_is_guess = false;
+        gitlab.open.push(asked);
+        let mut third = live(dir);
+        undisturbed(|| {
+            prefs::update(|p| p.inbox_snapshot = Some(snapshot));
+            assert!(third.item("gitlab:fieldnotes/ledger!999").is_none(), "not in what was kept");
+            fetch(&mut third, &later);
+            third.inbox.iter().map(|e| (e.request.clone(), e.kind)).collect()
+        })
+    }
+
+    #[test]
+    fn opening_filled_brings_no_news_and_hides_none() {
+        let dir = Dir::new("inbox");
+        for _ in 0..50 {
+            if let Some(found) = three_launches(&dir) {
+                assert_eq!(found, [("gitlab:fieldnotes/ledger!999".to_string(), Kind::ReviewAsked)], "news, once");
+                return;
+            }
+        }
+        panic!("other tests kept resetting the settings");
+    }
+}
+
+mod snooze {
+    use std::collections::{BTreeMap, HashSet};
+
+    use chrono::{Duration, FixedOffset, TimeZone, Utc};
+
+    use crate::data::forge::Forge;
+    use crate::data::inbox::{Event, Kind, notices};
+    use crate::data::models::*;
+    use crate::data::snooze::{Hold, Snooze, Wake, back_label, fold_label, morning_after, morning_word, prune, quiet, wake, wakes};
+
+    fn request(iid: &str) -> MergeRequest {
+        let asked = Utc::now() - Duration::hours(5);
+        MergeRequest {
+            id: format!("id-{iid}"),
+            iid: iid.into(),
+            title: format!("Request {iid}"),
+            web_url: String::new(),
+            project_path: "group/project".into(),
+            project_name: "project".into(),
+            author: Person::new("maya", "Maya Lind"),
+            created_at: asked,
+            updated_at: asked,
+            merged_at: None,
+            closed_at: None,
+            state: "opened".into(),
+            draft: false,
+            source_branch: format!("branch-{iid}"),
+            target_branch: "main".into(),
+            merge_status: Some("not_approved".into()),
+            comment_count: 2,
+            description: String::new(),
+            reviewers: vec![Reviewer { person: Person::new("sam", "Sam"), state: ReviewState::Unreviewed, approved: false }],
+            approved_by: vec![],
+            additions: 10,
+            deletions: 4,
+            file_count: 2,
+            pipeline: Some(PipelineStatus::Running),
+            labels: vec![],
+            requested_at: asked,
+            first_requested_at: asked,
+            requested_by: None,
+            requested_at_is_guess: false,
+            my_state: ReviewState::Unreviewed,
+            forge: Forge::Gitlab,
+            unresolved_threads: Some(1),
+            failed_job: None,
+            auto_merge: false,
+            merge_method: None,
+        }
+    }
+
+    fn held(item: &MergeRequest, hold: Hold, mine: bool) -> Snooze {
+        Snooze::new(item, hold, mine, Utc::now())
+    }
+
+    /// A moment in a fixed zone an hour east of UTC, on a known week: Nov 16, 2026 is a Monday.
+    fn at(day: u32, hour: u32) -> chrono::DateTime<FixedOffset> {
+        FixedOffset::east_opt(3600).unwrap().with_ymd_and_hms(2026, 11, day, hour, 30, 0).unwrap()
+    }
+
+    #[test]
+    fn tomorrow_is_the_next_working_morning() {
+        let morning =
+            |day: u32, hour: u32| morning_after(&at(day, hour)).with_timezone(&FixedOffset::east_opt(3600).unwrap()).format("%a %d %H:%M").to_string();
+        assert_eq!(morning(18, 15), "Thu 19 09:00", "Wednesday afternoon wakes Thursday at 9");
+        assert_eq!(morning(20, 15), "Mon 23 09:00", "Friday waits for Monday");
+        assert_eq!(morning(21, 11), "Mon 23 09:00", "so does Saturday");
+        assert_eq!(morning(22, 11), "Mon 23 09:00", "and Sunday");
+        assert_eq!(morning(17, 2), "Tue 17 09:00", "before 5:00 it's still last night");
+        assert_eq!(morning(20, 2), "Fri 20 09:00", "a Friday night owl is woken on Friday");
+        assert_eq!((morning_word(&at(18, 15)), morning_word(&at(20, 15))), ("Tomorrow", "Monday"));
+    }
+
+    #[test]
+    fn the_fold_says_when_each_comes_back() {
+        let now = at(18, 15);
+        let back = |day: u32, hour: u32| back_label(Hold::Time(at(day, hour).to_utc()), &now);
+        assert_eq!(back(19, 9), "Back tomorrow at 9:30");
+        assert_eq!(back(23, 9), "Back Monday at 9:30");
+        assert_eq!(back(18, 20), "Back at 20:30");
+        assert_eq!(back(30, 9), "Back on Nov 30 at 9:30");
+        assert_eq!(back_label(Hold::Change, &now), "Back when it changes");
+        assert_eq!(back_label(Hold::Mute, &now), "Muted");
+        assert_eq!((fold_label(3, 0), fold_label(2, 1), fold_label(0, 1)), ("3 snoozed".into(), "2 snoozed, 1 muted".into(), "1 muted".into()));
+    }
+
+    #[test]
+    fn a_snooze_until_tomorrow_wakes_on_the_clock() {
+        let item = request("1");
+        let soon = Utc::now() + Duration::hours(12);
+        let s = held(&item, Hold::Time(soon), false);
+        assert_eq!(wakes(&s, Some(&item), Utc::now()), None);
+        let mut commented = item.clone();
+        commented.comment_count += 3;
+        assert_eq!(wakes(&s, Some(&commented), Utc::now()), None, "comments wait for the morning");
+        assert_eq!(wakes(&s, None, soon), Some(Wake::Time), "it comes back even off the list");
+
+        let mut holds = BTreeMap::from([(item.id.clone(), s)]);
+        assert!(wake(&mut holds, |_| Some(&item), Utc::now()).is_empty());
+        assert_eq!(wake(&mut holds, |_| Some(&item), soon + Duration::seconds(1)), [(item.id.clone(), Wake::Time)]);
+        assert!(holds.is_empty());
+    }
+
+    #[test]
+    fn being_asked_again_ends_a_snooze_until_tomorrow() {
+        let item = request("1");
+        let s = held(&item, Hold::Time(Utc::now() + Duration::hours(12)), false);
+        let mut again = item.clone();
+        again.requested_at = Utc::now();
+        assert_eq!(wakes(&s, Some(&again), Utc::now()), Some(Wake::Changed));
+        let mut guessed = again.clone();
+        guessed.requested_at_is_guess = true;
+        assert_eq!(wakes(&s, Some(&guessed), Utc::now()), None, "a guessed time is no new ask");
+    }
+
+    #[test]
+    fn a_review_wakes_on_a_push_a_comment_or_a_new_ask() {
+        let item = request("1");
+        let s = held(&item, Hold::Change, false);
+        let woke = |change: fn(&mut MergeRequest)| {
+            let mut m = item.clone();
+            change(&mut m);
+            wakes(&s, Some(&m), Utc::now())
+        };
+        assert_eq!(woke(|_| {}), None);
+        assert_eq!(woke(|m| m.pipeline = Some(PipelineStatus::Success)), None, "a pipeline finishing isn't a change to look at");
+        assert_eq!(woke(|m| m.updated_at = Utc::now()), None, "nor a bare timestamp");
+        assert_eq!(woke(|m| m.comment_count += 1), Some(Wake::Changed), "a new comment");
+        assert_eq!(woke(|m| m.additions += 6), Some(Wake::Changed), "a new push");
+        assert_eq!(woke(|m| m.requested_at = Utc::now()), Some(Wake::Changed), "asked again");
+    }
+
+    #[test]
+    fn a_list_without_diff_stats_is_no_push() {
+        let mut item = request("1");
+        (item.additions, item.deletions, item.file_count) = (0, 0, 0);
+        let s = held(&item, Hold::Change, false);
+        let mut sized = item.clone();
+        (sized.additions, sized.deletions, sized.file_count) = (12, 3, 2);
+        assert_eq!(wakes(&s, Some(&sized), Utc::now()), None, "the stats arriving isn't a push");
+        let s = held(&sized, Hold::Change, false);
+        assert_eq!(wakes(&s, Some(&item), Utc::now()), None, "nor them going missing");
+    }
+
+    #[test]
+    fn one_of_mine_wakes_on_reviewers_not_on_my_own_push() {
+        let mut item = request("2");
+        item.my_state = ReviewState::Unknown;
+        let s = held(&item, Hold::Change, true);
+        let woke = |change: fn(&mut MergeRequest)| {
+            let mut m = item.clone();
+            change(&mut m);
+            wakes(&s, Some(&m), Utc::now())
+        };
+        assert_eq!(woke(|m| m.additions += 40), None, "my own push");
+        assert_eq!(woke(|m| m.reviewers[0].state = ReviewState::Unapproved), None, "an approval my push reset");
+        assert_eq!(
+            woke(|m| {
+                m.reviewers[0].state = ReviewState::Approved;
+                m.approved_by.push("sam".into());
+            }),
+            Some(Wake::Changed)
+        );
+        assert_eq!(woke(|m| m.reviewers[0].state = ReviewState::RequestedChanges), Some(Wake::Changed));
+        assert_eq!(woke(|m| m.pipeline = Some(PipelineStatus::Failed)), Some(Wake::Changed));
+        assert_eq!(woke(|m| m.unresolved_threads = Some(2)), Some(Wake::Changed));
+        assert_eq!(woke(|m| m.unresolved_threads = Some(0)), None, "a thread resolved is no news");
+    }
+
+    #[test]
+    fn a_mute_holds_through_everything() {
+        let item = request("1");
+        let s = held(&item, Hold::Mute, false);
+        let mut busy = item.clone();
+        busy.requested_at = Utc::now();
+        busy.comment_count += 9;
+        busy.additions += 100;
+        assert_eq!(wakes(&s, Some(&busy), Utc::now() + Duration::days(30)), None, "asked again, pushed to and talked about");
+    }
+
+    #[test]
+    fn holds_go_once_their_request_has() {
+        let (a, b, c) = (request("1"), request("2"), request("3"));
+        let mut other = request("4");
+        other.forge = Forge::Github;
+        let mut holds: BTreeMap<String, Snooze> = [&a, &b, &c, &other].iter().map(|m| (m.id.clone(), held(m, Hold::Mute, false))).collect();
+        let now = Utc::now();
+        let open: HashSet<&str> = HashSet::from([a.id.as_str()]);
+        let ended: HashSet<&str> = HashSet::from([b.id.as_str()]);
+        prune(&mut holds, Forge::Gitlab, &open, &ended, now);
+        assert!(holds.contains_key(&a.id) && !holds.contains_key(&b.id), "a merged or closed one goes at once");
+        assert_eq!(holds[&c.id].missing_since, Some(now), "a missing one is given a while");
+        assert!(holds.contains_key(&other.id) && holds[&other.id].missing_since.is_none(), "the other account is left alone");
+
+        // Back in a list, it keeps its hold; gone for two days, it's let go.
+        prune(&mut holds, Forge::Gitlab, &HashSet::from([a.id.as_str(), c.id.as_str()]), &HashSet::new(), now + Duration::hours(1));
+        assert_eq!(holds[&c.id].missing_since, None);
+        prune(&mut holds, Forge::Gitlab, &open, &HashSet::new(), now + Duration::hours(2));
+        prune(&mut holds, Forge::Gitlab, &open, &HashSet::new(), now + Duration::days(2));
+        assert!(holds.contains_key(&c.id), "two days from when it went missing, not from the first look");
+        prune(&mut holds, Forge::Gitlab, &open, &HashSet::new(), now + Duration::days(2) + Duration::hours(2));
+        assert!(!holds.contains_key(&c.id));
+    }
+
+    fn event(request: &MergeRequest, kind: Kind) -> Event {
+        Event {
+            id: format!("{}|{kind:?}", request.id),
+            request: request.id.clone(),
+            forge: request.forge,
+            kind,
+            title: format!("{kind:?}"),
+            subject: request.title.clone(),
+            reference: request.short_reference(),
+            url: String::new(),
+            at: Utc::now(),
+            done: false,
+        }
+    }
+
+    #[test]
+    fn held_requests_neither_ring_nor_light_the_bell() {
+        let (snoozed, muted, free) = (request("1"), request("2"), request("3"));
+        let holds = BTreeMap::from([(snoozed.id.clone(), held(&snoozed, Hold::Change, false)), (muted.id.clone(), held(&muted, Hold::Mute, false))]);
+        let mut found = vec![event(&snoozed, Kind::AskedAgain), event(&muted, Kind::AskedAgain), event(&free, Kind::ReviewAsked)];
+        quiet(&mut found, &holds);
+        assert_eq!(found.iter().map(|e| (e.request.as_str(), e.done)).collect::<Vec<_>>(), [("id-1", true), ("id-3", false)]);
+        let loud: Vec<Event> = found.into_iter().filter(|e| !e.done).collect();
+        let banners = notices(&loud, &BTreeMap::new(), true);
+        assert_eq!(banners.iter().map(|n| n.request.as_str()).collect::<Vec<_>>(), ["id-3"]);
+    }
+
+    #[test]
+    fn a_change_that_ends_a_snooze_is_still_told() {
+        let item = request("1");
+        let mut holds = BTreeMap::from([(item.id.clone(), held(&item, Hold::Change, false))]);
+        let mut again = item.clone();
+        again.requested_at = Utc::now();
+        // The store wakes before the inbox looks, so the ask it found is news as usual.
+        assert_eq!(wake(&mut holds, |_| Some(&again), Utc::now()).len(), 1);
+        let mut found = vec![event(&again, Kind::AskedAgain)];
+        quiet(&mut found, &holds);
+        assert!(found.len() == 1 && !found[0].done);
+    }
+}
+
+mod snooze_store {
+    use crate::data::forge::Forge;
+    use crate::data::prefs;
+    use crate::data::snooze::Hold;
+    use crate::data::store::{QueueMode, Store};
+
+    fn store(mode: QueueMode) -> Store {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        store.forge = Forge::Gitlab;
+        store.mode = mode;
+        store
+    }
+
+    #[test]
+    fn snoozing_takes_a_review_out_of_the_list_and_the_count() {
+        let mut store = store(QueueMode::ToReview);
+        let list: Vec<String> = store.visible_items().into_iter().map(|m| m.id).collect();
+        assert!(list.len() >= 2);
+        let (count, waiting) = (store.count(QueueMode::ToReview), store.waiting_count(Forge::Gitlab));
+        store.select(Some(list[0].clone()));
+        store.snooze(&list[0], Hold::Change);
+        assert_eq!(store.selected_id.as_deref(), Some(list[1].as_str()), "the selection moves to the next one");
+        assert!(!store.visible_items().iter().any(|m| m.id == list[0]));
+        assert_eq!((store.count(QueueMode::ToReview), store.waiting_count(Forge::Gitlab)), (count - 1, waiting - 1));
+        assert_eq!(store.held_items().len(), 1, "it waits in the fold");
+
+        // At the end of the list, the selection moves back instead.
+        let last = store.visible_items().last().unwrap().id.clone();
+        let before = store.visible_items().iter().rev().nth(1).unwrap().id.clone();
+        store.select(Some(last.clone()));
+        store.snooze(&last, Hold::Mute);
+        assert_eq!(store.selected_id.as_deref(), Some(before.as_str()));
+
+        // Open, the fold's rows are in reach of the keys.
+        store.snoozed_open = true;
+        assert_eq!(store.visible_items().iter().rev().take(2).count(), 2);
+        assert!(store.visible_items().iter().any(|m| m.id == list[0]));
+
+        store.unsnooze(&list[0]);
+        store.unsnooze(&last);
+        assert_eq!(store.count(QueueMode::ToReview), count);
+        assert!(store.held_items().is_empty() && !store.snoozed_open, "the empty fold closes");
+    }
+
+    #[test]
+    fn one_of_mine_snoozes_out_of_mine() {
+        let mut store = store(QueueMode::Mine);
+        let first = store.visible_items()[0].clone();
+        let shown = store.visible_items().len();
+        store.snooze(&first.id, Hold::Change);
+        assert_eq!(store.visible_items().len(), shown - 1);
+        assert_eq!(store.held_items().iter().map(|(m, h)| (m.id.clone(), h.mine)).collect::<Vec<_>>(), [(first.id.clone(), true)]);
+        // A review I've already given isn't waiting on me, so there's nothing to snooze.
+        let reviewed = store.open().iter().find(|m| !m.my_state.needs_review()).unwrap().clone();
+        assert!(!store.can_snooze(&reviewed));
+    }
+}

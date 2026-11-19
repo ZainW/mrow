@@ -371,7 +371,7 @@ pub fn rule(p: &Pal) -> El {
 /// A thin rounded bar filled to `fraction`; green when full.
 pub fn progress_bar(p: &Pal, fraction: f32, width: f32) -> El {
     let f = fraction.clamp(0.0, 1.0);
-    el().w(width).h(4.0).radius(2.0).fill(p.line).child(el().key("bar").w(width * f).h(4.0).radius(2.0).fill(if f >= 1.0 { p.green } else { p.accent }))
+    el().w(width).h(4.0).radius(2.0).fill(p.strong_line).child(el().key("bar").w(width * f).h(4.0).radius(2.0).fill(if f >= 1.0 { p.green } else { p.accent }))
 }
 
 /// A small copy button: copies `value`, then shows a green check for a moment.

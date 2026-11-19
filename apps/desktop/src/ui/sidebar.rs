@@ -9,6 +9,7 @@ use rune_kit::{Kit, Spinner, TextInput};
 use crate::app::App;
 use crate::data::models::MergeRequest;
 use crate::data::prefs::{self, Appearance};
+use crate::data::snooze;
 use crate::data::store::{QueueMode, Store};
 use crate::ui::components::{Chrome, ChromeButton, avatar, forge_mark, long_date, message, pipeline_dot, short_time, state_color, state_icon};
 use crate::ui::icons as I;
@@ -16,10 +17,11 @@ use crate::ui::theme::LineHeight as _;
 use crate::ui::theme::{MEDIUM, Pal, SEMIBOLD, mono, ui};
 use crate::ui::{actions, menus};
 
-/// A line in the list: a section's title or a merge request.
+/// A line in the list: a section's title, a merge request, or a line of the snoozed fold.
 enum Line {
     Header(&'static str),
     Item(MergeRequest, bool, bool),
+    Fold(Fold),
 }
 
 pub fn sidebar(s: &App, p: &Pal, k: &Kit, dark: bool) -> El {
@@ -65,14 +67,19 @@ fn account_switcher(store: &Store, p: &Pal) -> El {
         let color = if store.error().is_some() { p.red } else { p.tertiary };
         names = names.child(text(sub).font(ui(12.0, 400.0)).color(color).single_line().truncate());
     }
-    let others: usize = store.forges().into_iter().filter(|f| *f != forge).map(|f| store.waiting_count(f)).sum();
+    // What waits in the other accounts, each beside its forge's mark, so the count says where.
+    let others: Vec<_> = store.forges().into_iter().filter(|f| *f != forge).map(|f| (f, store.waiting_count(f))).filter(|(_, n)| *n > 0).collect();
+    let mut label = format!("Account: {}", forge.name());
+    for (other, n) in &others {
+        label.push_str(&format!(", {n} waiting in {}", other.name()));
+    }
     let mut r = row()
         .key("account")
         .grow(1.0)
         .shrink()
         .min_w(0.0)
         .role("button")
-        .label(format!("Account: {}", forge.name()))
+        .label(label)
         .h(38.0)
         .px(8.0)
         .gap(8.0)
@@ -85,15 +92,19 @@ fn account_switcher(store: &Store, p: &Pal) -> El {
         .child(names.shrink().min_w(0.0))
         .child(icon(&I::CHEVRON_UP_DOWN, 10.0).color(p.tertiary))
         .child(el().grow(1.0));
-    if others > 0 {
+    for (other, n) in others {
         r = r.child(
-            el().h(17.0)
-                .px(6.0)
-                .radius(8.5)
+            row()
+                .h(18.0)
+                .pl(3.0)
+                .pr(6.0)
+                .gap(4.0)
+                .center_y()
+                .radius(9.0)
                 .fill(p.accent_soft)
-                .center()
-                .help(format!("{others} waiting in your other account"))
-                .child(text(others.to_string()).font(ui(11.0, SEMIBOLD)).color(p.accent).single_line()),
+                .help(format!("{n} waiting in {}", other.name()))
+                .child(forge_mark(p, other, 12.0))
+                .child(text(n.to_string()).font(ui(11.0, SEMIBOLD).features("'tnum' 1")).color(p.accent).single_line()),
         );
     }
     r.on_press_tx(|s: &mut App, tx: &mut Tx| menus::accounts(s, tx))
@@ -240,7 +251,8 @@ fn list(s: &App, p: &Pal) -> El {
         };
     }
     let sections = store.sections();
-    if sections.is_empty() {
+    let folds = fold_lines(store, sections.is_empty());
+    if sections.is_empty() && folds.is_empty() {
         return empty();
     }
     let mut lines = Vec::new();
@@ -252,6 +264,7 @@ fn list(s: &App, p: &Pal) -> El {
             lines.push(Line::Item(item, selected, unread));
         }
     }
+    lines.extend(folds.into_iter().map(Line::Fold));
     let lines = Rc::new(lines);
     let pal = *p;
     let keys = lines.clone();
@@ -260,6 +273,7 @@ fn list(s: &App, p: &Pal) -> El {
         .map(|l| match l {
             Line::Header(t) => *t,
             Line::Item(m, ..) => m.id.as_str(),
+            Line::Fold(f) => f.key(),
         })
         .collect();
     let rows = col().key("rows").w_full().pb(8.0).growth(GrowthSpec::default()).virtual_rows_version(&version).virtual_rows(
@@ -268,10 +282,12 @@ fn list(s: &App, p: &Pal) -> El {
         move |_: &App, i| match &keys[i] {
             Line::Header(t) => std::borrow::Cow::Owned(format!("h-{t}")),
             Line::Item(m, ..) => std::borrow::Cow::Owned(m.id.clone()),
+            Line::Fold(f) => std::borrow::Cow::Owned(f.key().to_string()),
         },
-        move |_: &App, i| match &lines[i] {
+        move |s: &App, i| match &lines[i] {
             Line::Header(t) => section_header(&pal, t),
-            Line::Item(m, selected, unread) => sidebar_row(&pal, m, *selected, *unread),
+            Line::Item(m, selected, unread) => sidebar_row(&pal, m, *selected, *unread, s.sidebar_width),
+            Line::Fold(f) => fold_row(&pal, f),
         },
     );
     queue(rows)
@@ -299,10 +315,17 @@ fn queue(rows: El) -> El {
                 rune::Key::Down => s.store.select_offset(1),
                 rune::Key::Text(t) if t == "k" => s.store.select_offset(-1),
                 rune::Key::Text(t) if t == "j" => s.store.select_offset(1),
-                // Mine: Right shows every part of the stacks, Left folds them to what's on me.
-                rune::Key::Right | rune::Key::Left if s.store.mode == QueueMode::Mine => {
+                // Right shows what's folded away (in Mine, every part of the stacks too), Left
+                // folds it again: the snoozed fold is in reach of the keys.
+                rune::Key::Right | rune::Key::Left => {
                     tx.instant();
-                    s.store.unfold_stacks(matches!(ev.key, rune::Key::Right));
+                    let open = matches!(ev.key, rune::Key::Right);
+                    if s.store.mode == QueueMode::Mine {
+                        s.store.unfold_stacks(open);
+                    }
+                    if matches!(s.store.mode, QueueMode::ToReview | QueueMode::Mine) {
+                        s.store.set_snoozed_open(open);
+                    }
                 }
                 rune::Key::Enter => {
                     if let Some(item) = s.store.selected() {
@@ -326,9 +349,11 @@ pub fn section_header(p: &Pal, title: &str) -> El {
     el().w_full().px(18.0).pt(14.0).pb(4.0).child(text(title.to_string()).font(ui(12.0, MEDIUM)).color(p.tertiary).single_line())
 }
 
-fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El {
+fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool, sidebar_width: f32) -> El {
     let stale = item.is_open() && item.my_state.needs_review() && !item.draft && (chrono::Utc::now() - item.requested_at).num_seconds() > 2 * 86_400;
     let when = if item.is_open() { item.requested_at } else { item.merged_at.unwrap_or(item.updated_at) };
+    // Quiet text on the selected row's fill steps up a shade, to stay readable.
+    let quiet = if selected { p.secondary } else { p.tertiary };
     let time_help = if !item.is_open() {
         let state = item.state.clone();
         let mut chars = state.chars();
@@ -360,16 +385,23 @@ fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El
         .child(
             text(short_time(when))
                 .font(ui(12.0, MEDIUM).features("'tnum' 1"))
-                .color(if stale { p.accent } else { p.tertiary })
+                .color(if stale { p.accent } else { quiet })
                 .single_line()
                 .pt(1.5)
                 .help(time_help),
         );
+    // The reference is what identifies the request, so the author's name gives way first. Only
+    // a project name long enough to take most of the line is cut, from its start, keeping the
+    // number whole.
+    let reference = item.short_reference();
+    let reference_font = mono(12.0, 400.0);
+    let whole = rune::text::measure(&reference, &[], reference_font, None).0;
+    let room = (sidebar_width - 52.0) * 0.6;
     let meta = row()
         .gap(6.0)
         .center_y()
-        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0))
-        .child(text("·").font(ui(12.0, 400.0)).color(p.tertiary))
+        .child(text(reference).font(reference_font).color(quiet).single_line().truncate_head().min_w(whole.min(room).ceil()))
+        .child(text("·").font(ui(12.0, 400.0)).color(quiet))
         .child(text(item.author.name.clone()).font(ui(12.0, 400.0)).color(p.secondary).single_line().truncate().shrink().min_w(0.0))
         .child(el().grow(1.0).min_w(4.0))
         .child(badges(p, item));
@@ -407,6 +439,155 @@ fn sidebar_row(p: &Pal, item: &MergeRequest, selected: bool, unread: bool) -> El
             s.store.open_tab(&id2, true);
         })
         .on_secondary_press(move |s: &mut App, at: PointerPress, tx: &mut Tx| menus::row(s, &id3, at, tx))
+}
+
+// MARK: The snoozed fold
+
+/// A line of the fold at the end of To review and Mine: what's snoozed or muted out of the list.
+pub enum Fold {
+    /// Above the fold, when nothing else is left in the list.
+    Note(&'static str),
+    Head {
+        snoozed: usize,
+        muted: usize,
+        open: bool,
+    },
+    Held {
+        item: MergeRequest,
+        back: String,
+        muted: bool,
+        selected: bool,
+    },
+}
+
+impl Fold {
+    /// Its row's key. A held request keys by its ID, as in the list, so the keys can reach it.
+    pub fn key(&self) -> &str {
+        match self {
+            Fold::Note(_) => "snoozed-note",
+            Fold::Head { .. } => "snoozed",
+            Fold::Held { item, .. } => &item.id,
+        }
+    }
+}
+
+/// The fold's lines for the current list: a count, and when it's open each request with when it
+/// comes back. `alone` says the list has nothing else, which a line above the fold says unless
+/// a filter is what emptied it.
+pub fn fold_lines(store: &Store, alone: bool) -> Vec<Fold> {
+    let held = store.held_items();
+    if held.is_empty() {
+        return vec![];
+    }
+    let mut lines = Vec::new();
+    if alone && !store.filtering() {
+        lines.push(Fold::Note(if store.mode == QueueMode::Mine { "Nothing else of yours is open." } else { "Nothing else is waiting on you." }));
+    }
+    let muted = held.iter().filter(|(_, h)| h.hold.muted()).count();
+    lines.push(Fold::Head { snoozed: held.len() - muted, muted, open: store.snoozed_open });
+    if store.snoozed_open {
+        let now = chrono::Local::now();
+        lines.extend(held.into_iter().map(|(item, h)| Fold::Held {
+            selected: store.selected_id.as_deref() == Some(item.id.as_str()),
+            back: snooze::back_label(h.hold, &now),
+            muted: h.hold.muted(),
+            item,
+        }));
+    }
+    lines
+}
+
+pub fn fold_row(p: &Pal, line: &Fold) -> El {
+    match line {
+        Fold::Note(note) => el().key("snoozed-note").w_full().px(18.0).pt(14.0).child(text(*note).font(ui(13.0, 400.0)).color(p.secondary).wrap()),
+        Fold::Head { snoozed, muted, open } => fold_head(p, &snooze::fold_label(*snoozed, *muted), *open),
+        Fold::Held { item, back, muted, selected } => held_row(p, item, back, *muted, *selected),
+    }
+}
+
+/// "3 snoozed", a press away from showing them. Set like a section's title, since it is one.
+fn fold_head(p: &Pal, label: &str, open: bool) -> El {
+    let action = if open { "Hide them" } else { "Show them" };
+    el().key("snoozed").w_full().px(8.0).pt(10.0).child(
+        row()
+            .key("head")
+            .role("button")
+            .label(format!("{label}. {action}"))
+            .w_full()
+            .h(26.0)
+            .pl(8.0)
+            .pr(12.0)
+            .gap(6.0)
+            .center_y()
+            .radius(6.0)
+            .hover_group()
+            .hover(p.hover)
+            .press(p.hover)
+            .help(if open { "Hide them  ←" } else { "Show them  →" })
+            .child(el().size(10.0, 10.0).center().child(crate::ui::mine::chevron(p, open)))
+            .child(text(label.to_string()).font(ui(12.0, MEDIUM).features("'tnum' 1")).color(p.tertiary).group_color(p.secondary).single_line())
+            .on_press_tx(|s: &mut App, tx: &mut Tx| {
+                // Opened from a long list, often from the keyboard: it lands at once.
+                tx.instant();
+                s.store.snoozed_open = !s.store.snoozed_open;
+            }),
+    )
+}
+
+/// A snoozed request in the open fold: quieter than the list's rows, saying when it comes back.
+/// Unsnooze (or Unmute) shows on hover and while it's selected; the row's menu and the Review
+/// menu carry it too, so it's never only a hover away.
+fn held_row(p: &Pal, item: &MergeRequest, back: &str, muted: bool, selected: bool) -> El {
+    let verb = if muted { "Unmute" } else { "Unsnooze" };
+    let id = item.id.clone();
+    let undo = el()
+        .key("unsnooze")
+        .role("button")
+        .label(format!("{verb} {}", item.title))
+        .focusable(false)
+        .size(22.0, 22.0)
+        .pin(None, Some(-3.0), Some(-5.0), None)
+        .radius(6.0)
+        .center()
+        .group_opacity(if selected { 1.0 } else { 0.0 }, 1.0)
+        .hover(p.hover)
+        .press(p.hover)
+        .help(verb)
+        .child(icon(&I::UNDO, 12.0).color(p.secondary))
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            tx.instant();
+            s.store.unsnooze(&id);
+        });
+    let title_row = row()
+        .gap(8.0)
+        .items_start()
+        .child(text(item.title.clone()).font(ui(13.0, MEDIUM).lines(1.3)).color(p.secondary).single_line().truncate().grow(1.0).shrink().min_w(0.0))
+        .child(el().size(16.0, 16.0).child(undo));
+    let quiet = if selected { p.secondary } else { p.tertiary };
+    let meta = row()
+        .gap(6.0)
+        .center_y()
+        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(quiet).single_line().truncate_head().shrink().min_w(0.0))
+        .child(text("·").font(ui(12.0, 400.0)).color(quiet))
+        .child(text(back.to_string()).font(ui(12.0, 400.0)).color(quiet).single_line());
+    let body = col().gap(4.0).grow(1.0).shrink().min_w(0.0).child(title_row).child(meta);
+    // Its text lines up with the list's titles, past the unread dot's column.
+    let card = row().key("card").w_full().gap(8.0).pl(24.0).pr(12.0).py(8.0).radius(7.0).hover_group().child(body);
+    let card = if selected { card.fill(p.selected) } else { card.hover(p.hover) };
+    let (id, id2) = (item.id.clone(), item.id.clone());
+    el().key(item.id.clone())
+        .role("listitem")
+        .label(format!("{}. {back}", item.title))
+        .w_full()
+        .px(8.0)
+        .pb(1.0)
+        .child(card)
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            tx.instant();
+            s.store.select(Some(id.clone()));
+            tx.focus("queue", false);
+        })
+        .on_secondary_press(move |s: &mut App, at: PointerPress, tx: &mut Tx| menus::row(s, &id2, at, tx))
 }
 
 fn badges(p: &Pal, item: &MergeRequest) -> El {
@@ -478,8 +659,19 @@ fn footer(s: &App, p: &Pal, dark: bool) -> El {
         r = r.child(update_button(p, &ready.version));
     } else if let Some(last) = store.last_refreshed() {
         let offline = store.error();
-        let label = if offline.is_some() { "Offline".to_string() } else { format!("Updated {}", short_time(last)) };
-        let tip = offline.unwrap_or_else(|| last.with_timezone(&chrono::Local).format("%H:%M").to_string());
+        let at = last.with_timezone(&chrono::Local).format("%H:%M").to_string();
+        let label = match (&offline, store.from_cache(), short_time(last)) {
+            (Some(_), _, _) => "Offline".to_string(),
+            // Lists from the last run, until the refresh lands: say how old they are.
+            // A duration ("3d"), not a date ("Nov 3"), which reads fine without "ago".
+            (None, true, ago) if ago != "now" && !ago.ends_with(|c: char| c.is_ascii_digit()) => format!("Updated {ago} ago"),
+            (None, _, ago) => format!("Updated {ago}"),
+        };
+        let tip = match offline {
+            Some(error) => error,
+            None if store.from_cache() => format!("Saved at {at}, from the last time Mrow ran. Refreshing…"),
+            None => at,
+        };
         r = r.child(text(label).font(ui(12.0, 400.0)).color(if store.error().is_some() { p.red } else { p.tertiary }).single_line().help(tip));
     }
     r.child(ChromeButton::new("appearance", "Switch Appearance").icon(&I::APPEARANCE, 14.0).build(p).on_press(move |_: &mut App| {

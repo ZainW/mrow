@@ -9,12 +9,21 @@ pub struct Bg<M> {
     tx: Sender<M>,
     rx: Receiver<M>,
     waker: Option<Waker>,
+    /// Drops every job, for self-tests that must not reach a forge.
+    #[cfg(test)]
+    pub inert: bool,
 }
 
 impl<M: Send + 'static> Default for Bg<M> {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Bg { tx, rx, waker: None }
+        Bg {
+            tx,
+            rx,
+            waker: None,
+            #[cfg(test)]
+            inert: false,
+        }
     }
 }
 
@@ -24,6 +33,10 @@ impl<M: Send + 'static> Bg<M> {
     }
 
     pub fn spawn(&self, job: impl FnOnce() -> M + Send + 'static) {
+        #[cfg(test)]
+        if self.inert {
+            return;
+        }
         let tx = self.tx.clone();
         let waker = self.waker.clone();
         std::thread::spawn(move || {
@@ -32,6 +45,12 @@ impl<M: Send + 'static> Bg<M> {
                 w();
             }
         });
+    }
+
+    /// Hands a message straight to the next `drain`, for the self-tests.
+    #[cfg(test)]
+    pub fn send(&self, msg: M) {
+        let _ = self.tx.send(msg);
     }
 
     pub fn drain(&self) -> Vec<M> {

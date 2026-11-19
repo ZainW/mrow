@@ -3,8 +3,10 @@
 
 pub mod ask;
 pub mod bg;
+pub mod cache;
 pub mod cli;
 pub mod diff;
+pub mod file_tree;
 pub mod forge;
 pub mod github;
 pub mod gitlab;
@@ -15,6 +17,7 @@ pub mod mine;
 pub mod models;
 pub mod paths;
 pub mod prefs;
+pub mod snooze;
 pub mod store;
 pub mod styler;
 pub mod update;

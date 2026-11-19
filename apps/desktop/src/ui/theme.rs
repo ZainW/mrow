@@ -1,5 +1,6 @@
 //! Mrow's colours, type and measurements: warm paper in light mode, neutral ink in dark mode,
-//! with one clay accent. The same values as the Swift app's `Palette` and `Theme`.
+//! with one clay accent. Started from the Swift app's `Palette` and `Theme`; tertiary text is
+//! lighter (dark) and darker (light) than there, to read at 12 points.
 
 use rune::Color;
 use rune::color::hex;
@@ -15,7 +16,7 @@ pub const CARD_RADIUS: f32 = 12.0;
 /// system draws its own title bar, so the header starts at the gutter.
 pub const TRAFFIC_LIGHTS_WIDTH: f32 = if cfg!(target_os = "macos") { 76.0 } else { 8.0 };
 /// The widest the merge request's text column gets.
-pub const READING_WIDTH: f32 = 780.0;
+pub const READING_WIDTH: f32 = 640.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Pal {
@@ -44,6 +45,8 @@ pub struct Pal {
     pub amber: Color,
     pub blue: Color,
     pub added_line: Color,
+    /// Removed lines' counts and glyphs: the diff's own orange-red, apart from `red`'s failures.
+    pub removed: Color,
     pub removed_line: Color,
     pub added_word: Color,
     pub removed_word: Color,
@@ -73,7 +76,7 @@ impl Pal {
             well: pick("#F5F3ED", "#161616"),
             text: pick("#1E1C19", "#ECECEC"),
             secondary: pick("#6B665E", "#A3A3A3"),
-            tertiary: pick("#9E998F", "#6E6E6E"),
+            tertiary: pick("#807A70", "#858585"),
             line: if dark { glow(0.08) } else { ink(0.1) },
             strong_line: if dark { glow(0.14) } else { ink(0.16) },
             hover: if dark { glow(0.05) } else { ink(0.05) },
@@ -81,10 +84,11 @@ impl Pal {
             accent: pick("#B95A33", "#E08A66"),
             accent_soft: if dark { c("#E08A66").alpha(0.16) } else { c("#B95A33").alpha(0.12) },
             green: pick("#3F7D4E", "#7BC48D"),
-            red: pick("#B4443A", "#E5847A"),
+            red: pick("#B34157", "#E4828F"),
             amber: pick("#9A6B12", "#D9AE5C"),
             blue: pick("#3C6A9E", "#86AEDB"),
             added_line: if dark { c("#5FBF77").alpha(0.11) } else { c("#3F9A55").alpha(0.11) },
+            removed: pick("#B4443A", "#E5847A"),
             removed_line: if dark { c("#E5655A").alpha(0.11) } else { c("#C9483C").alpha(0.09) },
             added_word: if dark { c("#5FBF77").alpha(0.22) } else { c("#3F9A55").alpha(0.22) },
             removed_word: if dark { c("#E5655A").alpha(0.22) } else { c("#C9483C").alpha(0.2) },

@@ -12,6 +12,7 @@ pub mod manage;
 pub mod markdown;
 pub mod menus;
 pub mod mine;
+pub mod palette;
 pub mod pipeline;
 pub mod settings;
 pub mod sidebar;
@@ -103,6 +104,10 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         for layer in settings::sheet(s, p, k) {
             root = root.child(layer);
         }
+    }
+    // Last, over everything: it can open from anywhere, the settings sheet included.
+    if let Some(palette) = palette::panel(s, p, k) {
+        root = root.child(palette);
     }
     root
 }
@@ -215,6 +220,10 @@ fn tab_chip(p: &Pal, item: &MergeRequest, active: bool, preview: bool, unread: b
         .key(format!("tab-{}", item.id))
         .role("tab")
         .label(item.full_reference())
+        // Squeezed by a narrow window, tabs give up their titles instead of running under the
+        // filter field; the glyph and the reference stay.
+        .shrink()
+        .min_w(88.0)
         .h(28.0)
         .pl(6.0)
         .pr(10.0)

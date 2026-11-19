@@ -120,7 +120,12 @@ fn account(s: &App, p: &Pal, k: &Kit, prefs: &Prefs, forge: Forge) -> El {
             Forge::Github => (&s.settings.github_host, &s.settings.gh_path),
         };
         rows.push(line(p, "Host", field(p, k, forge, true, host, forge.default_host().to_string())));
-        let detected = forge.cli().executable().unwrap_or_else(|_| crate::data::paths::tool_dirs()[0].join(forge.cli().name).to_string_lossy().into_owned());
+        // Headless scenes show a made-up path, never the machine's own.
+        let detected = if crate::HEADLESS.load(std::sync::atomic::Ordering::Relaxed) {
+            format!("/usr/local/bin/{}", forge.cli().name)
+        } else {
+            forge.cli().executable().unwrap_or_else(|_| crate::data::paths::tool_dirs()[0].join(forge.cli().name).to_string_lossy().into_owned())
+        };
         rows.push(line(p, &format!("{} path", forge.cli().name), field(p, k, forge, false, path, detected)));
     }
     section(p, forge.name(), rows)

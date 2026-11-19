@@ -21,6 +21,7 @@ use app::App;
 use data::ask;
 use data::forge::Forge;
 use data::prefs;
+use data::snooze::Hold;
 use data::store::{QueueMode, Viewed};
 use ui::detail::{Jump, Tab};
 
@@ -53,6 +54,8 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if !s.started {
         s.started = true;
         if !s.store.offline && !HEADLESS.load(Ordering::Relaxed) {
+            // What the last run showed, until the refresh lands.
+            s.store.restore(data::cache::Disk::standard());
             s.store.refresh();
             changed = true;
         }
@@ -222,6 +225,24 @@ fn scene_thread_line(s: &mut App) {
     s.pending_jump = Some(Jump::Line("t1".into()));
 }
 
+/// N in the changes: the first open thread picked under its line, marked as where R replies.
+fn scene_thread_keys(s: &mut App) {
+    fixture(s);
+    s.pending_jump = ui::detail::pick_thread(s, Tab::Changes, "t1");
+}
+
+/// ⇧N in the conversation: a resolved thread picked, its Reply naming R.
+fn scene_talk_keys(s: &mut App) {
+    fixture(s);
+    s.pending_jump = ui::detail::pick_thread(s, Tab::Conversation, "t4");
+}
+
+/// J onto the second file: its header marked as the file V would mark viewed.
+fn scene_file_keys(s: &mut App) {
+    fixture(s);
+    s.pending_jump = Some(Jump::File(Some(1)));
+}
+
 /// The review panel open over the conversation, a summary written, two comments held.
 fn scene_submit_review(s: &mut App) {
     scene_discussion(s);
@@ -277,6 +298,31 @@ fn scene_big_diff(s: &mut App) {
     scene_changes(s);
     let id = s.store.selected_id.clone().unwrap_or_default();
     s.store.diffs.insert(id, crate::data::store::Loadable::Loaded(std::rc::Rc::new(fixtures::big_diff(40, 300))));
+}
+
+/// The big diff's file list partly read: `src/` and two folders in it open, some files viewed.
+fn scene_big_diff_viewed(s: &mut App) {
+    scene_big_diff(s);
+    let Some(item) = s.store.selected().cloned() else { return };
+    let files = s.store.diffs.get(&item.id).and_then(|l| l.value()).cloned().unwrap_or_default();
+    for path in ["src/", "src/export/", "src/db/", "web/"] {
+        s.folders.insert(format!("{}|{path}", item.id), true);
+    }
+    for file in files.iter().filter(|f| f.new_path.starts_with("src/db/") || f.new_path.starts_with("src/export/csv/") || f.new_path == "src/export/job.rs") {
+        s.store.set_viewed(true, file, &item);
+    }
+}
+
+/// A request touching a thousand files with every folder of its list open, for timing a scroll
+/// through a long file list.
+fn scene_huge_diff(s: &mut App) {
+    scene_changes(s);
+    let id = s.store.selected_id.clone().unwrap_or_default();
+    let files = fixtures::big_diff(1000, 20);
+    for folder in data::file_tree::FileTree::new(&files).folders {
+        s.folders.insert(format!("{id}|{}", folder.path), true);
+    }
+    s.store.diffs.insert(id, crate::data::store::Loadable::Loaded(std::rc::Rc::new(files)));
 }
 
 /// The changes with the lines around them: the short gap over the first hunk still folded, and
@@ -372,6 +418,30 @@ fn scene_done(s: &mut App) {
 fn scene_mine(s: &mut App) {
     fixture(s);
     s.store.set_mode(QueueMode::Mine);
+}
+
+/// To review with three more reviews, two snoozed and one muted into the fold at the end.
+fn scene_snoozed_folded(s: &mut App) {
+    fixture(s);
+    let more = fixtures::more_reviews();
+    if let Some(a) = s.store.accounts.get_mut(&Forge::Gitlab) {
+        a.open.extend(more.iter().cloned());
+    }
+    s.store.holds = fixtures::holds(&more, &[("97", fixtures::tomorrow()), ("312", Hold::Change), ("58", Hold::Mute)], false);
+}
+
+/// The same with the fold open: when each comes back, and the way to bring it back now.
+fn scene_snoozed(s: &mut App) {
+    scene_snoozed_folded(s);
+    s.store.snoozed_open = true;
+}
+
+/// Mine with two snoozed and a spike muted, the fold open.
+fn scene_mine_snoozed(s: &mut App) {
+    scene_mine(s);
+    let mine = s.store.mine().to_vec();
+    s.store.holds = fixtures::holds(&mine, &[("90", fixtures::tomorrow()), ("307", Hold::Change), ("233", Hold::Mute)], true);
+    s.store.snoozed_open = true;
 }
 
 /// A part in the middle of a stack: held until the one below it merges.
@@ -494,6 +564,18 @@ fn scene_inbox_empty(s: &mut App) {
     s.inbox_open = true;
 }
 
+/// The command palette, nothing typed: every command that would run on the selected review.
+fn scene_palette(s: &mut App) {
+    fixture(s);
+    s.palette = Some(ui::palette::Palette { query: rune::TextEdit::new(""), pick: 0 });
+}
+
+/// The palette with a query that finds commands and a request in the list by its title.
+fn scene_palette_query(s: &mut App) {
+    fixture(s);
+    s.palette = Some(ui::palette::Palette { query: rune::TextEdit::new("ex"), pick: 1 });
+}
+
 fn scene_github(s: &mut App) {
     fixture(s);
     s.store.switch_forge(Forge::Github);
@@ -558,6 +640,9 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("discussion", scene_discussion),
     ("start-file", scene_start_file),
     ("thread-line", scene_thread_line),
+    ("thread-keys", scene_thread_keys),
+    ("talk-keys", scene_talk_keys),
+    ("file-keys", scene_file_keys),
     ("submit-review", scene_submit_review),
     ("edit-draft", scene_edit_draft),
     ("edit-comment", scene_edit_comment),
@@ -568,6 +653,9 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("done", scene_done),
     ("mine", scene_mine),
     ("mine-stack", scene_mine_stack),
+    ("snoozed", scene_snoozed),
+    ("snoozed-folded", scene_snoozed_folded),
+    ("mine-snoozed", scene_mine_snoozed),
     ("mine-open", scene_mine_open),
     ("mine-confirm", scene_mine_confirm),
     ("mine-merging", scene_mine_merging),
@@ -581,6 +669,8 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("inbox", scene_inbox),
     ("inbox-mine", scene_inbox_mine),
     ("inbox-empty", scene_inbox_empty),
+    ("palette", scene_palette),
+    ("palette-query", scene_palette_query),
     ("github", scene_github),
     ("empty", scene_empty),
     ("no-sidebar", scene_no_sidebar),
@@ -588,6 +678,8 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("toast", scene_toast),
     ("update", scene_update),
     ("big-diff", scene_big_diff),
+    ("big-diff-viewed", scene_big_diff_viewed),
+    ("huge-diff", scene_huge_diff),
     ("diff-context", scene_diff_context),
     ("ask", scene_ask),
     ("ask-chat", scene_ask_chat),
@@ -830,6 +922,8 @@ fn main() {
         .on_reopen(|_: &mut App, _visible: bool, _: &mut Tx| true)
         .on_quit(|s: &mut App, _: &mut Tx| {
             s.ask.shutdown();
+            // With the request on screen, so the next launch opens on it.
+            s.store.save_now();
             // A launch that came while quitting starts the next Mrow, which can claim the name now.
             rune::release_instance();
         });

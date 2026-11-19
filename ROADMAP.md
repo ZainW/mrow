@@ -17,14 +17,29 @@ roughly by value.
 - **On main, not released**: finishing a review in the app. Threads resolve and reopen; comments
   can be held in a pending review on the forge (edited, deleted, shown in place) and submitted
   with Comment, Request Changes or Approve and a summary (⇧⌘R).
-- **In this branch**: fewer trips to the forge. A request's pipeline jobs (checks on GitHub) on
+- **On main, not released**: fewer trips to the forge. A request's pipeline jobs (checks on GitHub) on
   its Overview, grouped by stage, each retried on its own or run when manual, with its log
   inline; the unchanged lines around a diff's hunks, twenty at a time or all; editing and
   deleting my own posted comments; on my own requests, adding, removing and asking reviewers
   again, rebasing (updating the branch on GitHub), closing and reopening, and editing the title
   and description; and the next request's changes and threads loaded ahead.
+- **In this branch**: a command palette (⇧⌘P) built from `COMMANDS`, which also jumps to a
+  request by title or number and says why a command it hides can't run; N and P through open
+  threads (⇧N and ⇧P through all of them), V to mark a file viewed and go on to the next, R to
+  reply and C to comment, with the thread or file you're on marked; the Changes tab's file list
+  grouped by folder and folded to fit the first screen, built only where it's in sight; snoozing
+  a request until tomorrow morning or until it changes, and muting it, out of the list, the
+  counts and the banners; opening filled with the last queue and recently opened requests from
+  disk; and a polish pass (quiet text that reads, the request number kept whole in a narrow
+  sidebar, the other account's count with its forge's mark, a narrower reading column).
 
 Loose ends from these:
+
+- This branch's keys, the palette's focus hand-off, folder clicks and the open snoozed fold
+  were tested in logic but never driven through the window: headless renders hung on the GPU
+  partway. The disk cache hasn't been run against a forge, and nothing ran on macOS.
+- The clay accent and the red are close in dark mode, so an unread dot and a failed-pipeline
+  dot read alike. Settling it is a palette decision.
 
 - The site describes the tabs and finishing a review ahead of the release that ships them.
 - Resolving, pending reviews and submitting haven't been run against either forge. GitLab's
@@ -165,21 +180,17 @@ line ("Ines pushed 3 commits and asked again"), including reviews.
 - Mark the changed words within a changed line.
 - Expand the context around a hunk; a side-by-side mode for wide windows.
 - Find in the diff (⌘F filters the list today).
-- A keyboard flow: next and previous thread and unresolved thread, mark viewed, comment (J and
-  K step file by file in Changes today).
+- A comment on a whole file (C comments on the request today).
 - Image diffs.
 
 ### Queue
 
-- Snooze and mute.
 - Filter by project or label, group by repository, one list across both accounts.
 - Failed jobs by name, with links, behind the pipeline chip.
 - A setting for whether team review requests and mentions count as your turn.
 
 ### Platform
 
-- Keep the last queue and opened diffs on disk, so the app opens filled.
-- A command palette built from `COMMANDS`.
 - More than one account per forge (github.com and an Enterprise host, two GitLab hosts).
 
 ### Ask
