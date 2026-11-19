@@ -53,8 +53,9 @@ pub fn bell(s: &App, p: &Pal) -> El {
             .fill(p.accent)
             .center()
             .child(text(shown).font(ui(11.0, SEMIBOLD).features("'tnum' 1")).color(p.paper).single_line());
-        // A ring of the sidebar's colour keeps the count off the bell's outline.
-        b = b.child(el().key("count").pin(Some(14.0), Some(2.0), None, None).padding(1.5).radius(9.0).fill(p.chrome).inert().child(badge));
+        // On the bell's shoulder, not its middle; a ring of the sidebar's colour keeps the count
+        // off the outline.
+        b = b.child(el().key("count").pin(Some(16.0), Some(0.0), None, None).padding(1.5).radius(9.0).fill(p.chrome).inert().child(badge));
     }
     b.on_press_tx(toggle)
 }

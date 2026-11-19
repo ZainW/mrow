@@ -64,7 +64,7 @@ pub fn filters(store: &Store, p: &Pal) -> El {
         let on = store.mine_filter == Some(standing);
         let count = store.mine_count(standing);
         r = r.child(
-            chip(&format!("standing-{}", standing.word()), on, standing.label())
+            chip(&format!("standing-{}", standing.word()), on, &format!("{}: {count}", standing.label()))
                 .pl(7.0)
                 .pr(10.0)
                 .child(standing_mark(p, standing, 12.0, if on { p.elevated } else { p.chrome }))
@@ -175,7 +175,8 @@ fn item_row(p: &Pal, item: &MergeRequest, status: &Status, rail: Option<Rail>, p
     let mut meta = row()
         .gap(6.0)
         .center_y()
-        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate().shrink().min_w(0.0))
+        // Cut from the start, so the number that identifies the request stays.
+        .child(text(item.short_reference()).font(mono(12.0, 400.0)).color(p.tertiary).single_line().truncate_head())
         .child(el().grow(1.0).min_w(4.0));
     if let Some((at, of)) = place {
         meta = meta.child(

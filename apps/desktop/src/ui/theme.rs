@@ -1,5 +1,6 @@
 //! Mrow's colours, type and measurements: warm paper in light mode, neutral ink in dark mode,
-//! with one clay accent. The same values as the Swift app's `Palette` and `Theme`.
+//! with one clay accent. Started from the Swift app's `Palette` and `Theme`; tertiary text is
+//! lighter (dark) and darker (light) than there, to read at 12 points.
 
 use rune::Color;
 use rune::color::hex;
@@ -15,7 +16,7 @@ pub const CARD_RADIUS: f32 = 12.0;
 /// system draws its own title bar, so the header starts at the gutter.
 pub const TRAFFIC_LIGHTS_WIDTH: f32 = if cfg!(target_os = "macos") { 76.0 } else { 8.0 };
 /// The widest the merge request's text column gets.
-pub const READING_WIDTH: f32 = 780.0;
+pub const READING_WIDTH: f32 = 640.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Pal {
@@ -73,7 +74,7 @@ impl Pal {
             well: pick("#F5F3ED", "#161616"),
             text: pick("#1E1C19", "#ECECEC"),
             secondary: pick("#6B665E", "#A3A3A3"),
-            tertiary: pick("#9E998F", "#6E6E6E"),
+            tertiary: pick("#807A70", "#858585"),
             line: if dark { glow(0.08) } else { ink(0.1) },
             strong_line: if dark { glow(0.14) } else { ink(0.16) },
             hover: if dark { glow(0.05) } else { ink(0.05) },
