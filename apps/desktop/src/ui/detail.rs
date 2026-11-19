@@ -123,7 +123,8 @@ impl Jump {
     }
 }
 
-/// Where the reader is in a merge request's changes, from what the Changes tab shows, for J and K.
+/// Where the reader is in a merge request, from what its Changes and Conversation tabs show, for
+/// the keys that move through it: J and K by file, N and P by thread, V on the file they're on.
 #[derive(Clone, Debug, Default)]
 pub struct Spy {
     /// The file the first row on screen belongs to; none above the first file.
@@ -132,6 +133,82 @@ pub struct Spy {
     bottom: bool,
     /// The file the last jump went to, kept while the tab's end stops it reaching the top.
     aimed: Option<usize>,
+    /// The file a jump put the reader on, marked on its header until they scroll off it.
+    file: Option<Picked<usize>>,
+    /// Where the first row on screen sits, in the order N and P go: on Changes and on Conversation.
+    first: [(usize, usize); 2],
+    /// The thread N or P went to on Changes and on Conversation, marked while it's on screen.
+    thread: [Option<Picked<String>>; 2],
+}
+
+/// A file or thread the keyboard went to, and the row it's on. It stays picked until that row
+/// has shown and then scrolled away, so a jump still on its way there doesn't lose it.
+#[derive(Clone, Debug)]
+struct Picked<T> {
+    what: T,
+    row: Row,
+    shown: bool,
+}
+
+impl<T> Picked<T> {
+    fn new(what: T, row: Row) -> Self {
+        Picked { what, row, shown: false }
+    }
+
+    /// Notes whether its row is among those on screen; false once it has shown and gone.
+    fn stays(&mut self, on_screen: &[Row]) -> bool {
+        let here = on_screen.contains(&self.row);
+        self.shown |= here;
+        here || !self.shown
+    }
+}
+
+/// Which of a spy's pair a tab uses; the overview has none of its own.
+fn slot(tab: Tab) -> usize {
+    if tab == Tab::Changes { 0 } else { 1 }
+}
+
+/// Where N or P goes in `order`, each thread's place on a tab and its index, in the tab's order:
+/// the next or previous after the thread `on` (its own place), or with none picked, the first at
+/// or under `top`, the first row on screen, or the last above it. None past either end.
+fn thread_after(order: &[((usize, usize), usize)], on: Option<((usize, usize), usize)>, top: (usize, usize), forward: bool) -> Option<usize> {
+    let found = match (on, forward) {
+        (Some(at), true) => order.iter().find(|&&o| o > at),
+        (Some(at), false) => order.iter().rev().find(|&&o| o < at),
+        (None, true) => order.iter().find(|&&(k, _)| k >= top),
+        (None, false) => order.iter().rev().find(|&&(k, _)| k < top),
+    };
+    found.map(|&(_, t)| t)
+}
+
+/// The file V goes on to after `from`: the next one not viewed, then from the first.
+fn next_unviewed(viewed: &[bool], from: usize) -> Option<usize> {
+    (from + 1..viewed.len()).chain(0..from.min(viewed.len())).find(|&f| !viewed[f])
+}
+
+/// Where row `i` of the changes sits in the order of their lines, (file, line): a row between
+/// lines counts as the line after it.
+fn diff_place(rows: &[Row], i: usize) -> (usize, usize) {
+    for row in rows.iter().skip(i) {
+        match row {
+            Row::Line(f, l) => return (*f, *l),
+            Row::Gap(f, gap) => return (*f, gap.at),
+            Row::FileHeader(f) | Row::Notice(f, ..) | Row::Top(f) => return (*f, 0),
+            Row::Footer(f) => return (*f, usize::MAX),
+            Row::Shown(..) => {}
+            _ => return (0, 0),
+        }
+    }
+    (usize::MAX, 0)
+}
+
+/// Where row `i` of the conversation sits in the order of its threads.
+fn talk_place(rows: &[Row], i: usize) -> (usize, usize) {
+    match rows.get(i) {
+        Some(Row::Thread(t)) => (*t, 0),
+        Some(Row::Composer) => (usize::MAX, 0),
+        _ => (0, 0),
+    }
 }
 
 /// The file `by` files on from `from`, in a list of `files`, stopping at either end. None is the
@@ -312,10 +389,24 @@ fn tab_page(s: &App, page: &Rc<Page>, tab: Tab, (keys, rows, version): Rows, ope
     if tab != open {
         return view.h(0.0).inert().a11y_hidden().child(list).scroll(ScrollSpec { stick_bottom: false });
     }
-    if tab == Tab::Changes {
+    if tab != Tab::Overview {
         let seen = id.clone();
         list = list.on_visible_rows(move |s: &mut App, range: Range<usize>| {
             let spy = s.spies.entry(seen.clone()).or_default();
+            let on_screen = rows.get(range.clone()).unwrap_or_default();
+            // A mark that goes rebuilds its row; anything else here is bookkeeping.
+            let mut unmarked = false;
+            if let Some(picked) = &mut spy.thread[slot(tab)] {
+                if !picked.stays(on_screen) {
+                    spy.thread[slot(tab)] = None;
+                    unmarked = true;
+                }
+            }
+            if tab == Tab::Conversation {
+                spy.first[1] = talk_place(&rows, range.start);
+                return unmarked;
+            }
+            spy.first[0] = diff_place(&rows, range.start);
             spy.top = rows.get(range.start).and_then(Row::file);
             if let Some(aim) = spy.aimed {
                 let header = rows.partition_point(|r| r.file() < Some(aim));
@@ -323,7 +414,16 @@ fn tab_page(s: &App, page: &Rc<Page>, tab: Tab, (keys, rows, version): Rows, ope
                     spy.aimed = None;
                 }
             }
-            false
+            // The file stays marked while the reader is in it: its rows at the top, or its
+            // header in view.
+            if let Some(picked) = &mut spy.file {
+                let inside = spy.top == Some(picked.what);
+                if !picked.stays(on_screen) && !inside {
+                    spy.file = None;
+                    unmarked = true;
+                }
+            }
+            unmarked
         });
     }
     let mut view = view.grow(1.0).role("tabpanel").label(tab.title()).child(list).scroll(ScrollSpec { stick_bottom: false });
@@ -783,7 +883,9 @@ pub fn go(s: &mut App, tx: &mut Tx, jump: Jump) {
     match jump {
         Jump::Tab(_) => {}
         Jump::File(f) => {
-            s.spies.entry(id.clone()).or_default().aimed = f;
+            let spy = s.spies.entry(id.clone()).or_default();
+            spy.aimed = f;
+            spy.file = f.filter(|&f| f < files.len()).map(|f| Picked::new(f, Row::FileHeader(f)));
             match f.and_then(|f| files.get(f)) {
                 Some(file) => {
                     s.collapsed.remove(&format!("{id}|{}", file.id()));
@@ -796,6 +898,8 @@ pub fn go(s: &mut App, tx: &mut Tx, jump: Jump) {
             let threads = s.store.discussions.get(&id).and_then(Loadable::value).cloned().unwrap_or_default();
             let head = s.store.diff_refs.get(&id).map(|r| r.head_sha.as_str());
             let Some((f, l)) = threads.iter().find(|t| t.id == thread).and_then(|t| line_of(t, head, &files)) else { return };
+            // The reader is in the thread's file now: V marks that one.
+            s.spies.entry(id.clone()).or_default().file = Some(Picked::new(f, Row::Line(f, l)));
             let key = format!("{id}|{}", files[f].id());
             s.collapsed.remove(&key);
             if waits_for_click(&files[f]) {
@@ -832,6 +936,147 @@ pub fn step(s: &mut App, tx: &mut Tx, by: i64) -> bool {
     let from = s.spies.get(&id).and_then(|spy| spy.aimed.or(spy.top));
     go(s, tx, Jump::File(step_file(from, by, files)));
     true
+}
+
+/// N and P (`open`), ⇧N and ⇧P: the next or previous thread, open ones only or every one. On the
+/// Changes tab it's the threads on the diff's lines, in their order, each shown under its line;
+/// elsewhere the Conversation tab opens at the thread's card. It starts from the thread it last
+/// went to while that's on screen, or else from the first row on screen, and stops at the ends,
+/// saying so. False with nothing open.
+pub fn step_thread(s: &mut App, tx: &mut Tx, forward: bool, open: bool) -> bool {
+    let Some(id) = s.store.selected_id.clone() else { return false };
+    let tab = if s.tab(&id) == Tab::Changes { Tab::Changes } else { Tab::Conversation };
+    let (threads, places) = thread_places(s, &id, tab);
+    let spy = s.spies.get(&id).cloned().unwrap_or_default();
+    let on = spy.thread[slot(tab)].as_ref().and_then(|p| places.iter().find(|(_, t)| threads[*t].id == p.what)).copied();
+    let order: Vec<_> = places.iter().filter(|(_, t)| !open || is_open(&threads[*t])).copied().collect();
+    let kind = if open { "open threads" } else { "threads" };
+    let Some(t) = thread_after(&order, on, spy.first[slot(tab)], forward) else {
+        tx.instant();
+        let line = match (order.is_empty(), tab) {
+            (true, Tab::Changes) => format!("No {kind} on the changed lines"),
+            (true, _) => format!("No {kind}"),
+            (false, _) => format!("No {kind} further {}", if forward { "down" } else { "up" }),
+        };
+        s.store.show(&line);
+        return true;
+    };
+    let jump = pick(s, &id, tab, &threads[t].id, &places, t);
+    go(s, tx, jump);
+    true
+}
+
+/// Each thread's place on `tab` of request `id`, and its index, in the tab's order: (file, line)
+/// for those on the diff's lines in the changes, (index, 0) for every one in the conversation.
+fn thread_places(s: &App, id: &str, tab: Tab) -> (Rc<Vec<Discussion>>, Vec<((usize, usize), usize)>) {
+    let threads = s.store.discussions.get(id).and_then(Loadable::value).cloned().unwrap_or_default();
+    let places = if tab == Tab::Changes {
+        let files = s.store.diffs.get(id).and_then(Loadable::value).cloned().unwrap_or_default();
+        let head = s.store.diff_refs.get(id).map(|r| r.head_sha.as_str());
+        let placed = Placed::new(&threads, head, &files);
+        let mut places: Vec<_> = placed.at.iter().enumerate().filter_map(|(t, at)| at.map(|at| (at, t))).collect();
+        places.sort();
+        places
+    } else {
+        (0..threads.len()).map(|t| ((t, 0), t)).collect()
+    };
+    (threads, places)
+}
+
+/// Picks thread `t` (`thread` by id) on `tab` for the keys, and gives the jump that shows it.
+fn pick(s: &mut App, id: &str, tab: Tab, thread: &str, places: &[((usize, usize), usize)], t: usize) -> Jump {
+    let row = match places.iter().find(|(_, i)| *i == t) {
+        Some(((f, l), _)) if tab == Tab::Changes => Row::Line(*f, *l),
+        _ => Row::Thread(t),
+    };
+    s.spies.entry(id.to_string()).or_default().thread[slot(tab)] = Some(Picked::new(thread.to_string(), row));
+    if tab == Tab::Changes { Jump::Line(thread.to_string()) } else { Jump::Thread(thread.to_string()) }
+}
+
+/// A thread of the selected request picked on `tab` as N would pick it, and the jump to it, for
+/// the scenes. None when the tab doesn't show it.
+pub fn pick_thread(s: &mut App, tab: Tab, thread: &str) -> Option<Jump> {
+    let id = s.store.selected_id.clone()?;
+    let (threads, places) = thread_places(s, &id, tab);
+    let &(_, t) = places.iter().find(|(_, t)| threads[*t].id == thread)?;
+    Some(pick(s, &id, tab, thread, &places, t))
+}
+
+/// The thread N or P is on, on the tab that's open: its id.
+fn picked_thread(s: &App, id: &str) -> Option<String> {
+    let tab = s.tab(id);
+    if tab == Tab::Overview {
+        return None;
+    }
+    s.spies.get(id)?.thread[slot(tab)].as_ref().map(|p| p.what.clone())
+}
+
+/// V, on the Changes tab: marks the file the reader is on viewed, folding it, and goes on to the
+/// next file not viewed yet, as the checkbox on its header and then J would; on a file already
+/// viewed, unmarks and unfolds it and stays. Above the first file it goes to the first not
+/// viewed. False on another tab or with nothing open.
+pub fn toggle_viewed(s: &mut App, tx: &mut Tx) -> bool {
+    let Some(item) = s.store.selected().cloned() else { return false };
+    if s.tab(&item.id) != Tab::Changes {
+        return false;
+    }
+    let files = s.store.diffs.get(&item.id).and_then(Loadable::value).cloned().unwrap_or_default();
+    if files.is_empty() {
+        return true;
+    }
+    let spy = s.spies.get(&item.id).cloned().unwrap_or_default();
+    let Some(f) = spy.file.map(|p| p.what).or(spy.aimed).or(spy.top).map(|f| f.min(files.len() - 1)) else {
+        match first_unviewed(s, &item) {
+            Some(f) => go(s, tx, Jump::File(Some(f))),
+            None => s.store.show("You’ve viewed every file"),
+        }
+        return true;
+    };
+    let now = s.store.viewed(&files[f], &item) != Viewed::Yes;
+    set_viewed(s, &item, &files[f], now);
+    let viewed: Vec<bool> = files.iter().map(|file| s.store.viewed(file, &item) == Viewed::Yes).collect();
+    let next = if now { next_unviewed(&viewed, f) } else { Some(f) };
+    if next.is_none() {
+        s.store.show("You’ve viewed every file");
+    }
+    go(s, tx, Jump::File(Some(next.unwrap_or(f))));
+    true
+}
+
+/// Marks a file viewed, folding it, or not, unfolding it: the Viewed checkbox and V.
+fn set_viewed(s: &mut App, item: &MergeRequest, file: &FileDiff, now: bool) {
+    s.store.set_viewed(now, file, item);
+    let key = format!("{}|{}", item.id, file.id());
+    if now {
+        s.collapsed.insert(key);
+    } else {
+        s.collapsed.remove(&key);
+    }
+}
+
+/// R: a reply to the thread N or P is on, with the caret in it; with none picked, how to pick one.
+pub fn reply_to_picked(s: &mut App, tx: &mut Tx) -> bool {
+    let Some(item) = s.store.selected().cloned() else { return false };
+    let Some(thread) = picked_thread(s, &item.id) else {
+        s.store.show("Press N to pick a thread to reply to");
+        return true;
+    };
+    let threads = s.store.discussions.get(&item.id).and_then(Loadable::value).cloned().unwrap_or_default();
+    let Some(thread) = threads.iter().find(|t| t.id == thread).filter(|t| takes_replies(t)) else { return false };
+    tx.instant();
+    s.replying.insert(format!("{}|{}", item.id, thread.id));
+    tx.focus(draft_field_key(&DraftKey::Reply(item.id.clone(), thread.id.clone())), false);
+    true
+}
+
+/// C: the comment box at the end of the conversation, with the caret in it. False with nothing
+/// open.
+pub fn write_comment(s: &mut App, tx: &mut Tx) -> bool {
+    let open = s.store.selected_id.is_some();
+    if open {
+        go(s, tx, Jump::Composer);
+    }
+    open
 }
 
 /// The first file of `item` I haven't viewed, or have and it changed since.
@@ -902,7 +1147,9 @@ fn build_row(s: &App, page: &Page, tab: Tab, rows: &[Row], i: usize) -> El {
         }
         Row::Thread(t) => {
             let head = if page.placed.at[*t].is_some() { Head::Link } else { Head::Place };
-            el().w_full().pt(if i == 0 { 0.0 } else { 16.0 }).child(thread_card(s, p, k, item, &page.threads[*t], head))
+            let thread = &page.threads[*t];
+            let here = is_here(s, item, Tab::Conversation, thread);
+            el().w_full().pt(if i == 0 { 0.0 } else { 16.0 }).child(thread_card(s, p, k, item, thread, head, here))
         }
         Row::Composer => el().w_full().pt(if i == 0 { 0.0 } else { 24.0 }).child(composer(
             s,
@@ -1442,6 +1689,10 @@ fn file_header(s: &App, p: &Pal, page: &Page, f: usize) -> El {
     } else {
         box_.radius(10.0).border(1.0, p.strong_line)
     };
+    // The file J, K or V put the reader on wears the selected row's tint, as the queue's does.
+    if s.spies.get(&item.id).and_then(|spy| spy.file.as_ref()).is_some_and(|picked| picked.what == f) {
+        box_ = box_.fill(p.selected);
+    }
     el().w_full().pb(if open { 0.0 } else { 14.0 }).child(box_)
 }
 
@@ -1467,16 +1718,10 @@ fn viewed_toggle(p: &Pal, page: &Page, f: usize, state: Viewed) -> El {
                 .color(if state == Viewed::Changed { p.amber } else { p.secondary })
                 .single_line(),
         )
-        .help(if on { "Mark as not viewed" } else { "Mark as viewed and fold the file" })
+        .help(keys(if on { "Mark as not viewed  V" } else { "Mark as viewed and fold the file  V" }))
         .on_press(move |s: &mut App| {
             let now = s.store.viewed(&file, &item) != Viewed::Yes;
-            s.store.set_viewed(now, &file, &item);
-            let key = format!("{}|{}", item.id, file.id());
-            if now {
-                s.collapsed.insert(key);
-            } else {
-                s.collapsed.remove(&key);
-            }
+            set_viewed(s, &item, &file, now);
         });
     if on {
         b = b.fill(p.accent_soft);
@@ -1512,7 +1757,9 @@ fn line_row(s: &App, p: &Pal, k: &Kit, page: &Page, f: usize, l: usize) -> El {
     let comment = commentable.then(|| DraftKey::Line(item.id.clone(), file.id(), l));
     let mut c = col().w_full().fill(p.paper).border_sides([0.0, 1.0, 0.0, 1.0], p.strong_line).child(diff::line_view(p, line, styled, comment));
     for &thread in page.placed.on(f, l) {
-        c = c.child(el().w_full().px(14.0).py(8.0).fill(p.well).child(thread_card(s, p, k, item, &page.threads[thread], Head::Bare).max_w(760.0)));
+        let thread = &page.threads[thread];
+        let here = is_here(s, item, Tab::Changes, thread);
+        c = c.child(el().w_full().px(14.0).py(8.0).fill(p.well).child(thread_card(s, p, k, item, thread, Head::Bare, here).max_w(760.0)));
     }
     let key = DraftKey::Line(item.id.clone(), file.id(), l);
     if s.line_comment.as_ref() == Some(&key) {
@@ -1695,10 +1942,13 @@ enum Head {
     Link,
 }
 
-fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussion, shows: Head) -> El {
+/// A thread's card; `here`, the one N or P went to, is outlined as keyboard focus is, and its
+/// Reply names R.
+fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussion, shows: Head, here: bool) -> El {
     let notes: Vec<&Note> = thread.notes.iter().filter(|n| !n.system).collect();
     let resolved = resolved(thread) == Some(true);
-    let mut c = col().key(format!("thread-{}", thread.id)).w_full().radius(10.0).fill(p.paper).border(1.0, p.strong_line).clip_rounded(10.0);
+    let edge = if here { here_line(p) } else { p.strong_line };
+    let mut c = col().key(format!("thread-{}", thread.id)).w_full().radius(10.0).fill(p.paper).border(1.0, edge).clip_rounded(10.0);
     if shows != Head::Bare {
         if let Some(position) = notes.first().and_then(|n| n.position.as_ref()) {
             if let Some(path) = position.new_path.clone().or_else(|| position.old_path.clone()) {
@@ -1738,9 +1988,7 @@ fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussi
         }
         c = c.child(note_view(s, p, k, item, thread, note));
     }
-    // A thread of my pending comments alone has nothing to reply to or resolve yet.
-    let started = notes.iter().any(|n| !n.pending);
-    if started && (!thread.individual_note || notes.first().and_then(|n| n.position.as_ref()).is_some()) {
+    if takes_replies(thread) {
         c = c.child(rule(p));
         let key = DraftKey::Reply(item.id.clone(), thread.id.clone());
         if s.is_replying(item, thread) {
@@ -1759,11 +2007,12 @@ fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussi
                 .grow(1.0)
                 .hover(p.hover)
                 .child(icon(&I::UNDO, 11.0).color(p.secondary))
-                .child(text("Reply").font(ui(12.0, MEDIUM)).color(p.secondary))
-                .on_press_tx(move |s: &mut App, tx: &mut Tx| {
-                    s.replying.insert(open.clone());
-                    tx.focus(focus_key.clone(), false);
-                });
+                .child(text("Reply").font(ui(12.0, MEDIUM)).color(p.secondary));
+            let reply = if here { reply.child(text(keys("R")).font(mono(12.0, 400.0)).color(p.tertiary).single_line()) } else { reply };
+            let reply = reply.on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                s.replying.insert(open.clone());
+                tx.focus(focus_key.clone(), false);
+            });
             let mut foot = row().w_full().center_y().child(reply);
             if let Some(done) = self::resolved(thread).filter(|_| item.is_open()) {
                 if shows == Head::Bare && done {
@@ -1774,7 +2023,26 @@ fn thread_card(s: &App, p: &Pal, k: &Kit, item: &MergeRequest, thread: &Discussi
             c = c.child(foot);
         }
     }
-    if resolved { c.opacity(0.7) } else { c }
+    // A resolved thread recedes, unless it's the one the keys are on.
+    if resolved && !here { c.opacity(0.7) } else { c }
+}
+
+/// The outline of the thread the keys are on: the colour of rune-kit's focus ring in Mrow's
+/// palette, so it reads as where they act.
+fn here_line(p: &Pal) -> rune::Color {
+    p.accent.alpha(0.55)
+}
+
+/// Whether `thread` is the one N or P went to on `tab`.
+fn is_here(s: &App, item: &MergeRequest, tab: Tab, thread: &Discussion) -> bool {
+    s.spies.get(&item.id).and_then(|spy| spy.thread[slot(tab)].as_ref()).is_some_and(|p| p.what == thread.id)
+}
+
+/// A thread with something to reply to: a thread of my pending comments alone has nothing to reply
+/// to or resolve yet, and a plain comment off the diff takes none.
+fn takes_replies(thread: &Discussion) -> bool {
+    let notes: Vec<&Note> = thread.notes.iter().filter(|n| !n.system).collect();
+    notes.iter().any(|n| !n.pending) && (!thread.individual_note || notes.first().and_then(|n| n.position.as_ref()).is_some())
 }
 
 /// Resolves the thread, or reopens a resolved one. It reads so at once.
@@ -2071,6 +2339,71 @@ mod tests {
         assert_eq!(step_file(None, -1, 3), None);
         assert_eq!(step_file(None, 1, 0), None, "no files, nowhere to go");
         assert_eq!(step_file(Some(7), -1, 3), Some(1), "a file the diff no longer has counts as its last");
+    }
+
+    #[test]
+    fn threads_step_in_the_tabs_order_and_stop_at_the_ends() {
+        // Threads 3 and 1 on line 8 of the first file, 0 on line 2 of the second: by place, then
+        // by index on a shared line.
+        let order = [((0, 8), 1), ((0, 8), 3), ((1, 2), 0)];
+        assert_eq!(thread_after(&order, Some(((0, 8), 1)), (0, 0), true), Some(3), "the other thread on the same line comes next");
+        assert_eq!(thread_after(&order, Some(((0, 8), 3)), (0, 0), true), Some(0));
+        assert_eq!(thread_after(&order, Some(((1, 2), 0)), (0, 0), true), None, "N on the last thread stays there");
+        assert_eq!(thread_after(&order, Some(((0, 8), 3)), (0, 0), false), Some(1));
+        assert_eq!(thread_after(&order, Some(((0, 8), 1)), (0, 0), false), None, "P on the first thread stays there");
+        assert_eq!(thread_after(&[], None, (0, 0), true), None, "no threads, nowhere to go");
+    }
+
+    #[test]
+    fn with_no_thread_picked_n_and_p_start_from_the_screen() {
+        let order = [((0, 8), 1), ((1, 2), 0), ((2, 5), 2)];
+        assert_eq!(thread_after(&order, None, (0, 0), true), Some(1), "from the top of the tab, the first thread");
+        assert_eq!(thread_after(&order, None, (1, 2), true), Some(0), "a thread at the top of the screen is the next one");
+        assert_eq!(thread_after(&order, None, (1, 9), true), Some(2), "the first under the screen's top");
+        assert_eq!(thread_after(&order, None, (1, 9), false), Some(0), "the last above it");
+        assert_eq!(thread_after(&order, None, (0, 0), false), None);
+    }
+
+    #[test]
+    fn open_threads_step_on_from_a_thread_just_resolved() {
+        // The picked thread (index 1) was just resolved: it's out of the open threads but keeps
+        // its place, so N goes on past it rather than back to the top.
+        let open = [((0, 3), 0), ((2, 1), 2)];
+        assert_eq!(thread_after(&open, Some(((1, 4), 1)), (0, 0), true), Some(2));
+        assert_eq!(thread_after(&open, Some(((1, 4), 1)), (0, 0), false), Some(0));
+    }
+
+    #[test]
+    fn v_goes_on_to_the_next_file_not_viewed_then_from_the_first() {
+        assert_eq!(next_unviewed(&[true, true, false, false], 1), Some(2));
+        assert_eq!(next_unviewed(&[true, false, true, true], 2), Some(1), "past the last, it goes round to the first left");
+        assert_eq!(next_unviewed(&[false, true, true], 1), Some(0));
+        assert_eq!(next_unviewed(&[true, true, true], 1), None, "every file viewed");
+        assert_eq!(next_unviewed(&[true], 0), None);
+    }
+
+    #[test]
+    fn a_row_between_diff_lines_counts_as_the_line_after_it() {
+        let gap = Gap { at: 4, new_start: 1, old_start: 1, len: Some(3) };
+        let rows = [Row::FileList, Row::FileHeader(0), Row::Top(0), Row::Shown(0, 2, 2), Row::Gap(0, gap), Row::Line(0, 4), Row::Footer(0), Row::FileHeader(1)];
+        assert_eq!(diff_place(&rows, 0), (0, 0));
+        assert_eq!(diff_place(&rows, 1), (0, 0));
+        assert_eq!(diff_place(&rows, 3), (0, 4), "a line shown from a gap sits before the line after the gap");
+        assert_eq!(diff_place(&rows, 5), (0, 4));
+        assert_eq!(diff_place(&rows, 6), (0, usize::MAX), "a file's end comes after its last line");
+        assert_eq!(diff_place(&rows, 7), (1, 0));
+        let talk = [Row::Thread(0), Row::Thread(1), Row::Composer];
+        assert_eq!(talk_place(&talk, 1), (1, 0));
+        assert_eq!(talk_place(&talk, 2), (usize::MAX, 0), "under the last thread, P goes back to it");
+    }
+
+    #[test]
+    fn a_pick_stays_until_its_row_has_shown_and_gone() {
+        let mut picked = Picked::new("t1".to_string(), Row::Thread(2));
+        assert!(picked.stays(&[Row::Thread(0)]), "the jump hasn't landed yet");
+        assert!(picked.stays(&[Row::Thread(1), Row::Thread(2)]));
+        assert!(picked.stays(&[Row::Thread(2), Row::Composer]));
+        assert!(!picked.stays(&[Row::Composer]), "scrolled away from it");
     }
 
     #[test]
