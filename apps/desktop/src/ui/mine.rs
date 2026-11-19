@@ -83,7 +83,8 @@ pub fn filters(store: &Store, p: &Pal) -> El {
 pub fn rows(s: &App, p: &Pal) -> Option<El> {
     let store = &s.store;
     let lines = store.mine_lines();
-    if lines.is_empty() {
+    let folds = Rc::new(crate::ui::sidebar::fold_lines(store, lines.is_empty()));
+    if lines.is_empty() && folds.is_empty() {
         return None;
     }
     let key = |line: &MineLine| match line {
@@ -93,7 +94,7 @@ pub fn rows(s: &App, p: &Pal) -> Option<El> {
         MineLine::Folded { key, text, .. } => format!("fold-{key}-{text}"),
         MineLine::Whole { key, .. } => format!("whole-{key}"),
     };
-    let keys: Rc<Vec<String>> = Rc::new(lines.iter().map(key).collect());
+    let keys: Rc<Vec<String>> = Rc::new(lines.iter().map(key).chain(folds.iter().map(|f| f.key().to_string())).collect());
     let flags: Vec<(bool, bool)> = lines
         .iter()
         .map(|l| match l {
@@ -106,15 +107,18 @@ pub fn rows(s: &App, p: &Pal) -> Option<El> {
     let version: Vec<&str> = keys.iter().map(String::as_str).collect();
     let list_keys = keys.clone();
     Some(col().key("rows").w_full().pb(8.0).growth(GrowthSpec::default()).virtual_rows_version(&version).virtual_rows(
-        lines.len(),
+        keys.len(),
         72.0,
         move |_: &App, i| std::borrow::Cow::Owned(list_keys[i].clone()),
-        move |_: &App, i| match &lines[i] {
-            MineLine::Header(t) => crate::ui::sidebar::section_header(&pal, t),
-            MineLine::Item { item, status, rail, place } => item_row(&pal, item, status, *rail, *place, flags[i].0, flags[i].1),
-            MineLine::StackHead { key, name, count, open, merging } => stack_head(&pal, key, name, *count, *open, *merging),
-            MineLine::Folded { key, text, rail } => folded(&pal, key, text, *rail),
-            MineLine::Whole { key, name, text } => whole(&pal, key, name, text),
+        move |_: &App, i| match lines.get(i) {
+            None => crate::ui::sidebar::fold_row(&pal, &folds[i - lines.len()]),
+            Some(line) => match line {
+                MineLine::Header(t) => crate::ui::sidebar::section_header(&pal, t),
+                MineLine::Item { item, status, rail, place } => item_row(&pal, item, status, *rail, *place, flags[i].0, flags[i].1),
+                MineLine::StackHead { key, name, count, open, merging } => stack_head(&pal, key, name, *count, *open, *merging),
+                MineLine::Folded { key, text, rail } => folded(&pal, key, text, *rail),
+                MineLine::Whole { key, name, text } => whole(&pal, key, name, text),
+            },
         },
     ))
 }
@@ -234,7 +238,7 @@ fn toggle(key: &str) -> impl Fn(&mut App, &mut Tx) + 'static {
     }
 }
 
-fn chevron(p: &Pal, open: bool) -> El {
+pub fn chevron(p: &Pal, open: bool) -> El {
     icon(&I::CHEVRON_RIGHT, 10.0).key("chevron").color(p.tertiary).group_color(p.text).rotate(if open { std::f32::consts::FRAC_PI_2 } else { 0.0 })
 }
 

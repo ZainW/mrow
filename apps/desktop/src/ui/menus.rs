@@ -4,7 +4,9 @@ use rune::{PointerPress, PopupAnchor, PopupItem, PopupMenu, Tx};
 
 use crate::app::App;
 use crate::data::forge::Forge;
+use crate::data::models::MergeRequest;
 use crate::data::prefs;
+use crate::data::snooze::{self, Hold};
 use crate::ui::actions;
 
 pub fn accounts(s: &mut App, tx: &mut Tx) {
@@ -60,6 +62,61 @@ fn run_copy(s: &mut App, tx: &mut Tx, id: &str, picked: &str) -> bool {
     true
 }
 
+/// Snoozing, for the row and the bar's More menus: until tomorrow (Monday, from Friday on) or
+/// until it changes; Unsnooze on one that's snoozed. Nothing on a request that can't be.
+pub fn snooze_items(s: &App, menu: PopupMenu, item: &MergeRequest) -> PopupMenu {
+    match s.store.hold_of(&item.id).map(|h| h.hold) {
+        Some(Hold::Mute) => menu,
+        Some(_) => menu.item(PopupItem::new("unsnooze", "Unsnooze")),
+        None if s.store.can_snooze(item) => {
+            let morning = snooze::morning_word(&chrono::Local::now());
+            menu.item(PopupItem::new("snooze-morning", format!("Snooze Until {morning}"))).item(PopupItem::new("snooze-change", "Snooze Until It Changes"))
+        }
+        None => menu,
+    }
+}
+
+/// Mute or Unmute, kept apart from the snooze items: it's the stronger, rarer one.
+pub fn mute_item(s: &App, menu: PopupMenu, item: &MergeRequest) -> PopupMenu {
+    match s.store.hold_of(&item.id).map(|h| h.hold) {
+        Some(Hold::Mute) => menu.item(PopupItem::new("unmute", "Unmute")),
+        _ if s.store.can_snooze(item) => menu.item(PopupItem::new("mute", "Mute")),
+        _ => menu,
+    }
+}
+
+/// Whether a request has any of the items above, snoozing's or muting's.
+pub fn snoozes(s: &App, item: &MergeRequest) -> bool {
+    s.store.can_snooze(item) || s.store.is_held(item)
+}
+
+/// Whether `snooze_items` adds any: a muted request has only Unmute.
+pub fn snooze_shown(s: &App, item: &MergeRequest) -> bool {
+    s.store.hold_of(&item.id).map_or(s.store.can_snooze(item), |h| !h.hold.muted())
+}
+
+/// Runs a pick from `snooze_items` or `mute_item` on the request `id`. False for other picks.
+pub fn run_snooze(s: &mut App, tx: &mut Tx, id: &str, picked: &str) -> bool {
+    let hold = match picked {
+        "snooze-morning" => Hold::Time(snooze::morning_after(&chrono::Local::now())),
+        "snooze-change" => Hold::Change,
+        "mute" => Hold::Mute,
+        "unsnooze" | "unmute" => {
+            tx.instant();
+            s.store.unsnooze(id);
+            return true;
+        }
+        _ => return false,
+    };
+    // The row leaves the list at once, and the selection moves on with it.
+    tx.instant();
+    s.store.snooze(id, hold);
+    if let Some(next) = &s.store.selected_id {
+        tx.scroll_into_view(format!("rows/{next}"));
+    }
+    true
+}
+
 pub fn row(s: &mut App, id: &str, at: PointerPress, tx: &mut Tx) {
     let Some(item) = s.store.item(id) else { return };
     let mut menu = PopupMenu::new();
@@ -69,14 +126,20 @@ pub fn row(s: &mut App, id: &str, at: PointerPress, tx: &mut Tx) {
         menu.item(PopupItem::new("open-tab", "Open in New Tab"))
     };
     menu = menu.item(PopupItem::new("open", format!("Open in {}", item.kind().name()))).separator();
+    if snooze_shown(s, item) {
+        menu = snooze_items(s, menu, item).separator();
+    }
     let only = s.store.author_filter.as_deref() == Some(item.author.username.as_str());
     menu = menu.item(PopupItem::new("author", if only { "Show Everyone's".to_string() } else { format!("Show Only from {}", item.author.name) })).separator();
     menu = copy_items(menu);
+    if snoozes(s, item) {
+        menu = mute_item(s, menu.separator(), item);
+    }
     menu = crate::ui::manage::row_menu(s, menu, item);
     let id = id.to_string();
     tx.popup_menu(menu, PopupAnchor::Point(at.x, at.y), move |s: &mut App, picked, tx| {
         let Some(picked) = picked else { return };
-        if run_copy(s, tx, &id, picked) || crate::ui::manage::run_pick(s, tx, &id, picked) {
+        if run_copy(s, tx, &id, picked) || run_snooze(s, tx, &id, picked) || crate::ui::manage::run_pick(s, tx, &id, picked) {
             return;
         }
         let Some(item) = s.store.item(&id).cloned() else { return };

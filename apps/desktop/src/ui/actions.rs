@@ -215,6 +215,47 @@ pub fn release_notes(s: &mut App, tx: &mut Tx) {
     let _ = tx.open_url(&url);
 }
 
+/// Holds the selected request out of its list, as the row menu's items do.
+fn hold_selected(s: &mut App, tx: &mut Tx, picked: &str) {
+    let Some(item) = s.store.selected().cloned() else { return };
+    let held = s.store.hold_of(&item.id).map(|h| h.hold);
+    let fits = match picked {
+        "unsnooze" => held.is_some_and(|h| !h.muted()),
+        "unmute" => held.is_some_and(|h| h.muted()),
+        // A snooze can be moved or made a mute; a mute only ends with Unmute.
+        _ => !held.is_some_and(|h| h.muted()) && s.store.can_snooze(&item),
+    };
+    if fits {
+        crate::ui::menus::run_snooze(s, tx, &item.id, picked);
+    } else if picked == "unsnooze" || picked == "unmute" {
+        s.store.show(if picked == "unmute" { "It isn't muted." } else { "It isn't snoozed." });
+    } else if held.is_some_and(|h| h.muted()) {
+        s.store.show("It's muted. Unmute it first.");
+    } else {
+        s.store.show("Only reviews waiting on you and your own open requests can be snoozed.");
+    }
+}
+
+pub fn snooze_until_tomorrow(s: &mut App, tx: &mut Tx) {
+    hold_selected(s, tx, "snooze-morning");
+}
+
+pub fn snooze_until_it_changes(s: &mut App, tx: &mut Tx) {
+    hold_selected(s, tx, "snooze-change");
+}
+
+pub fn unsnooze(s: &mut App, tx: &mut Tx) {
+    hold_selected(s, tx, "unsnooze");
+}
+
+pub fn mute(s: &mut App, tx: &mut Tx) {
+    hold_selected(s, tx, "mute");
+}
+
+pub fn unmute(s: &mut App, tx: &mut Tx) {
+    hold_selected(s, tx, "unmute");
+}
+
 pub fn toggle_drafts(_: &mut App, _: &mut Tx) {
     prefs::update(|p| p.show_drafts = !p.show_drafts);
 }
@@ -293,6 +334,13 @@ const COMMANDS: &[Command] = &[
     cmd(R, "update-branch", "Update Branch", None, crate::ui::manage::update_branch),
     cmd(R, "close-request", "Close Without Merging…", None, crate::ui::manage::close),
     cmd(R, "reopen", "Reopen", None, crate::ui::manage::reopen),
+    sep("Review"),
+    // Snoozing and muting. Mute has no key: it's the stronger, rarer one.
+    cmd(R, "snooze-morning", "Snooze Until Tomorrow", Some("cmd+shift+s"), snooze_until_tomorrow),
+    cmd(R, "snooze-change", "Snooze Until It Changes", None, snooze_until_it_changes),
+    cmd(R, "unsnooze", "Unsnooze", None, unsnooze),
+    cmd(R, "mute", "Mute", None, mute),
+    cmd(R, "unmute", "Unmute", None, unmute),
     sep("Review"),
     cmd(R, "mark-read", "Mark All as Read", None, mark_all_read),
     cmd(W, "next-tab", "Show Next Tab", Some("cmd+shift+bracketright"), next_tab),

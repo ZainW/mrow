@@ -21,6 +21,7 @@ use app::App;
 use data::ask;
 use data::forge::Forge;
 use data::prefs;
+use data::snooze::Hold;
 use data::store::{QueueMode, Viewed};
 use ui::detail::{Jump, Tab};
 
@@ -374,6 +375,30 @@ fn scene_mine(s: &mut App) {
     s.store.set_mode(QueueMode::Mine);
 }
 
+/// To review with three more reviews, two snoozed and one muted into the fold at the end.
+fn scene_snoozed_folded(s: &mut App) {
+    fixture(s);
+    let more = fixtures::more_reviews();
+    if let Some(a) = s.store.accounts.get_mut(&Forge::Gitlab) {
+        a.open.extend(more.iter().cloned());
+    }
+    s.store.holds = fixtures::holds(&more, &[("97", fixtures::tomorrow()), ("312", Hold::Change), ("58", Hold::Mute)], false);
+}
+
+/// The same with the fold open: when each comes back, and the way to bring it back now.
+fn scene_snoozed(s: &mut App) {
+    scene_snoozed_folded(s);
+    s.store.snoozed_open = true;
+}
+
+/// Mine with two snoozed and a spike muted, the fold open.
+fn scene_mine_snoozed(s: &mut App) {
+    scene_mine(s);
+    let mine = s.store.mine().to_vec();
+    s.store.holds = fixtures::holds(&mine, &[("90", fixtures::tomorrow()), ("307", Hold::Change), ("233", Hold::Mute)], true);
+    s.store.snoozed_open = true;
+}
+
 /// A part in the middle of a stack: held until the one below it merges.
 fn scene_mine_stack(s: &mut App) {
     scene_mine(s);
@@ -568,6 +593,9 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("done", scene_done),
     ("mine", scene_mine),
     ("mine-stack", scene_mine_stack),
+    ("snoozed", scene_snoozed),
+    ("snoozed-folded", scene_snoozed_folded),
+    ("mine-snoozed", scene_mine_snoozed),
     ("mine-open", scene_mine_open),
     ("mine-confirm", scene_mine_confirm),
     ("mine-merging", scene_mine_merging),

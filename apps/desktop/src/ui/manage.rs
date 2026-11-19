@@ -138,7 +138,7 @@ pub fn run_pick(s: &mut App, tx: &mut Tx, id: &str, picked: &str) -> bool {
     true
 }
 
-/// The bar's More button on a request of mine, which opens the menu above.
+/// The bar's More button: snoozing on a review or one of mine, and on mine the menu above.
 pub fn more_button(s: &App, p: &Pal, item: &MergeRequest) -> El {
     let title = format!("More for this {}", item.kind().noun());
     let id = item.id.clone();
@@ -146,9 +146,20 @@ pub fn more_button(s: &App, p: &Pal, item: &MergeRequest) -> El {
     ChromeButton::new(MORE_BUTTON, title).icon(&I::ELLIPSIS, 14.0).build(p).on_press_tx(move |s: &mut App, tx: &mut Tx| {
         let Some(item) = s.store.item(&id).cloned() else { return };
         let id = id.clone();
-        tx.popup_menu(menu_items(PopupMenu::new(), &item, idle), MORE_BUTTON, move |s: &mut App, picked, tx| {
+        let shown = crate::ui::menus::snooze_shown(s, &item);
+        let mut menu = crate::ui::menus::snooze_items(s, PopupMenu::new(), &item);
+        let mine = s.store.is_mine(&item);
+        if mine {
+            menu = menu_items(if shown { menu.separator() } else { menu }, &item, idle);
+        }
+        if crate::ui::menus::snoozes(s, &item) {
+            menu = crate::ui::menus::mute_item(s, if shown || mine { menu.separator() } else { menu }, &item);
+        }
+        tx.popup_menu(menu, MORE_BUTTON, move |s: &mut App, picked, tx| {
             if let Some(picked) = picked {
-                run_pick(s, tx, &id, picked);
+                if !crate::ui::menus::run_snooze(s, tx, &id, picked) {
+                    run_pick(s, tx, &id, picked);
+                }
             }
         });
     })

@@ -1572,3 +1572,297 @@ mod shown_on_success {
         assert!(!now.title.to_lowercase().starts_with("draft"), "{}", now.title);
     }
 }
+
+mod snooze {
+    use std::collections::{BTreeMap, HashSet};
+
+    use chrono::{Duration, FixedOffset, TimeZone, Utc};
+
+    use crate::data::forge::Forge;
+    use crate::data::inbox::{Event, Kind, notices};
+    use crate::data::models::*;
+    use crate::data::snooze::{Hold, Snooze, Wake, back_label, fold_label, morning_after, morning_word, prune, quiet, wake, wakes};
+
+    fn request(iid: &str) -> MergeRequest {
+        let asked = Utc::now() - Duration::hours(5);
+        MergeRequest {
+            id: format!("id-{iid}"),
+            iid: iid.into(),
+            title: format!("Request {iid}"),
+            web_url: String::new(),
+            project_path: "group/project".into(),
+            project_name: "project".into(),
+            author: Person::new("maya", "Maya Lind"),
+            created_at: asked,
+            updated_at: asked,
+            merged_at: None,
+            closed_at: None,
+            state: "opened".into(),
+            draft: false,
+            source_branch: format!("branch-{iid}"),
+            target_branch: "main".into(),
+            merge_status: Some("not_approved".into()),
+            comment_count: 2,
+            description: String::new(),
+            reviewers: vec![Reviewer { person: Person::new("sam", "Sam"), state: ReviewState::Unreviewed, approved: false }],
+            approved_by: vec![],
+            additions: 10,
+            deletions: 4,
+            file_count: 2,
+            pipeline: Some(PipelineStatus::Running),
+            labels: vec![],
+            requested_at: asked,
+            first_requested_at: asked,
+            requested_by: None,
+            requested_at_is_guess: false,
+            my_state: ReviewState::Unreviewed,
+            forge: Forge::Gitlab,
+            unresolved_threads: Some(1),
+            failed_job: None,
+            auto_merge: false,
+            merge_method: None,
+        }
+    }
+
+    fn held(item: &MergeRequest, hold: Hold, mine: bool) -> Snooze {
+        Snooze::new(item, hold, mine, Utc::now())
+    }
+
+    /// A moment in a fixed zone an hour east of UTC, on a known week: Nov 16, 2026 is a Monday.
+    fn at(day: u32, hour: u32) -> chrono::DateTime<FixedOffset> {
+        FixedOffset::east_opt(3600).unwrap().with_ymd_and_hms(2026, 11, day, hour, 30, 0).unwrap()
+    }
+
+    #[test]
+    fn tomorrow_is_the_next_working_morning() {
+        let morning =
+            |day: u32, hour: u32| morning_after(&at(day, hour)).with_timezone(&FixedOffset::east_opt(3600).unwrap()).format("%a %d %H:%M").to_string();
+        assert_eq!(morning(18, 15), "Thu 19 09:00", "Wednesday afternoon wakes Thursday at 9");
+        assert_eq!(morning(20, 15), "Mon 23 09:00", "Friday waits for Monday");
+        assert_eq!(morning(21, 11), "Mon 23 09:00", "so does Saturday");
+        assert_eq!(morning(22, 11), "Mon 23 09:00", "and Sunday");
+        assert_eq!(morning(17, 2), "Tue 17 09:00", "before 5:00 it's still last night");
+        assert_eq!(morning(20, 2), "Fri 20 09:00", "a Friday night owl is woken on Friday");
+        assert_eq!((morning_word(&at(18, 15)), morning_word(&at(20, 15))), ("Tomorrow", "Monday"));
+    }
+
+    #[test]
+    fn the_fold_says_when_each_comes_back() {
+        let now = at(18, 15);
+        let back = |day: u32, hour: u32| back_label(Hold::Time(at(day, hour).to_utc()), &now);
+        assert_eq!(back(19, 9), "Back tomorrow at 9:30");
+        assert_eq!(back(23, 9), "Back Monday at 9:30");
+        assert_eq!(back(18, 20), "Back at 20:30");
+        assert_eq!(back(30, 9), "Back on Nov 30 at 9:30");
+        assert_eq!(back_label(Hold::Change, &now), "Back when it changes");
+        assert_eq!(back_label(Hold::Mute, &now), "Muted");
+        assert_eq!((fold_label(3, 0), fold_label(2, 1), fold_label(0, 1)), ("3 snoozed".into(), "2 snoozed, 1 muted".into(), "1 muted".into()));
+    }
+
+    #[test]
+    fn a_snooze_until_tomorrow_wakes_on_the_clock() {
+        let item = request("1");
+        let soon = Utc::now() + Duration::hours(12);
+        let s = held(&item, Hold::Time(soon), false);
+        assert_eq!(wakes(&s, Some(&item), Utc::now()), None);
+        let mut commented = item.clone();
+        commented.comment_count += 3;
+        assert_eq!(wakes(&s, Some(&commented), Utc::now()), None, "comments wait for the morning");
+        assert_eq!(wakes(&s, None, soon), Some(Wake::Time), "it comes back even off the list");
+
+        let mut holds = BTreeMap::from([(item.id.clone(), s)]);
+        assert!(wake(&mut holds, |_| Some(&item), Utc::now()).is_empty());
+        assert_eq!(wake(&mut holds, |_| Some(&item), soon + Duration::seconds(1)), [(item.id.clone(), Wake::Time)]);
+        assert!(holds.is_empty());
+    }
+
+    #[test]
+    fn being_asked_again_ends_a_snooze_until_tomorrow() {
+        let item = request("1");
+        let s = held(&item, Hold::Time(Utc::now() + Duration::hours(12)), false);
+        let mut again = item.clone();
+        again.requested_at = Utc::now();
+        assert_eq!(wakes(&s, Some(&again), Utc::now()), Some(Wake::Changed));
+        let mut guessed = again.clone();
+        guessed.requested_at_is_guess = true;
+        assert_eq!(wakes(&s, Some(&guessed), Utc::now()), None, "a guessed time is no new ask");
+    }
+
+    #[test]
+    fn a_review_wakes_on_a_push_a_comment_or_a_new_ask() {
+        let item = request("1");
+        let s = held(&item, Hold::Change, false);
+        let woke = |change: fn(&mut MergeRequest)| {
+            let mut m = item.clone();
+            change(&mut m);
+            wakes(&s, Some(&m), Utc::now())
+        };
+        assert_eq!(woke(|_| {}), None);
+        assert_eq!(woke(|m| m.pipeline = Some(PipelineStatus::Success)), None, "a pipeline finishing isn't a change to look at");
+        assert_eq!(woke(|m| m.updated_at = Utc::now()), None, "nor a bare timestamp");
+        assert_eq!(woke(|m| m.comment_count += 1), Some(Wake::Changed), "a new comment");
+        assert_eq!(woke(|m| m.additions += 6), Some(Wake::Changed), "a new push");
+        assert_eq!(woke(|m| m.requested_at = Utc::now()), Some(Wake::Changed), "asked again");
+    }
+
+    #[test]
+    fn one_of_mine_wakes_on_reviewers_not_on_my_own_push() {
+        let mut item = request("2");
+        item.my_state = ReviewState::Unknown;
+        let s = held(&item, Hold::Change, true);
+        let woke = |change: fn(&mut MergeRequest)| {
+            let mut m = item.clone();
+            change(&mut m);
+            wakes(&s, Some(&m), Utc::now())
+        };
+        assert_eq!(woke(|m| m.additions += 40), None, "my own push");
+        assert_eq!(woke(|m| m.reviewers[0].state = ReviewState::Unapproved), None, "an approval my push reset");
+        assert_eq!(
+            woke(|m| {
+                m.reviewers[0].state = ReviewState::Approved;
+                m.approved_by.push("sam".into());
+            }),
+            Some(Wake::Changed)
+        );
+        assert_eq!(woke(|m| m.reviewers[0].state = ReviewState::RequestedChanges), Some(Wake::Changed));
+        assert_eq!(woke(|m| m.pipeline = Some(PipelineStatus::Failed)), Some(Wake::Changed));
+        assert_eq!(woke(|m| m.unresolved_threads = Some(2)), Some(Wake::Changed));
+        assert_eq!(woke(|m| m.unresolved_threads = Some(0)), None, "a thread resolved is no news");
+    }
+
+    #[test]
+    fn a_mute_holds_through_everything() {
+        let item = request("1");
+        let s = held(&item, Hold::Mute, false);
+        let mut busy = item.clone();
+        busy.requested_at = Utc::now();
+        busy.comment_count += 9;
+        busy.additions += 100;
+        assert_eq!(wakes(&s, Some(&busy), Utc::now() + Duration::days(30)), None, "asked again, pushed to and talked about");
+    }
+
+    #[test]
+    fn holds_go_once_their_request_has() {
+        let (a, b, c) = (request("1"), request("2"), request("3"));
+        let mut other = request("4");
+        other.forge = Forge::Github;
+        let mut holds: BTreeMap<String, Snooze> = [&a, &b, &c, &other].iter().map(|m| (m.id.clone(), held(m, Hold::Mute, false))).collect();
+        let now = Utc::now();
+        let open: HashSet<&str> = HashSet::from([a.id.as_str()]);
+        let ended: HashSet<&str> = HashSet::from([b.id.as_str()]);
+        prune(&mut holds, Forge::Gitlab, &open, &ended, now);
+        assert!(holds.contains_key(&a.id) && !holds.contains_key(&b.id), "a merged or closed one goes at once");
+        assert_eq!(holds[&c.id].missing_since, Some(now), "a missing one is given a while");
+        assert!(holds.contains_key(&other.id) && holds[&other.id].missing_since.is_none(), "the other account is left alone");
+
+        // Back in a list, it keeps its hold; gone for two days, it's let go.
+        prune(&mut holds, Forge::Gitlab, &HashSet::from([a.id.as_str(), c.id.as_str()]), &HashSet::new(), now + Duration::hours(1));
+        assert_eq!(holds[&c.id].missing_since, None);
+        prune(&mut holds, Forge::Gitlab, &open, &HashSet::new(), now + Duration::hours(2));
+        prune(&mut holds, Forge::Gitlab, &open, &HashSet::new(), now + Duration::days(2));
+        assert!(holds.contains_key(&c.id), "two days from when it went missing, not from the first look");
+        prune(&mut holds, Forge::Gitlab, &open, &HashSet::new(), now + Duration::days(2) + Duration::hours(2));
+        assert!(!holds.contains_key(&c.id));
+    }
+
+    fn event(request: &MergeRequest, kind: Kind) -> Event {
+        Event {
+            id: format!("{}|{kind:?}", request.id),
+            request: request.id.clone(),
+            forge: request.forge,
+            kind,
+            title: format!("{kind:?}"),
+            subject: request.title.clone(),
+            reference: request.short_reference(),
+            url: String::new(),
+            at: Utc::now(),
+            done: false,
+        }
+    }
+
+    #[test]
+    fn held_requests_neither_ring_nor_light_the_bell() {
+        let (snoozed, muted, free) = (request("1"), request("2"), request("3"));
+        let holds = BTreeMap::from([(snoozed.id.clone(), held(&snoozed, Hold::Change, false)), (muted.id.clone(), held(&muted, Hold::Mute, false))]);
+        let mut found = vec![event(&snoozed, Kind::AskedAgain), event(&muted, Kind::AskedAgain), event(&free, Kind::ReviewAsked)];
+        quiet(&mut found, &holds);
+        assert_eq!(found.iter().map(|e| (e.request.as_str(), e.done)).collect::<Vec<_>>(), [("id-1", true), ("id-3", false)]);
+        let loud: Vec<Event> = found.into_iter().filter(|e| !e.done).collect();
+        let banners = notices(&loud, &BTreeMap::new(), true);
+        assert_eq!(banners.iter().map(|n| n.request.as_str()).collect::<Vec<_>>(), ["id-3"]);
+    }
+
+    #[test]
+    fn a_change_that_ends_a_snooze_is_still_told() {
+        let item = request("1");
+        let mut holds = BTreeMap::from([(item.id.clone(), held(&item, Hold::Change, false))]);
+        let mut again = item.clone();
+        again.requested_at = Utc::now();
+        // The store wakes before the inbox looks, so the ask it found is news as usual.
+        assert_eq!(wake(&mut holds, |_| Some(&again), Utc::now()).len(), 1);
+        let mut found = vec![event(&again, Kind::AskedAgain)];
+        quiet(&mut found, &holds);
+        assert!(found.len() == 1 && !found[0].done);
+    }
+}
+
+mod snooze_store {
+    use crate::data::forge::Forge;
+    use crate::data::prefs;
+    use crate::data::snooze::Hold;
+    use crate::data::store::{QueueMode, Store};
+
+    fn store(mode: QueueMode) -> Store {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        store.forge = Forge::Gitlab;
+        store.mode = mode;
+        store
+    }
+
+    #[test]
+    fn snoozing_takes_a_review_out_of_the_list_and_the_count() {
+        let mut store = store(QueueMode::ToReview);
+        let list: Vec<String> = store.visible_items().into_iter().map(|m| m.id).collect();
+        assert!(list.len() >= 2);
+        let (count, waiting) = (store.count(QueueMode::ToReview), store.waiting_count(Forge::Gitlab));
+        store.select(Some(list[0].clone()));
+        store.snooze(&list[0], Hold::Change);
+        assert_eq!(store.selected_id.as_deref(), Some(list[1].as_str()), "the selection moves to the next one");
+        assert!(!store.visible_items().iter().any(|m| m.id == list[0]));
+        assert_eq!((store.count(QueueMode::ToReview), store.waiting_count(Forge::Gitlab)), (count - 1, waiting - 1));
+        assert_eq!(store.held_items().len(), 1, "it waits in the fold");
+
+        // At the end of the list, the selection moves back instead.
+        let last = store.visible_items().last().unwrap().id.clone();
+        let before = store.visible_items().iter().rev().nth(1).unwrap().id.clone();
+        store.select(Some(last.clone()));
+        store.snooze(&last, Hold::Mute);
+        assert_eq!(store.selected_id.as_deref(), Some(before.as_str()));
+
+        // Open, the fold's rows are in reach of the keys.
+        store.snoozed_open = true;
+        assert_eq!(store.visible_items().iter().rev().take(2).count(), 2);
+        assert!(store.visible_items().iter().any(|m| m.id == list[0]));
+
+        store.unsnooze(&list[0]);
+        store.unsnooze(&last);
+        assert_eq!(store.count(QueueMode::ToReview), count);
+        assert!(store.held_items().is_empty() && !store.snoozed_open, "the empty fold closes");
+    }
+
+    #[test]
+    fn one_of_mine_snoozes_out_of_mine() {
+        let mut store = store(QueueMode::Mine);
+        let first = store.visible_items()[0].clone();
+        let shown = store.visible_items().len();
+        store.snooze(&first.id, Hold::Change);
+        assert_eq!(store.visible_items().len(), shown - 1);
+        assert_eq!(store.held_items().iter().map(|(m, h)| (m.id.clone(), h.mine)).collect::<Vec<_>>(), [(first.id.clone(), true)]);
+        // A review I've already given isn't waiting on me, so there's nothing to snooze.
+        let reviewed = store.open().iter().find(|m| !m.my_state.needs_review()).unwrap().clone();
+        assert!(!store.can_snooze(&reviewed));
+    }
+}
