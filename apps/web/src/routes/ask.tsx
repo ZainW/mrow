@@ -18,13 +18,13 @@ export const Route = createFileRoute('/ask')({
 
 const LIMITS: [string, string][] = [
   [
-    'Cursor, Claude and opencode',
+    'Cursor and opencode',
     'Mrow talks to them over the Agent Client Protocol and offers them no file or terminal access of its own. When one asks permission for a tool, Mrow allows reading and searching, declines the rest, and shows each one it declines in the chat.',
   ],
   ['Cursor', 'Chats run in Cursor’s ask mode, which keeps it from running commands its own settings would let it run without asking.'],
   [
     'Claude',
-    'Claude Code starts with its editing, command, web and subagent tools taken away, and without your own settings and MCP servers, whose rules and tools could get around that.',
+    'Mrow runs Claude Code itself, with only its read and search tools, and without your own settings and MCP servers, whose rules and tools could get around that. It declines reads outside your clone and shows each one in the chat.',
   ],
   [
     'opencode',
@@ -35,7 +35,7 @@ const LIMITS: [string, string][] = [
 
 const NEEDS: [string, ReactNode][] = [
   ['Cursor', <>Cursor’s agent CLI, signed in with <code>agent login</code></>],
-  ['Claude', <>Claude Code signed in, and its ACP adapter (Mrow runs it with <code>npx</code> if it isn’t installed)</>],
+  ['Claude', <>Claude Code, signed in with <code>/login</code> in <code>claude</code></>],
   ['opencode', <>opencode, signed in with <code>opencode auth login</code></>],
   ['pi', <>pi, signed in to a provider with <code>pi auth</code></>],
 ]

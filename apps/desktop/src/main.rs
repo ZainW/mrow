@@ -826,7 +826,8 @@ fn dump_models() -> i32 {
         println!("error: {e}");
         return 1;
     }
-    let featured: Vec<String> = ask::model::featured(&r.models).iter().map(|m| m.title()).collect();
+    let short = if agent == ask::agents::AgentKind::Claude { ask::model::aliases(&r.models) } else { ask::model::featured(&r.models) };
+    let featured: Vec<String> = short.iter().map(|m| m.title()).collect();
     println!("{}: {} models ({:.1}s)", agent.name(), r.models.len(), started.elapsed().as_secs_f64());
     println!("featured: {}", featured.join(", "));
     match r.efforts.get(&r.model) {

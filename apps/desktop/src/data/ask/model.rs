@@ -9,6 +9,9 @@ use serde_json::Value;
 pub struct AgentModel {
     pub id: String,
     pub name: String,
+    /// The agent's own line on when it suits (Claude Code sends one), if any.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
 }
 
 pub const MAKERS: [&str; 6] = ["Cursor", "Anthropic", "OpenAI", "Google", "xAI", "Other"];
@@ -29,7 +32,18 @@ fn is_version(part: &str) -> bool {
 
 impl AgentModel {
     pub fn new(id: &str, name: &str) -> Self {
-        AgentModel { id: id.into(), name: name.into() }
+        AgentModel { id: id.into(), name: name.into(), detail: String::new() }
+    }
+
+    pub fn with_detail(mut self, detail: &str) -> Self {
+        self.detail = detail.into();
+        self
+    }
+
+    /// Claude Code's aliases ("default", "opus", "sonnet[1m]"), which follow the newest model of
+    /// each family, as opposed to pinned ids ("claude-opus-4-8").
+    pub fn is_alias(&self) -> bool {
+        !self.id.contains('-')
     }
 
     /// Ids from before the parameterized list carried the variant: "claude-sonnet-5-5[effort=high]".
@@ -46,6 +60,7 @@ impl AgentModel {
     pub fn short_title(&self) -> String {
         let title = self.title();
         let title = title.rsplit_once('/').map(|(_, t)| t.to_string()).unwrap_or(title);
+        let title = title.strip_suffix(" (recommended)").map(str::to_string).unwrap_or(title);
         title.strip_prefix("Claude ").map(str::to_string).unwrap_or(title)
     }
 
@@ -96,6 +111,11 @@ impl AgentModel {
         let family = self.family();
         FEATURED.iter().find(|(f, _)| *f == family).map(|(_, b)| *b)
     }
+}
+
+/// Claude Code's short list: its aliases, in its order.
+pub fn aliases(models: &[AgentModel]) -> Vec<AgentModel> {
+    models.iter().filter(|m| m.is_alias()).cloned().collect()
 }
 
 /// The newest model of each featured family, in the list's order.

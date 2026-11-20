@@ -99,23 +99,13 @@ fn models_come_from_settings_or_the_model_list() {
     ]});
     let ids: Vec<String> = super::models_in(&opencode).into_iter().map(|m| m.id).collect();
     assert_eq!(ids, ["claude-agent/sonnet", "openai/gpt-5.5"]);
-
-    // Claude's adapter: a model list beside the settings, and session modes.
-    let claude = serde_json::json!({
-        "models": {"currentModelId": "default", "availableModels": [{"modelId": "default", "name": "Default"}, {"modelId": "opus", "name": "Opus"}]},
-        "modes": {"currentModeId": "default", "availableModes": [{"id": "default"}, {"id": "acceptEdits"}, {"id": "plan"}]}
-    });
-    assert_eq!(super::models_in(&claude).len(), 2);
-    let (model, effort) = EffortOptions::from(&super::options(&claude)).unwrap();
-    assert_eq!(model, "default");
-    assert!(effort.values.is_empty());
 }
 
 #[test]
 fn tools_follow_one_list() {
     assert_eq!(super::agents::pi_tools(), "read,grep,find,ls");
-    let claude = super::agents::claude_disallowed();
-    assert!(claude.contains(&"Bash") && claude.contains(&"Edit") && !claude.contains(&"Read"));
+    let claude = super::agents::claude_allowed();
+    assert!(!claude.contains(&"Bash") && !claude.contains(&"Edit") && claude.contains(&"Read"));
     let oc = super::agents::opencode_permissions();
     assert_eq!((oc["*"].as_str(), oc["bash"].as_str(), oc["grep"].as_str()), (Some("deny"), None, Some("allow")));
     assert_eq!(oc["read"]["*.env"], "deny");

@@ -1,5 +1,5 @@
-//! The agents a chat can run: Cursor, Claude and opencode over the Agent Client Protocol, and pi
-//! over its own RPC mode. Each is found the same way: the command set in settings, else the
+//! The agents a chat can run: Cursor and opencode over the Agent Client Protocol, Claude Code in
+//! its stream-json mode, and pi over its own RPC mode. Each is found the same way: the command set in settings, else the
 //! usual install places, else the login shell's `PATH`.
 //!
 //! What they may do is one list of tool kinds, `TOOL_KINDS`, applied two ways: each agent starts
@@ -54,9 +54,9 @@ pub fn opencode_permissions() -> Value {
     Value::Object(permission)
 }
 
-/// Claude Code's tools outside the allowed kinds, taken away when a session starts.
-pub fn claude_disallowed() -> Vec<&'static str> {
-    NATIVE.iter().filter(|(k, ..)| !allows(k)).flat_map(|(.., claude)| claude.iter().copied()).collect()
+/// Claude Code's tools of the allowed kinds, the only ones a session starts with.
+pub fn claude_allowed() -> Vec<&'static str> {
+    NATIVE.iter().filter(|(k, ..)| allows(k)).flat_map(|(.., claude)| claude.iter().copied()).collect()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -98,7 +98,7 @@ impl AgentKind {
     pub fn process(self) -> &'static str {
         match self {
             AgentKind::Cursor => "Cursor's agent",
-            AgentKind::Claude => "Claude's agent",
+            AgentKind::Claude => "Claude Code",
             AgentKind::Opencode => "opencode",
             AgentKind::Pi => "pi",
         }
@@ -116,7 +116,7 @@ impl AgentKind {
     pub fn blurb(self) -> &'static str {
         match self {
             AgentKind::Cursor => "Cursor's agent",
-            AgentKind::Claude => "Claude Code",
+            AgentKind::Claude => "Claude Code, with your Claude plan",
             AgentKind::Opencode => "opencode",
             AgentKind::Pi => "pi",
         }
@@ -169,15 +169,9 @@ impl AgentKind {
                     "Couldn't find Cursor's agent. Install it (curl https://cursor.com/install -fsS | bash) or set its path in Settings.".to_string()
                 })
             }
-            AgentKind::Claude => {
-                if let Some(adapter) = find("claude-agent-acp").or_else(|| find("claude-code-acp")) {
-                    return Ok(vec![adapter]);
-                }
-                // The adapter is a small npm package; npx fetches it the first time.
-                find("npx").map(|npx| with(npx, &["-y", "@agentclientprotocol/claude-agent-acp"])).ok_or_else(|| {
-                    "Couldn't find Claude's ACP adapter. Install it (npm i -g @agentclientprotocol/claude-agent-acp) or install Node.js so Mrow can run it with npx.".to_string()
-                })
-            }
+            AgentKind::Claude => find("claude").map(|p| vec![p]).ok_or_else(|| {
+                "Couldn't find Claude Code. Install it (curl -fsSL https://claude.ai/install.sh | bash), or set its command under agentCommands in settings.json.".to_string()
+            }),
             AgentKind::Opencode => find("opencode").map(|p| with(p, &["acp"])).ok_or_else(|| {
                 "Couldn't find opencode. Install it (npm i -g opencode-ai), or set its command under agentCommands in settings.json.".to_string()
             }),
