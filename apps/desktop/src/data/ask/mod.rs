@@ -10,6 +10,7 @@ pub mod acp;
 pub mod agents;
 pub mod checkouts;
 pub mod citations;
+pub mod claude;
 pub mod context;
 pub mod model;
 pub mod pi;
@@ -280,7 +281,7 @@ impl Roster {
             },
             None => Roster::default(),
         };
-        if r.models.iter().any(|m| m.id.contains('[')) {
+        if kind == AgentKind::Cursor && r.models.iter().any(|m| m.id.contains('[')) {
             r.models.clear();
         }
         if r.models.is_empty() {
@@ -849,7 +850,11 @@ impl AskStore {
                 let call = update.get("toolCall").cloned().unwrap_or(json!({}));
                 let call_id = call.get("toolCallId").and_then(Value::as_str).unwrap_or("");
                 chat.update_tool(call_id, None, Some(false));
-                let what = if call.get("kind").and_then(Value::as_str) == Some("execute") { "Declined running a command" } else { "Declined a change" };
+                let what = match call.get("kind").and_then(Value::as_str) {
+                    Some("execute") => "Declined running a command",
+                    Some("read" | "search") => "Declined reading outside this folder",
+                    _ => "Declined a change",
+                };
                 chat.append(EntryKind::Declined, what, None);
             }
             _ => {}
@@ -1005,25 +1010,19 @@ fn cancel(chat: &Chat) {
     }
 }
 
-/// Stops a session that's no longer wanted. pi runs a process per session, which this ends too.
+/// Stops a session that's no longer wanted. pi and Claude run a process per session, which this
+/// ends too.
 fn end_session(agent: AgentKind, session: &str) {
     let a = acp::agent(agent);
     a.notify("session/cancel", json!({"sessionId": session}));
-    if agent == AgentKind::Pi {
+    if matches!(agent, AgentKind::Pi | AgentKind::Claude) {
         a.notify("session/close", json!({"sessionId": session}));
     }
 }
 
-/// A reply's settings. An agent that lists its models outside its settings (Claude's adapter)
-/// gets a stand-in model setting, so the rest reads one shape.
+/// A reply's settings.
 fn options(reply: &Value) -> Vec<Value> {
-    let mut options = reply.get("configOptions").and_then(Value::as_array).cloned().unwrap_or_default();
-    if !options.iter().any(is_model_option) {
-        if let Some(current) = reply.get("models").and_then(|m| m.get("currentModelId")).and_then(Value::as_str) {
-            options.push(json!({"id": "model", "category": "model", "currentValue": current, "_mrowStandIn": true}));
-        }
-    }
-    options
+    reply.get("configOptions").and_then(Value::as_array).cloned().unwrap_or_default()
 }
 
 /// A select setting's choices as (value, name), with grouped choices flattened.
@@ -1040,17 +1039,13 @@ fn choices(options: &Value) -> Vec<(String, String)> {
 }
 
 fn models_in(reply: &Value) -> Vec<AgentModel> {
-    if let Some(listed) = reply.get("models").and_then(|m| m.get("availableModels")).and_then(Value::as_array) {
-        return listed
-            .iter()
-            .filter_map(|m| {
-                let id = m.get("modelId")?.as_str()?;
-                Some(AgentModel::new(id, m.get("name").and_then(Value::as_str).unwrap_or(id)))
-            })
-            .collect();
-    }
     let setting = reply.get("configOptions").and_then(Value::as_array).and_then(|a| a.iter().find(|o| is_model_option(o)));
-    setting.map(|o| choices(&o["options"]).into_iter().map(|(id, name)| AgentModel::new(&id, &name)).collect()).unwrap_or_default()
+    let Some(setting) = setting else { return Vec::new() };
+    let detail = |id: &str| -> String {
+        let listed = setting["options"].as_array().into_iter().flatten().find(|o| o["value"].as_str() == Some(id));
+        listed.and_then(|o| o["description"].as_str()).unwrap_or("").to_string()
+    };
+    choices(&setting["options"]).into_iter().map(|(id, name)| AgentModel::new(&id, &name).with_detail(&detail(&id))).collect()
 }
 
 fn new_session(agent: AgentKind, clone: Option<&std::path::Path>) -> Result<Value, String> {
@@ -1059,9 +1054,8 @@ fn new_session(agent: AgentKind, clone: Option<&std::path::Path>) -> Result<Valu
 
 /// Where a session runs and what it starts with. Most run in the clone (or an empty folder).
 /// opencode takes its tool limits only from an `opencode.json` where it runs, so it runs in a
-/// folder of Mrow's with one, and reads the clone as an extra directory. Claude's adapter takes
-/// its tools through `_meta`, and starts without the user's settings and MCP servers, whose
-/// allow rules and tools (one that posts a comment, say) would get around the list.
+/// folder of Mrow's with one, and reads the clone as an extra directory. Claude limits its own
+/// tools when it starts (`claude.rs`).
 fn session_params(agent: AgentKind, clone: Option<&std::path::Path>) -> Value {
     let folder = || clone.map(std::path::Path::to_path_buf).unwrap_or_else(empty_folder);
     match agent {
@@ -1072,15 +1066,6 @@ fn session_params(agent: AgentKind, clone: Option<&std::path::Path>) -> Value {
             }
             params
         }
-        AgentKind::Claude => json!({
-            "cwd": folder().to_string_lossy(),
-            "mcpServers": [],
-            "_meta": {"claudeCode": {"options": {
-                "disallowedTools": agents::claude_disallowed(),
-                "settingSources": [],
-                "strictMcpConfig": true,
-            }}},
-        }),
         _ => json!({"cwd": folder().to_string_lossy(), "mcpServers": []}),
     }
 }
@@ -1098,22 +1083,11 @@ fn set_option(agent: AgentKind, session: &str, id: &str, value: &str) -> Result<
     acp::agent(agent).request("session/set_config_option", json!({"sessionId": session, "configId": id, "value": value})).map(|r| options(&r))
 }
 
-/// Puts a session on a model: through its model setting when it has one (Cursor, opencode, pi),
-/// else `session/set_model` (Claude's adapter). `known` is the session's settings, if at hand.
+/// Puts a session on a model through its model setting. `known` is the session's settings, if
+/// at hand; without them the setting is taken to be "model".
 fn set_model(agent: AgentKind, session: &str, known: &[Value], model: &str) -> Result<Vec<Value>, String> {
-    let setting = known.iter().find(|o| is_model_option(o) && o.get("_mrowStandIn").is_none()).and_then(|o| o.get("id")).and_then(Value::as_str);
-    if let Some(id) = setting {
-        return set_option(agent, session, id, model);
-    }
-    if known.is_empty() {
-        if let Ok(options) = set_option(agent, session, "model", model) {
-            return Ok(options);
-        }
-    }
-    acp::agent(agent).request("session/set_model", json!({"sessionId": session, "modelId": model}))?;
-    let mut options: Vec<Value> = known.iter().filter(|o| !is_model_option(o)).cloned().collect();
-    options.push(json!({"id": "model", "category": "model", "currentValue": model, "_mrowStandIn": true}));
-    Ok(options)
+    let id = known.iter().find(|o| is_model_option(o)).and_then(|o| o.get("id")).and_then(Value::as_str).unwrap_or("model");
+    set_option(agent, session, id, model)
 }
 
 /// The chosen model and effort. Cursor also goes into its ask mode: it's the one way known to

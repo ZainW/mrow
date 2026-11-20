@@ -12,7 +12,7 @@ use rune_kit::{Kit, TextArea};
 use crate::app::{App, DraftKey, ProposalState, ProposalTarget};
 use crate::data::ask::agents::AgentKind;
 use crate::data::ask::citations;
-use crate::data::ask::model::{AgentModel, MAKERS, featured};
+use crate::data::ask::model::{AgentModel, MAKERS, aliases, featured};
 use crate::data::ask::proposals::{self, Proposal, Segment};
 use crate::data::ask::{Chat, Entry, EntryKind, Phase, wall};
 use crate::data::models::MergeRequest;
@@ -1073,7 +1073,13 @@ pub fn open_model_menu(s: &mut App, tx: &mut Tx, chat: &str) {
         menu = menu.item(PopupItem::new("none", line).enabled(false)).separator().item(PopupItem::new("refresh", "Try Again"));
     } else {
         let few = ask.models.len() <= 10;
-        let mut list = if few { ask.models.clone() } else { featured(&ask.models) };
+        let mut list = if few {
+            ask.models.clone()
+        } else if agent == AgentKind::Claude {
+            aliases(&ask.models)
+        } else {
+            featured(&ask.models)
+        };
         for id in std::iter::once(&ask.model).chain(&ask.recent) {
             if let Some(m) = ask.models.iter().find(|m| &m.id == id) {
                 if !list.contains(m) {
@@ -1089,6 +1095,7 @@ pub fn open_model_menu(s: &mut App, tx: &mut Tx, chat: &str) {
                 .blurb()
                 .filter(|_| agent == AgentKind::Cursor)
                 .map(str::to_string)
+                .or_else(|| (!m.detail.is_empty()).then(|| m.detail.clone()))
                 .unwrap_or_else(|| if ask.recent.contains(&m.id) { format!("{} · used recently", m.maker()) } else { m.maker().to_string() });
             menu = menu.item(PopupItem::new(format!("m:{}", m.id), format!("{} — {detail}", m.title())).checked(m.id == ask.model));
         }

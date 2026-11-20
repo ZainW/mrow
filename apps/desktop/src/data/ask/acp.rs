@@ -1,5 +1,4 @@
-//! An agent spoken to over the Agent Client Protocol (Cursor's `agent acp`, Claude's adapter,
-//! `opencode acp`): JSON-RPC, one message per line on its stdin and stdout. One process per agent
+//! An agent spoken to over the Agent Client Protocol (Cursor's `agent acp`, `opencode acp`): JSON-RPC, one message per line on its stdin and stdout. One process per agent
 //! serves every chat.
 //!
 //! Mrow offers it no file or terminal access of its own. It allows the agent's permission
@@ -73,6 +72,7 @@ static CLIENTS: LazyLock<Vec<(AgentKind, Arc<dyn Agent>)>> = LazyLock::new(|| {
         .map(|kind| {
             let agent: Arc<dyn Agent> = match kind {
                 AgentKind::Pi => Arc::new(super::pi::Pi::default()),
+                AgentKind::Claude => Arc::new(super::claude::Claude::default()),
                 _ => Arc::new(Client { kind, state: Mutex::new(State::default()), starting: Mutex::new(false) }),
             };
             (kind, agent)

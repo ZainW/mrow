@@ -73,7 +73,7 @@ pub struct Prefs {
     /// The agent CLI for Ask; blank finds `cursor-agent`/`agent` on its own.
     pub agent_path: String,
     /// Ask: the command for each other agent ("claude", "opencode", "pi"), with its arguments,
-    /// when it isn't found on its own. Claude's is its ACP adapter.
+    /// when it isn't found on its own. Claude's is the `claude` CLI.
     pub agent_commands: BTreeMap<String, String>,
     /// Ask: comments the agent drafted that the user posted, by `Proposal::key`, so a reopened
     /// chat doesn't offer them again.
