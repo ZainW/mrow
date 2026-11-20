@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Drives Mrow headlessly for verification. Run from anywhere; see ../SKILL.md.
+#
+#   mrow-verify build                      cargo build (debug) in apps/desktop
+#   mrow-verify doctor                     is the build fresh, does a scene render, are CLIs signed in
+#   mrow-verify scenes                     list the fixture scenes
+#   mrow-verify run <name> <scene> [script.json] [extra rune args…]
+#                                          render a scene (optionally after a script) into the run dir:
+#                                          <name>.png, <name>.tree.json, <name>.a11y.txt, <name>.log
+#   mrow-verify a11y <tree.json>           print the accessibility tree as "role key 'name' [states]"
+#   mrow-verify texts <tree.json>          print every drawn text run, one per line
+#   mrow-verify live-queue github|gitlab   read-only live fetch through gh/glab (no window)
+#   mrow-verify where                      print the run dir
+#
+# Evidence goes to $MROW_VERIFY_OUT, default ~/.local/state/mrow-verify/<run id>, where the run id is
+# $MROW_VERIFY_RUN or today's date-time (fixed per shell via `export MROW_VERIFY_RUN=…`).
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+desktop="$(cd "$here/../../../.." && pwd)"
+bin="$desktop/target/debug/mrow"
+run_id="${MROW_VERIFY_RUN:-$(date +%Y%m%d-%H%M%S)}"
+out="${MROW_VERIFY_OUT:-$HOME/.local/state/mrow-verify/$run_id}"
+size="${MROW_VERIFY_SIZE:-1240x820}"
+
+die() { echo "mrow-verify: $*" >&2; exit 2; }
+need_bin() { [[ -x "$bin" ]] || die "no $bin; run: $0 build"; }
+
+a11y() {
+  python3 -I - "$1" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1]))
+def walk(n, d):
+    bits = [n.get("role", "?")]
+    if n.get("key"): bits.append(n["key"])
+    if n.get("name"): bits.append(repr(n["name"]))
+    if n.get("value"): bits.append("value=" + repr(n["value"]))
+    if n.get("states"): bits.append("[" + ",".join(map(str, n["states"])) + "]")
+    if len(bits) > 1: print("  " * d + " ".join(bits))
+    for c in n.get("children", []): walk(c, d + 1)
+walk(t["accessibility"], 0)
+PY
+}
+
+texts() {
+  python3 -I - "$1" <<'PY'
+import json, sys
+for e in json.load(open(sys.argv[1]))["elements"]:
+    if e.get("text"): print(e["path"] + "\t" + e["text"])
+PY
+}
+
+case "${1:-}" in
+  build)
+    cd "$desktop" && cargo build
+    ;;
+  where)
+    echo "$out"
+    ;;
+  scenes)
+    need_bin
+    "$bin" --list-scenes
+    ;;
+  doctor)
+    ok=1
+    if [[ -x "$bin" ]]; then
+      echo "binary: $bin ($("$bin" --version))"
+      newer="$(find "$desktop/src" "$desktop/Cargo.toml" "$desktop/Cargo.lock" -newer "$bin" -type f | head -3)"
+      if [[ -n "$newer" ]]; then echo "STALE: sources newer than the binary (run: $0 build):"; echo "$newer"; ok=0; else echo "build: fresh"; fi
+    else
+      echo "MISSING: $bin (run: $0 build)"; ok=0
+    fi
+    case "$(uname)" in Linux) echo "renderer: $(vulkaninfo --summary 2>/dev/null | grep -m1 deviceName | sed 's/.*= //' || echo 'unknown (vulkaninfo missing)')";; esac
+    if [[ -x "$bin" ]]; then
+      tmp="$(mktemp -d)"
+      if "$bin" --scene to-review --size "$size" --snap "$tmp/d.png" --tree "$tmp/d.json" >"$tmp/log" 2>&1 \
+          && python3 -I -c 'import json,sys; t=json.load(open(sys.argv[1])); assert any(e.get("key")=="mode-0" for e in t["elements"])' "$tmp/d.json"; then
+        echo "headless render: ok"
+      else
+        echo "headless render: FAILED"; cat "$tmp/log"; ok=0
+      fi
+      rm -rf "$tmp"
+    fi
+    for c in gh glab; do
+      if command -v "$c" >/dev/null; then
+        if "$c" auth status >/dev/null 2>&1; then echo "$c: signed in"; else echo "$c: installed, not signed in"; fi
+      else
+        echo "$c: not installed"
+      fi
+    done
+    echo "evidence dir: $out"
+    [[ $ok == 1 ]] && echo "doctor: OK" || { echo "doctor: NOT OK"; exit 1; }
+    ;;
+  run)
+    need_bin
+    name="${2:-}"; scene="${3:-}"
+    [[ -n "$name" && -n "$scene" ]] || die "usage: run <name> <scene> [script.json] [rune args…]"
+    shift 3
+    args=(--scene "$scene" --size "$size" --snap "$out/$name.png" --tree "$out/$name.tree.json")
+    if [[ $# -gt 0 && "$1" == *.json ]]; then
+      script="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+      mkdir -p "$out"; cp "$script" "$out/$name.script.json"
+      args+=(--script "$out/$name.script.json"); shift
+    fi
+    mkdir -p "$out"
+    if ! "$bin" "${args[@]}" "$@" >"$out/$name.log" 2>&1; then cat "$out/$name.log" >&2; die "render failed"; fi
+    a11y "$out/$name.tree.json" >"$out/$name.a11y.txt"
+    echo "$out/$name.png"
+    echo "$out/$name.tree.json"
+    echo "$out/$name.a11y.txt"
+    ;;
+  a11y)
+    a11y "${2:?tree.json}"
+    ;;
+  texts)
+    texts "${2:?tree.json}"
+    ;;
+  live-queue)
+    need_bin
+    forge="${2:?github or gitlab}"
+    mkdir -p "$out"
+    set +e
+    "$bin" --queue "$forge" 2>&1 | tee "$out/live-queue-$forge.txt"
+    code=${PIPESTATUS[0]}
+    echo "exit: $code" | tee -a "$out/live-queue-$forge.txt"
+    exit "$code"
+    ;;
+  *)
+    sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac
