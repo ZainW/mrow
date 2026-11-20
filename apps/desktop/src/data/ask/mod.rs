@@ -1092,7 +1092,8 @@ fn set_model(agent: AgentKind, session: &str, known: &[Value], model: &str) -> R
 
 /// The chosen model and effort. Cursor also goes into its ask mode: it's the one way known to
 /// keep it from running commands, which it may run without asking when its own settings allow
-/// them. The other agents have their tools limited when they start (`session_params`).
+/// them. The other agents have their tools limited when they start (`session_params`, and
+/// `claude.rs` for Claude).
 fn configure(tx: &Sender<Msg>, session: &str, reply: &Value, choice: &ModelChoice) -> Result<(), String> {
     if choice.agent == AgentKind::Cursor {
         acp::agent(choice.agent).request("session/set_mode", json!({"sessionId": session, "modeId": "ask"}))?;

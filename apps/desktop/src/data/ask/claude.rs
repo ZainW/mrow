@@ -66,6 +66,8 @@ struct State {
     streamed: HashSet<String>,
     /// The end of stderr, for errors.
     errors: String,
+    /// Set once the process has exited, so a turn begun after can't wait forever.
+    gone: bool,
 }
 
 struct Session {
@@ -113,7 +115,8 @@ impl Agent for Claude {
         let id = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
         match method {
             "session/cancel" => {
-                if let Some(s) = self.lock().get(id).cloned() {
+                let session = self.lock().get(id).cloned();
+                if let Some(s) = session {
                     s.interrupt();
                 }
             }
@@ -217,13 +220,15 @@ impl Claude {
             me.exited();
         });
         // A chat picked up again replaces its old process, if one is still there.
-        if let Some(old) = self.lock().insert(id.clone(), s.clone()) {
+        let old = self.lock().insert(id.clone(), s.clone());
+        if let Some(old) = old {
             old.stop();
         }
         let reply = match s.control(json!({"subtype": "initialize", "hooks": null})) {
             Ok(r) => r,
             Err(e) => {
-                if let Some(s) = self.lock().remove(&id) {
+                let removed = self.lock().remove(&id);
+                if let Some(s) = removed {
                     s.stop();
                 }
                 return Err(e);
@@ -354,13 +359,16 @@ impl Session {
             st.waiting.insert(id.clone(), tx);
         }
         self.write(&json!({"type": "control_request", "request_id": id, "request": request}));
-        wait(&rx, false)
+        let reply = wait(&rx, false);
+        // A reply that never came: its waiter goes, so a late one isn't sent nowhere.
+        self.state().waiting.remove(&id);
+        reply
     }
 
     /// Sends the user's message and waits for the turn's result.
     fn prompt(&self, text: &str) -> Result<Value, String> {
         let (tx, rx) = channel();
-        self.begin(tx);
+        self.begin(tx)?;
         self.write(&json!({
             "type": "user",
             "message": {"role": "user", "content": text},
@@ -371,12 +379,16 @@ impl Session {
     }
 
     /// Makes `tx` the turn's waiter. A stopped turn still running: its result isn't this one's.
-    fn begin(&self, tx: Sender<Result<Value, String>>) {
+    fn begin(&self, tx: Sender<Result<Value, String>>) -> Result<(), String> {
         let mut st = self.state();
+        if st.gone {
+            return Err(format!("{} stopped.", AgentKind::Claude.process()));
+        }
         if st.turn.replace(tx).is_some() {
             st.stale += 1;
         }
         st.cancelled = false;
+        Ok(())
     }
 
     fn interrupt(&self) {
@@ -423,6 +435,7 @@ impl Session {
         let (waiting, turn, errors) = {
             let mut st = self.state();
             st.stdin = None;
+            st.gone = true;
             if let Some(mut child) = st.child.take() {
                 let _ = child.wait();
             }
@@ -568,7 +581,7 @@ impl Session {
         }
         let input = request.get("input").cloned().unwrap_or(json!({}));
         let (kind, title) = describe(s("tool_name"), &input);
-        if agents::allows(kind) && self.inside(&input) {
+        if agents::allows(kind) && self.inside(kind, &input) {
             let response = json!({"behavior": "allow", "updatedInput": input});
             self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}}));
             return None;
@@ -582,9 +595,17 @@ impl Session {
     }
 
     /// Whether a tool's file or folder is in the session's folder.
-    fn inside(&self, input: &Value) -> bool {
-        let path = ["file_path", "path"].iter().find_map(|k| input.get(*k).and_then(Value::as_str));
-        path.is_none_or(|p| within(p, &self.directory))
+    /// Every path the tool names must be inside; a read that names none Mrow knows is not.
+    fn inside(&self, kind: &str, input: &Value) -> bool {
+        let mut paths: Vec<&str> = ["file_path", "path", "notebook_path"].iter().filter_map(|k| input.get(*k).and_then(Value::as_str)).collect();
+        // Glob takes an absolute pattern too: "/etc/*".
+        if let Some(pattern) = input.get("pattern").and_then(Value::as_str).filter(|p| p.starts_with('/') || p.starts_with('~')) {
+            paths.push(pattern);
+        }
+        if paths.is_empty() {
+            return kind == "search";
+        }
+        paths.iter().all(|p| within(p, &self.directory))
     }
 }
 
@@ -645,35 +666,40 @@ fn describe(tool: &str, input: &Value) -> (&'static str, String) {
     }
 }
 
-/// Whether `path`, absolute or relative to `directory`, is inside `directory`.
+/// Whether `path`, absolute, from home (`~/`) or relative to `directory`, is inside `directory`.
 fn within(path: &str, directory: &str) -> bool {
-    resolve(&Path::new(directory).join(path)).starts_with(resolve(Path::new(directory)))
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{home}{rest}"),
+        // "~user/…": someone else's home, never inside.
+        Some(_) => return false,
+        None => path.to_string(),
+    };
+    let (Some(full), Some(root)) = (resolve(&Path::new(directory).join(path)), resolve(Path::new(directory))) else { return false };
+    full.starts_with(root)
 }
 
-/// A path with `..` and `.` gone and links followed as far as it exists, so a file not made yet
-/// resolves too (`../../.zshrc` mustn't pass as inside).
-fn resolve(path: &Path) -> PathBuf {
+/// A path with links followed the way the system follows them: the part that exists
+/// canonicalized (`..` after a link leaves the link's target), then the rest, so a file not made
+/// yet resolves too. None when that rest climbs with `..`, which can't be checked.
+fn resolve(path: &Path) -> Option<PathBuf> {
     use std::path::Component;
-    let mut plain = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::ParentDir => {
-                plain.pop();
-            }
-            Component::CurDir => {}
-            other => plain.push(other),
-        }
-    }
-    let mut existing = plain.as_path();
+    let mut existing = path;
     let mut rest = Vec::new();
     while !existing.exists() {
-        let (Some(name), Some(parent)) = (existing.file_name(), existing.parent()) else { break };
-        rest.push(name);
+        let (Some(parent), Some(last)) = (existing.parent(), existing.components().next_back()) else { break };
+        rest.push(last);
         existing = parent;
     }
-    let mut real = existing.canonicalize().unwrap_or_else(|_| existing.to_path_buf());
-    real.extend(rest.iter().rev());
-    real
+    let mut real = existing.canonicalize().ok()?;
+    for part in rest.iter().rev() {
+        match part {
+            Component::Normal(name) => real.push(name),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(real)
 }
 
 /// An earlier chat's record, kept by Claude Code under its projects folder by session id.
@@ -704,7 +730,8 @@ fn replay(session: &str, records: &[Value]) {
                     }
                     _ => Vec::new(),
                 };
-                for text in texts {
+                // Claude Code's own notes ("[Request interrupted by user]") aren't questions.
+                for text in texts.into_iter().filter(|t| !t.starts_with("[Request interrupted")) {
                     send(json!({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": text}}));
                 }
                 result_updates(message).into_iter().for_each(send);
@@ -726,10 +753,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mrow-claude-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let session = Session { id: "s".into(), directory: dir.to_string_lossy().into(), state: Mutex::default() };
-        assert!(session.inside(&json!({"file_path": dir.join("a.rs").to_string_lossy()})));
-        assert!(session.inside(&json!({"pattern": "*.rs"})));
-        assert!(!session.inside(&json!({"file_path": "/etc/hosts"})));
-        assert!(!session.inside(&json!({"file_path": "../../.zshrc"})));
+        assert!(session.inside("read", &json!({"file_path": dir.join("a.rs").to_string_lossy()})));
+        assert!(session.inside("read", &json!({"file_path": "sub/new.rs"})));
+        assert!(session.inside("search", &json!({"pattern": "*.rs"})));
+        assert!(!session.inside("search", &json!({"pattern": "/etc/*"})));
+        assert!(!session.inside("read", &json!({"file_path": "/etc/hosts"})));
+        assert!(!session.inside("read", &json!({"file_path": "../../.zshrc"})));
+        assert!(!session.inside("read", &json!({"file_path": "~/.ssh/id_rsa"})));
+        assert!(!session.inside("read", &json!({"notebook_path": "/tmp/x.ipynb"})));
+        assert!(!session.inside("read", &json!({})));
+        // A link inside the folder, then `..`: the system leaves the link's target.
+        std::os::unix::fs::symlink("/etc/ssl", dir.join("docs")).unwrap();
+        assert!(!session.inside("read", &json!({"file_path": dir.join("docs/../hostname").to_string_lossy()})));
+        assert!(!session.inside("read", &json!({"file_path": dir.join("docs/x").to_string_lossy()})));
         let _ = std::fs::remove_dir_all(dir);
         assert_eq!(claude_tools(), "Read,NotebookRead,Grep,Glob,LS");
     }
@@ -738,11 +774,11 @@ mod tests {
     fn a_stopped_turns_result_doesnt_end_the_next() {
         let s = Session { id: "t".into(), directory: "/".into(), state: Mutex::default() };
         let (old, old_rx) = channel();
-        s.begin(old);
+        s.begin(old).unwrap();
         s.interrupt();
         // Sent again before the stopped turn's result came.
         let (new, new_rx) = channel();
-        s.begin(new);
+        s.begin(new).unwrap();
         assert!(old_rx.recv().is_err(), "the stopped turn's waiter is let go");
         let stream = json!({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "late"}}});
         s.handle(stream);
