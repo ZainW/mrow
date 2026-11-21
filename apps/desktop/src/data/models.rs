@@ -173,6 +173,12 @@ pub struct MergeRequest {
     /// GitHub: how this repository merges for me ("merge", "squash" or "rebase").
     #[serde(default)]
     pub merge_method: Option<String>,
+    /// When I last reviewed it (approved, commented or asked for changes).
+    #[serde(default)]
+    pub my_review_at: Option<Date>,
+    /// When commits last landed after `my_review_at`; None when nothing new, or unknown.
+    #[serde(default)]
+    pub pushed_since_review: Option<Date>,
 }
 
 impl MergeRequest {

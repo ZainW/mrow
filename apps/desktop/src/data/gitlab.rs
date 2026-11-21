@@ -103,6 +103,11 @@ impl ActivityNote {
     pub fn new(body: &str, created_at: Date) -> Self {
         ActivityNote { body: body.into(), created_at, author: None }
     }
+
+    #[cfg(test)]
+    pub fn by(body: &str, created_at: Date, username: &str) -> Self {
+        ActivityNote { body: body.into(), created_at, author: Some(Author { username: username.into(), name: username.into(), avatar_url: None }) }
+    }
 }
 
 #[derive(Deserialize)]
@@ -333,6 +338,30 @@ pub fn request_notes<'a>(notes: &'a [ActivityNote], me: &str) -> Vec<&'a Activit
         .collect()
 }
 
+/// Whether a system note records a review verdict: "requested changes" or "approved this merge
+/// request" (not "unapproved this merge request").
+fn is_verdict(body: &str) -> bool {
+    let body = body.trim().to_lowercase();
+    body == "requested changes" || body.starts_with("approved this merge request")
+}
+
+/// Whether a system note records commits landing: "added 3 commits" (or "added 1 commit"),
+/// followed by the list and a compare link.
+fn is_push(body: &str) -> bool {
+    let body = body.trim().to_lowercase();
+    let Some(rest) = body.strip_prefix("added ") else { return false };
+    let mut words = rest.split_whitespace();
+    words.next().is_some_and(|n| n.parse::<u32>().is_ok()) && words.next().is_some_and(|w| w.trim_end_matches(':').starts_with("commit"))
+}
+
+/// When I last gave a verdict, and when commits last landed after that (None if none did).
+pub fn review_activity(notes: &[ActivityNote], me: &str) -> (Option<Date>, Option<Date>) {
+    let mine = |n: &&ActivityNote| n.author.as_ref().is_some_and(|a| a.username.eq_ignore_ascii_case(me));
+    let reviewed = notes.iter().filter(mine).filter(|n| is_verdict(&n.body)).map(|n| n.created_at).max();
+    let pushed = reviewed.and_then(|at| notes.iter().filter(|n| is_push(&n.body) && n.created_at > at).map(|n| n.created_at).max());
+    (reviewed, pushed)
+}
+
 fn mentions(text: &str, username: &str) -> bool {
     let handle = format!("@{}", username.to_lowercase());
     let lower = text.to_lowercase();
@@ -371,6 +400,7 @@ fn build(node: &MrNode, me: &str, extra: &[ActivityNote]) -> MergeRequest {
         })
         .collect();
     let mine = reviewers.iter().find(|r| r.person.username.eq_ignore_ascii_case(me));
+    let (my_review_at, pushed_since_review) = review_activity(&all, me);
     MergeRequest {
         id: node.id.clone(),
         iid: node.iid.clone(),
@@ -409,6 +439,8 @@ fn build(node: &MrNode, me: &str, extra: &[ActivityNote]) -> MergeRequest {
         forge: Forge::Gitlab,
         auto_merge: node.auto_merge_enabled.unwrap_or(false),
         merge_method: None,
+        my_review_at,
+        pushed_since_review,
         unresolved_threads: node.resolvable_discussions_count.map(|all| (all - node.resolved_discussions_count.unwrap_or(0)).max(0)),
         failed_job: node.head_pipeline.as_ref().and_then(|p| p.jobs.as_ref()).and_then(|j| j.nodes.iter().find_map(|n| n.name.clone())),
     }

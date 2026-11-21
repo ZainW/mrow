@@ -444,6 +444,15 @@ fn scene_mine_snoozed(s: &mut App) {
     s.store.snoozed_open = true;
 }
 
+/// To review with the fold of requests waiting on their authors open, above any snoozed ones.
+fn scene_waiting(s: &mut App) {
+    scene_snoozed_folded(s);
+    if let Some(a) = s.store.accounts.get_mut(&Forge::Gitlab) {
+        a.open.push(fixtures::pushed_review());
+    }
+    s.store.waiting_open = true;
+}
+
 /// A part in the middle of a stack: held until the one below it merges.
 fn scene_mine_stack(s: &mut App) {
     scene_mine(s);
@@ -655,6 +664,7 @@ const SCENES: &[(&str, fn(&mut App))] = &[
     ("mine-stack", scene_mine_stack),
     ("snoozed", scene_snoozed),
     ("snoozed-folded", scene_snoozed_folded),
+    ("waiting", scene_waiting),
     ("mine-snoozed", scene_mine_snoozed),
     ("mine-open", scene_mine_open),
     ("mine-confirm", scene_mine_confirm),

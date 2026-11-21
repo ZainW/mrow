@@ -235,6 +235,8 @@ mod mine {
             failed_job: None,
             auto_merge: false,
             merge_method: None,
+            my_review_at: None,
+            pushed_since_review: None,
         }
     }
 
@@ -657,6 +659,8 @@ mod inbox {
             failed_job: None,
             auto_merge: false,
             merge_method: None,
+            my_review_at: None,
+            pushed_since_review: None,
         }
     }
 
@@ -798,6 +802,30 @@ mod inbox {
         q.open[0].first_requested_at = q.open[0].requested_at - Duration::hours(5);
         q.open[0].requested_at += Duration::hours(1);
         assert_eq!(run(&snapshot, &q, &none).1[0].kind, Kind::AskedAgain);
+    }
+
+    #[test]
+    fn a_push_after_my_changes_request_is_news_once() {
+        let none = HashSet::new();
+        let mut asked = request("1", "maya");
+        asked.my_state = ReviewState::RequestedChanges;
+        asked.my_review_at = Some(Utc::now() - Duration::hours(3));
+        let mut q = Queue::new(vec![asked], vec![]);
+        let (snapshot, _) = run(&Snapshot::default(), &q, &none);
+
+        // Nothing pushed yet: it waits on the author, quietly.
+        let (snapshot, events) = run(&snapshot, &q, &none);
+        assert!(events.is_empty(), "{events:?}");
+
+        let pushed = Utc::now() - Duration::hours(1);
+        q.open[0].pushed_since_review = Some(pushed);
+        let (snapshot, events) = run(&snapshot, &q, &none);
+        assert_eq!(kinds(&events), [("id-1".to_string(), Kind::Pushed, "maya pushed new commits".to_string())]);
+        assert!(run(&snapshot, &q, &none).1.is_empty());
+
+        // Another push is news again.
+        q.open[0].pushed_since_review = Some(pushed + Duration::minutes(30));
+        assert_eq!(run(&snapshot, &q, &none).1[0].kind, Kind::Pushed);
     }
 
     #[test]
@@ -1911,6 +1939,8 @@ mod snooze {
             failed_job: None,
             auto_merge: false,
             merge_method: None,
+            my_review_at: None,
+            pushed_since_review: None,
         }
     }
 
@@ -2166,5 +2196,130 @@ mod snooze_store {
         // A review I've already given isn't waiting on me, so there's nothing to snooze.
         let reviewed = store.open().iter().find(|m| !m.my_state.needs_review()).unwrap().clone();
         assert!(!store.can_snooze(&reviewed));
+    }
+}
+
+mod comes_back {
+    use chrono::{Duration, Utc};
+
+    use crate::data::forge::Forge;
+    use crate::data::gitlab::{ActivityNote, review_activity};
+    use crate::data::models::{Date, ReviewState};
+    use crate::data::prefs;
+    use crate::data::store::{CAME_BACK, QueueMode, Store};
+    use crate::data::turn::{MovedBack, Turn};
+
+    fn pull(head: &str, reviewed_oid: &str, head_date: &str) -> String {
+        format!(
+            r#"{{"id":"PR_9","number":9,"title":"t","url":"https://github.com/acme/web/pull/9",
+            "createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-09T00:00:00Z","mergedAt":null,"closedAt":null,
+            "state":"OPEN","isDraft":false,"headRefName":"f","headRefOid":"{head}","baseRefName":"main",
+            "additions":1,"deletions":2,"changedFiles":1,
+            "repository":{{"nameWithOwner":"acme/web","name":"web"}},"author":{{"login":"ann","name":"Ann"}},
+            "reviewRequests":{{"nodes":[]}},
+            "latestReviews":{{"nodes":[{{"state":"CHANGES_REQUESTED","submittedAt":"2026-01-05T00:00:00Z","commit":{{"oid":"{reviewed_oid}"}},"author":{{"login":"me"}}}}]}},
+            "commits":{{"nodes":[{{"commit":{{"committedDate":"{head_date}"}}}}]}},"timelineItems":{{"nodes":[]}}}}"#
+        )
+    }
+
+    #[test]
+    fn github_says_commits_landed_when_the_head_is_not_what_i_reviewed() {
+        let build = |json: String| crate::data::github::build_from_json(&json, "me", false).unwrap();
+        let pushed = build(pull("bbb", "aaa", "2026-01-07T00:00:00Z"));
+        assert_eq!(pushed.my_state, ReviewState::RequestedChanges);
+        assert_eq!(pushed.my_review_at.unwrap().to_rfc3339(), "2026-01-05T00:00:00+00:00");
+        assert_eq!(pushed.pushed_since_review.unwrap().to_rfc3339(), "2026-01-07T00:00:00+00:00");
+        let same = build(pull("aaa", "aaa", "2026-01-04T00:00:00Z"));
+        assert_eq!(same.pushed_since_review, None);
+        // A rebased old commit keeps its old date: the pull request's update stands for the push.
+        let rebased = build(pull("bbb", "aaa", "2026-01-02T00:00:00Z"));
+        assert_eq!(rebased.pushed_since_review.unwrap().to_rfc3339(), "2026-01-09T00:00:00+00:00");
+    }
+
+    #[test]
+    fn gitlab_notes_give_my_last_verdict_and_the_commits_after_it() {
+        let at = |h: i64| -> Date { Utc::now() - Duration::hours(h) };
+        let notes = vec![
+            ActivityNote::by("requested changes", at(50), "me"),
+            ActivityNote::by("added 2 commits\n\n* abc - fix", at(40), "ann"),
+            ActivityNote::by("approved this merge request", at(30), "bob"),
+            ActivityNote::by("added 1 commit", at(10), "ann"),
+            ActivityNote::by("unapproved this merge request", at(5), "me"),
+            ActivityNote::by("added 1 commit", at(20), "ann"),
+        ];
+        let (reviewed, pushed) = review_activity(&notes, "me");
+        assert_eq!(reviewed, Some(notes[0].created_at));
+        assert_eq!(pushed, Some(notes[3].created_at), "the newest push after my review");
+        let (_, none) = review_activity(&notes[..1], "me");
+        assert_eq!(none, None);
+        assert_eq!(review_activity(&notes[1..2], "me"), (None, None), "no review of mine, no push since");
+    }
+
+    fn store() -> Store {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        let mut store = Store::default();
+        store.load_fixture(accounts, diffs, threads);
+        store.forge = Forge::Gitlab;
+        store.accounts.get_mut(&Forge::Gitlab).unwrap().open.push(crate::fixtures::pushed_review());
+        store
+    }
+
+    fn iid<'a>(store: &'a Store, n: &str) -> crate::data::models::MergeRequest {
+        store.open().iter().find(|m| m.iid == n).unwrap().clone()
+    }
+
+    #[test]
+    fn asked_changes_lands_by_whether_anything_came_since() {
+        let mut store = store();
+        let (rises, waits) = (iid(&store, "181"), iid(&store, "183"));
+        assert_eq!((store.turn_of(&rises), store.turn_of(&waits)), (Turn::CameBack, Turn::Waiting));
+        let ids = |mode| store.items(mode).into_iter().map(|m| m.id).collect::<Vec<_>>();
+        assert!(ids(QueueMode::ToReview).contains(&rises.id) && !ids(QueueMode::ToReview).contains(&waits.id));
+        assert!(!ids(QueueMode::Reviewed).contains(&rises.id) && !ids(QueueMode::Reviewed).contains(&waits.id));
+        let sections = store.sections();
+        assert_eq!(sections[0].title, CAME_BACK);
+        assert_eq!(sections[0].items[0].id, rises.id);
+        // Counts and the badge take the rise, not the wait.
+        let waiting = store.waiting_items();
+        assert!(waiting.iter().any(|m| m.id == waits.id) && !waiting.iter().any(|m| m.id == rises.id));
+        assert_eq!(store.count(QueueMode::ToReview), store.waiting_count(Forge::Gitlab));
+        assert!(store.items(QueueMode::ToReview).len() >= 2);
+        // The keys step through the fold only when it's open.
+        assert!(!store.visible_items().iter().any(|m| m.id == waits.id));
+        store.waiting_open = true;
+        assert_eq!(store.visible_items().last().map(|m| m.id.clone()), Some(waiting.last().unwrap().id.clone()));
+        // Opening one from the inbox goes to To review with the fold open.
+        store.waiting_open = false;
+        store.open_request(&waits.id);
+        assert!(store.mode == QueueMode::ToReview && store.waiting_open);
+    }
+
+    #[test]
+    fn reviewing_again_by_hand_lasts_until_i_review() {
+        let mut store = store();
+        let waits = iid(&store, "183");
+        let before = store.count(QueueMode::ToReview);
+        store.review_again(&waits.id);
+        assert_eq!(store.turn_of(&waits), Turn::CameBack);
+        assert_eq!(store.count(QueueMode::ToReview), before + 1);
+        assert_eq!(crate::data::mine::came_back_reason(&waits, true), "You moved this back");
+
+        // A review of mine since ends the choice, and a refresh prunes it.
+        let mut again = waits.clone();
+        again.my_review_at = Some(Utc::now());
+        assert_eq!(Turn::of(&again, store.moved_back.get(&waits.id)), Turn::Waiting);
+        let mut moved = store.moved_back.clone();
+        let open = [&again];
+        crate::data::turn::prune(&mut moved, &open, &[Forge::Gitlab]);
+        assert!(moved.is_empty());
+
+        // So does the request leaving the open list; another account's choice is left alone.
+        let mut moved = store.moved_back.clone();
+        crate::data::turn::prune(&mut moved, &[], &[Forge::Github]);
+        assert_eq!(moved.len(), 1);
+        crate::data::turn::prune(&mut moved, &[], &[Forge::Gitlab]);
+        assert!(moved.is_empty());
+        let _ = MovedBack::new(&waits, Utc::now());
     }
 }
