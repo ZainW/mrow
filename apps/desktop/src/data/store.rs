@@ -16,6 +16,7 @@ use super::mine::{self, Stack, Standing, Status, WalkStep};
 use super::models::*;
 use super::prefs;
 use super::snooze::{self, Hold, Snooze};
+use super::turn::{self, MovedBack, Turn};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Loadable<T> {
@@ -298,6 +299,10 @@ pub struct Store {
     pub holds: BTreeMap<String, Snooze>,
     /// The snoozed fold at the end of the list shows what's in it.
     pub snoozed_open: bool,
+    /// Requests I asked changes on and moved back to To review by hand, by ID.
+    pub moved_back: BTreeMap<String, MovedBack>,
+    /// The fold of requests waiting on their authors, above the snoozed fold.
+    pub waiting_open: bool,
     /// The waiting count changed outside a refresh: the next `poll` puts it on the Dock.
     badge_stale: bool,
     /// My requests merged from here: their leaving the list is my doing, not news.
@@ -382,6 +387,8 @@ impl Default for Store {
             inbox: p.inbox,
             holds: p.snoozed,
             snoozed_open: false,
+            moved_back: p.moved_back,
+            waiting_open: false,
             badge_stale: false,
             merged_here: HashSet::new(),
             seen_before: HashMap::new(),
@@ -454,7 +461,7 @@ impl Store {
     /// What's waiting on me in one account, for the switcher.
     pub fn waiting_count(&self, forge: Forge) -> usize {
         let drafts = prefs::read(|p| p.show_drafts);
-        self.accounts.get(&forge).map_or(0, |a| a.open.iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft) && !self.is_held(m)).count())
+        self.accounts.get(&forge).map_or(0, |a| a.open.iter().filter(|m| self.turn_of(m).to_review() && (drafts || !m.draft) && !self.is_held(m)).count())
     }
 
     /// Shows another account's queue, keeping the selection if it's from there, otherwise moving
@@ -497,12 +504,17 @@ impl Store {
     pub fn items(&self, mode: QueueMode) -> Vec<MergeRequest> {
         let (drafts, oldest) = prefs::read(|p| (p.show_drafts, p.oldest_first));
         let mut items: Vec<MergeRequest> = match mode {
-            QueueMode::ToReview => self.open().iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft) && !self.is_held(m)).cloned().collect(),
-            QueueMode::Reviewed => self.open().iter().filter(|m| !m.my_state.needs_review()).cloned().collect(),
+            QueueMode::ToReview => self.open().iter().filter(|m| self.turn_of(m).to_review() && (drafts || !m.draft) && !self.is_held(m)).cloned().collect(),
+            QueueMode::Reviewed => self.open().iter().filter(|m| self.turn_of(m) == Turn::Done).cloned().collect(),
             QueueMode::Mine => self.mine_listed().cloned().collect(),
             QueueMode::Done => self.done().to_vec(),
         };
-        let key = |m: &MergeRequest| if mode == QueueMode::Done { m.finished_at() } else { m.requested_at };
+        // What came back is ordered by when it did.
+        let key = |m: &MergeRequest| match mode {
+            QueueMode::Done => m.finished_at(),
+            QueueMode::ToReview => self.came_back_at(m).map_or(m.requested_at, |(at, _)| at),
+            _ => m.requested_at,
+        };
         items.sort_by(|a, b| if oldest { key(a).cmp(&key(b)) } else { key(b).cmp(&key(a)) });
         items
     }
@@ -518,16 +530,35 @@ impl Store {
             if self.author_filter.as_ref().is_some_and(|a| *a != item.author.username) {
                 continue;
             }
-            let title = bucket(if self.mode == QueueMode::Done { item.finished_at() } else { item.requested_at });
+            let title = if self.mode == QueueMode::ToReview && self.turn_of(&item) == Turn::CameBack {
+                CAME_BACK
+            } else {
+                bucket(if self.mode == QueueMode::Done { item.finished_at() } else { item.requested_at })
+            };
             match sections.iter_mut().find(|s| s.title == title) {
                 Some(s) => s.items.push(item),
                 None => sections.push(QueueSection { title, items: vec![item] }),
             }
         }
+        // What came back goes first.
+        if let Some(at) = sections.iter().position(|s| s.title == CAME_BACK) {
+            sections[..=at].rotate_right(1);
+        }
         sections
     }
 
-    /// The rows the keys step through, the open snoozed fold's last.
+    /// Where a request stands with me: needing my review, back after changes, waiting on its
+    /// author, or reviewed.
+    pub fn turn_of(&self, item: &MergeRequest) -> Turn {
+        Turn::of(item, self.moved_back.get(&item.id))
+    }
+
+    /// When a request came back to To review and whether I moved it, for its row.
+    pub fn came_back_at(&self, item: &MergeRequest) -> Option<(Date, bool)> {
+        turn::came_back(item, self.moved_back.get(&item.id))
+    }
+
+    /// The rows the keys step through, the open folds' last: waiting on authors, then snoozed.
     pub fn visible_items(&self) -> Vec<MergeRequest> {
         let mut items: Vec<MergeRequest> = if self.mode == QueueMode::Mine {
             self.mine_lines()
@@ -540,6 +571,9 @@ impl Store {
         } else {
             self.sections().into_iter().flat_map(|s| s.items).collect()
         };
+        if self.waiting_open {
+            items.extend(self.waiting_items());
+        }
         if self.snoozed_open {
             items.extend(self.held_items().into_iter().map(|(m, _)| m));
         }
@@ -786,16 +820,18 @@ impl Store {
         };
     }
 
-    /// Opens or closes the snoozed fold. Closing it over a held request moves the selection to
-    /// the list's last row, so the keys go on from a row that's drawn.
-    pub fn set_snoozed_open(&mut self, open: bool) {
-        if !open && self.selected().is_some_and(|m| self.is_held(m)) {
+    /// Opens or closes the folds at the end of the list. Closing them over a request inside
+    /// moves the selection to the list's last row, so the keys go on from a row that's drawn.
+    pub fn set_folds_open(&mut self, open: bool) {
+        if !open && self.selected().is_some_and(|m| self.is_held(m) || self.waits(m)) {
             self.snoozed_open = false;
+            self.waiting_open = false;
             if let Some(last) = self.visible_items().pop() {
                 self.select(Some(last.id));
             }
         }
         self.snoozed_open = open;
+        self.waiting_open = open;
     }
 
     pub fn select_offset(&mut self, offset: i64) {
@@ -1071,6 +1107,7 @@ impl Store {
         // Before the walks move on: a part they merged is still on record as theirs.
         effects.notify = self.note_changes(&fresh, every_loaded);
         self.prune_holds(&loaded, &fresh);
+        self.prune_moved_back(&loaded);
         // After the inbox has compared what the forge said with what it said last time.
         let overlays = std::mem::take(&mut self.overlays);
         for o in overlays.iter().filter(|o| loaded.contains(&o.forge)) {
@@ -1087,7 +1124,7 @@ impl Store {
 
     /// The Dock badge: reviews waiting on me, across every account, less the snoozed ones.
     fn badge(&self) -> usize {
-        self.accounts.values().flat_map(|a| &a.open).filter(|m| m.my_state.needs_review() && !m.draft && !self.is_held(m)).count()
+        self.accounts.values().flat_map(|a| &a.open).filter(|m| self.turn_of(m).to_review() && !m.draft && !self.is_held(m)).count()
     }
 
     pub fn load_details_if_needed(&mut self, item: &MergeRequest) {
@@ -1872,10 +1909,15 @@ impl Store {
             QueueMode::Mine
         } else if !item.is_open() {
             QueueMode::Done
-        } else if item.my_state.needs_review() {
-            QueueMode::ToReview
         } else {
-            QueueMode::Reviewed
+            match self.turn_of(&item) {
+                Turn::Mine | Turn::CameBack => QueueMode::ToReview,
+                Turn::Waiting => {
+                    self.waiting_open = true;
+                    QueueMode::ToReview
+                }
+                Turn::Done => QueueMode::Reviewed,
+            }
         };
         self.select(Some(item.id));
         None
@@ -1908,7 +1950,61 @@ impl Store {
 
     /// Whether a request can be snoozed: one waiting on my review, or one of my open ones.
     pub fn can_snooze(&self, item: &MergeRequest) -> bool {
-        item.is_open() && (self.is_mine(item) || item.my_state.needs_review())
+        item.is_open() && (self.is_mine(item) || self.turn_of(item).to_review())
+    }
+
+    /// Whether a request is in To review's fold of those waiting on their authors.
+    pub fn waits(&self, item: &MergeRequest) -> bool {
+        item.is_open() && self.turn_of(item) == Turn::Waiting
+    }
+
+    /// The requests I asked changes on that nothing has moved since, newest review first: what
+    /// To review's "Waiting on authors" fold holds. The list's filters hold for it too.
+    pub fn waiting_items(&self) -> Vec<MergeRequest> {
+        if self.mode != QueueMode::ToReview {
+            return vec![];
+        }
+        let drafts = prefs::read(|p| p.show_drafts);
+        let query = self.filter.trim().to_lowercase();
+        let mut waiting: Vec<MergeRequest> = self
+            .open()
+            .iter()
+            .filter(|m| self.waits(m) && (drafts || !m.draft) && (query.is_empty() || matches(m, &query)))
+            .filter(|m| self.author_filter.as_ref().is_none_or(|a| *a == m.author.username))
+            .cloned()
+            .collect();
+        waiting.sort_by_key(|m| std::cmp::Reverse(m.my_review_at.unwrap_or(m.updated_at)));
+        waiting
+    }
+
+    /// Moves a waiting request back to To review by hand (the author asked on chat). It stays
+    /// there until I review it again.
+    pub fn review_again(&mut self, id: &str) {
+        let Some(item) = self.item(id).cloned().filter(|m| self.waits(m)) else { return };
+        self.moved_back.insert(item.id.clone(), MovedBack::new(&item, Utc::now()));
+        self.save_moved_back();
+        self.show("Moved back to To review");
+        self.badge_stale = true;
+    }
+
+    fn save_moved_back(&self) {
+        if !self.offline {
+            let moved = self.moved_back.clone();
+            prefs::update(|p| p.moved_back = moved);
+        }
+    }
+
+    /// Ends the moves back that are over: I reviewed again, or the request left the open list.
+    /// Only an account that loaded can say a request is gone.
+    fn prune_moved_back(&mut self, loaded: &[Forge]) {
+        let loaded: Vec<Forge> = loaded.iter().copied().filter(|f| self.accounts.get(f).is_some_and(|a| a.error.is_none())).collect();
+        let open: Vec<&MergeRequest> = self.accounts.values().flat_map(|a| &a.open).filter(|m| m.is_open()).collect();
+        let mut moved = self.moved_back.clone();
+        turn::prune(&mut moved, &open, &loaded);
+        if moved != self.moved_back {
+            self.moved_back = moved;
+            self.save_moved_back();
+        }
     }
 
     /// Whether a filter is narrowing the current list.
@@ -1921,7 +2017,7 @@ impl Store {
     pub fn held_items(&self) -> Vec<(MergeRequest, Snooze)> {
         let drafts = prefs::read(|p| p.show_drafts);
         let items: Vec<&MergeRequest> = match self.mode {
-            QueueMode::ToReview => self.open().iter().filter(|m| m.my_state.needs_review() && (drafts || !m.draft)).collect(),
+            QueueMode::ToReview => self.open().iter().filter(|m| self.turn_of(m).to_review() && (drafts || !m.draft)).collect(),
             QueueMode::Mine => self.mine().iter().filter(|m| m.is_open()).collect(),
             _ => return vec![],
         };
@@ -2033,6 +2129,10 @@ impl Store {
 fn reviewed(me: Option<Person>, state: ReviewState) -> impl Fn(&mut MergeRequest) {
     move |m| {
         m.my_state = state;
+        if state != ReviewState::Unapproved {
+            m.my_review_at = Some(Utc::now());
+            m.pushed_since_review = None;
+        }
         let Some(me) = &me else { return };
         let is_me = |username: &str| username.eq_ignore_ascii_case(&me.username);
         let approved = match state {
@@ -2818,6 +2918,9 @@ pub fn matches(item: &MergeRequest, query: &str) -> bool {
     hay.extend(item.labels.iter().map(|l| l.title.to_lowercase()));
     query.split(' ').filter(|w| !w.is_empty()).all(|w| hay.iter().any(|h| h.contains(w)))
 }
+
+/// The section at the top of To review: requests I asked changes on that have moved since.
+pub const CAME_BACK: &str = "Changes came in";
 
 pub fn bucket(date: Date) -> &'static str {
     let local = date.with_timezone(&Local).date_naive();

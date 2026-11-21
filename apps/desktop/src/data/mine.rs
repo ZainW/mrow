@@ -244,6 +244,16 @@ pub fn review_reason(item: &MergeRequest) -> Option<String> {
     )
 }
 
+/// The reason line of a request that came back to To review after I asked changes.
+pub fn came_back_reason(item: &MergeRequest, moved: bool) -> String {
+    if moved { "You moved this back".into() } else { format!("{} pushed new commits", first_name(&item.author.name)) }
+}
+
+/// The line under a request waiting on its author, in the fold.
+pub fn waiting_line(_item: &MergeRequest) -> String {
+    "No new commits".into()
+}
+
 // MARK: Stacks
 
 /// A chain of merge requests, each targeting the branch of the one before it. Bottom first.

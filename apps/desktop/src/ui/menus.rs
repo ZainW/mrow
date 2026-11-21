@@ -126,6 +126,9 @@ pub fn row(s: &mut App, id: &str, at: PointerPress, tx: &mut Tx) {
         menu.item(PopupItem::new("open-tab", "Open in New Tab"))
     };
     menu = menu.item(PopupItem::new("open", format!("Open in {}", item.kind().name()))).separator();
+    if s.store.waits(item) {
+        menu = menu.item(PopupItem::new("review-again", "Review Again")).separator();
+    }
     if snooze_shown(s, item) {
         menu = snooze_items(s, menu, item).separator();
     }
@@ -151,6 +154,10 @@ pub fn row(s: &mut App, id: &str, at: PointerPress, tx: &mut Tx) {
             "open-tab" => {
                 tx.instant();
                 s.store.open_tab(&id, false);
+            }
+            "review-again" => {
+                tx.instant();
+                s.store.review_again(&id);
             }
             "open" => {
                 let _ = tx.open_url(&item.web_url);

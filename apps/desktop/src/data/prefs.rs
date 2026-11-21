@@ -14,6 +14,7 @@ use serde_json::Value;
 use super::forge::Forge;
 use super::inbox;
 use super::snooze;
+use super::turn;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -63,6 +64,8 @@ pub struct Prefs {
     pub inbox_snapshot: Option<inbox::Snapshot>,
     /// Requests snoozed or muted out of To review and Mine, by global ID (unique across forges).
     pub snoozed: BTreeMap<String, snooze::Snooze>,
+    /// Requests I asked changes on and moved back to To review by hand, by global ID.
+    pub moved_back: BTreeMap<String, turn::MovedBack>,
     /// Check for, download and stage new versions in the background (release builds only).
     pub auto_update: bool,
     pub sidebar_width: f64,
@@ -129,6 +132,7 @@ impl Default for Prefs {
             inbox: Vec::new(),
             inbox_snapshot: None,
             snoozed: BTreeMap::new(),
+            moved_back: BTreeMap::new(),
             auto_update: true,
             sidebar_width: SIDEBAR_WIDTH,
             ask_width: 400.0,

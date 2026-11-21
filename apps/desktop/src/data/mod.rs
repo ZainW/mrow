@@ -20,6 +20,7 @@ pub mod prefs;
 pub mod snooze;
 pub mod store;
 pub mod styler;
+pub mod turn;
 pub mod update;
 
 #[cfg(test)]

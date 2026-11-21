@@ -26,16 +26,16 @@ fn pull_fields(mine: bool) -> String {
     let method = if mine { " viewerDefaultMergeMethod" } else { "" };
     format!(
         "id number title url createdAt updatedAt mergedAt closedAt state isDraft
-    headRefName baseRefName mergeStateStatus totalCommentsCount body
+    headRefName headRefOid baseRefName mergeStateStatus totalCommentsCount body
     additions deletions changedFiles
     repository {{ nameWithOwner name{method} }}
     author {{ {ACTOR} }}
     reviewRequests(first: 20) {{
       nodes {{ requestedReviewer {{ ... on User {{ login name avatarUrl }} ... on Team {{ slug name }} }} }}
     }}
-    latestReviews(first: 30) {{ nodes {{ state author {{ {ACTOR} }} }} }}
+    latestReviews(first: 30) {{ nodes {{ state submittedAt commit {{ oid }} author {{ {ACTOR} }} }} }}
     labels(first: 20) {{ nodes {{ name color }} }}
-    commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state{checks} }} }} }} }}
+    commits(last: 1) {{ nodes {{ commit {{ committedDate statusCheckRollup {{ state{checks} }} }} }} }}
     {threads}
     timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 50) {{
       nodes {{
@@ -121,9 +121,18 @@ struct ReviewRequest {
 }
 
 #[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ReviewNode {
     state: String,
     author: Option<Actor>,
+    submitted_at: Option<Date>,
+    /// The commit the review was made on.
+    commit: Option<Oid>,
+}
+
+#[derive(Deserialize, Clone)]
+struct Oid {
+    oid: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -139,6 +148,7 @@ struct CommitNode {
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct CommitInner {
+    committed_date: Option<Date>,
     status_check_rollup: Option<Rollup>,
 }
 #[derive(Deserialize, Clone)]
@@ -199,6 +209,7 @@ struct PullNode {
     state: String,
     is_draft: bool,
     head_ref_name: String,
+    head_ref_oid: Option<String>,
     base_ref_name: String,
     merge_state_status: Option<String>,
     total_comments_count: Option<i64>,
@@ -344,11 +355,15 @@ fn build(node: &PullNode, me: &str, pending: bool) -> MergeRequest {
         }
     }
     let mut my_review = None;
+    let mut my_review_at = None;
+    let mut my_review_oid = None;
     for review in node.latest_reviews.as_ref().map_or(&[][..], |n| &n.nodes) {
         let author = person(review.author.as_ref());
         let state = review_state(&review.state);
         if is_me(Some(&author.username)) {
             my_review = Some(state);
+            my_review_at = review.submitted_at;
+            my_review_oid = review.commit.as_ref().map(|c| c.oid.as_str());
         }
         if !listed.insert(author.username.to_lowercase()) {
             continue;
@@ -360,6 +375,14 @@ fn build(node: &PullNode, me: &str, pending: bool) -> MergeRequest {
         if my_review == Some(ReviewState::Unapproved) { ReviewState::Unapproved } else { ReviewState::Unreviewed }
     } else {
         my_review.unwrap_or(ReviewState::Unknown)
+    };
+
+    // Commits landed after my review when the head isn't the commit I reviewed. A rebased old
+    // commit keeps its old date, so the pull request's own last update stands for the push.
+    let head_committed = node.commits.as_ref().and_then(|c| c.nodes.last()).and_then(|c| c.commit.committed_date);
+    let pushed_since_review = match (my_review_at, my_review_oid, node.head_ref_oid.as_deref()) {
+        (Some(reviewed), Some(reviewed_oid), Some(head)) if reviewed_oid != head => Some(head_committed.filter(|d| *d >= reviewed).unwrap_or(node.updated_at)),
+        _ => None,
     };
 
     // When I was asked: requests naming me, or else (asked through a team) any team request.
@@ -435,6 +458,8 @@ fn build(node: &PullNode, me: &str, pending: bool) -> MergeRequest {
         failed_job,
         auto_merge: node.auto_merge_request.is_some(),
         merge_method: node.repository.viewer_default_merge_method.as_ref().map(|m| m.to_lowercase()),
+        my_review_at,
+        pushed_since_review,
     }
 }
 

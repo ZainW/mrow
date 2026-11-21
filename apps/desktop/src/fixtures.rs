@@ -39,6 +39,12 @@ struct Spec {
     counts: (i64, i64, i64),
 }
 
+/// A request whose author pushed `hours` ago, after my review.
+fn pushed(mut m: MergeRequest, hours: i64) -> MergeRequest {
+    m.pushed_since_review = Some(ago(hours));
+    m
+}
+
 fn mr(s: Spec, description: &str) -> MergeRequest {
     let author = person(s.author.0, s.author.1);
     let host = match s.forge {
@@ -93,6 +99,9 @@ fn mr(s: Spec, description: &str) -> MergeRequest {
         failed_job: None,
         auto_merge: false,
         merge_method: None,
+        // Reviewed three quarters of the way from the ask to now; nothing has landed since.
+        my_review_at: (s.my_state != ReviewState::Unreviewed).then(|| ago(s.hours * 3 / 4)),
+        pushed_since_review: None,
     }
 }
 
@@ -567,6 +576,24 @@ pub fn load() -> (BTreeMap<Forge, Account>, HashMap<String, Vec<FileDiff>>, Hash
             },
             "Recurring entries created in March landed an hour early after the clocks changed.",
         ),
+        // Asked changes and nothing has come since: it waits in the fold.
+        mr(
+            Spec {
+                forge: Forge::Gitlab,
+                iid: "183",
+                title: "Stop double-counting split payments",
+                project: "fieldnotes/billing",
+                author: sam,
+                hours: 30,
+                state: "opened",
+                draft: false,
+                my_state: ReviewState::RequestedChanges,
+                pipeline: Some(PipelineStatus::Success),
+                branch: "sam/split-payments",
+                counts: (28, 9, 2),
+            },
+            "A split payment was summed once per part; it now counts the whole once.",
+        ),
     ];
     let gitlab_done = vec![mr(
         Spec {
@@ -828,6 +855,32 @@ pub fn events() -> Vec<Event> {
         event(Gitlab, "fieldnotes/ledger", "229", Kind::Closed, "Merged", "Rename the export settings", 22 * 60, true),
         event(Gitlab, "fieldnotes/hooks", "88", Kind::AskedAgain, "Devika Rao asked again", "Retry webhook deliveries with jittered backoff", 30 * 60, true),
     ]
+}
+
+/// Asked changes, then the author pushed again: it comes back to the top of To review. Kept out
+/// of the default queue, where the first request is the one with recorded changes.
+pub fn pushed_review() -> MergeRequest {
+    let maya = ("maya.lind", "Maya Lindqvist");
+    pushed(
+        mr(
+            Spec {
+                forge: Forge::Gitlab,
+                iid: "181",
+                title: "Batch the nightly reconciliation job",
+                project: "fieldnotes/ledger",
+                author: maya,
+                hours: 70,
+                state: "opened",
+                draft: false,
+                my_state: ReviewState::RequestedChanges,
+                pipeline: Some(PipelineStatus::Success),
+                branch: "maya/reconcile-batches",
+                counts: (96, 41, 5),
+            },
+            "Reconciles in batches of 500 so a failure retries one batch, not the night.",
+        ),
+        2,
+    )
 }
 
 /// Three more reviews asked of Robin on GitLab, for the snoozed fold to hold.

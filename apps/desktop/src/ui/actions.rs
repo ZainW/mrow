@@ -282,6 +282,16 @@ pub fn unsnooze(s: &mut App, tx: &mut Tx) {
     hold_selected(s, tx, "unsnooze");
 }
 
+/// Moves the selected request I asked changes on back to To review, as the row menu's item does.
+pub fn review_again(s: &mut App, tx: &mut Tx) {
+    let Some(id) = s.store.selected().filter(|m| s.store.waits(m)).map(|m| m.id.clone()) else {
+        s.store.show("It isn’t waiting on its author.");
+        return;
+    };
+    tx.instant();
+    s.store.review_again(&id);
+}
+
 pub fn mute(s: &mut App, tx: &mut Tx) {
     hold_selected(s, tx, "mute");
 }
@@ -382,6 +392,7 @@ const COMMANDS: &[Command] = &[
     cmd(R, "snooze-morning", "Snooze Until Morning", Some("cmd+shift+s"), snooze_until_tomorrow),
     cmd(R, "snooze-change", "Snooze Until It Changes", None, snooze_until_it_changes),
     cmd(R, "unsnooze", "Unsnooze", None, unsnooze),
+    cmd(R, "review-again", "Review Again", None, review_again),
     cmd(R, "mute", "Mute", None, mute),
     cmd(R, "unmute", "Unmute", None, unmute),
     sep("Review"),
@@ -516,6 +527,7 @@ fn not_now(s: &App, id: &str) -> Option<String> {
         | "snooze-morning"
         | "snooze-change"
         | "unsnooze"
+        | "review-again"
         | "mute"
         | "unmute" => {}
         _ => return None,
@@ -539,6 +551,7 @@ fn not_now(s: &App, id: &str) -> Option<String> {
         "reopen" if item.state != "closed" => Some(format!("This {noun} isn’t closed.")),
         "update-branch" | "close-request" | "ask-again" | "reopen" if !idle => Some(wait()),
         "toggle-viewed" | "previous-file" if s.tab(&item.id) != Tab::Changes => Some("Open the Changes tab first.".into()),
+        "review-again" if !store.waits(item) => Some("It isn’t waiting on its author.".into()),
         "unsnooze" if !held.is_some_and(|h| !h.muted()) => Some("It isn’t snoozed.".into()),
         "unmute" if !held.is_some_and(|h| h.muted()) => Some("It isn’t muted.".into()),
         "snooze-morning" | "snooze-change" | "mute" if held.is_some_and(|h| h.muted()) => Some("It’s muted. Unmute it first.".into()),
