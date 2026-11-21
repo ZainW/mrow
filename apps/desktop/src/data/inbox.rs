@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::forge::Forge;
 use super::mine::{self, Standing};
 use super::models::{Date, MergeRequest, PipelineStatus, ReviewState};
+use super::turn::Turn;
 
 /// The most events kept.
 pub const CAP: usize = 100;
@@ -32,6 +33,8 @@ const SAME_ASK_SECONDS: i64 = 60;
 pub enum Kind {
     ReviewAsked,
     AskedAgain,
+    /// The author pushed after I asked for changes: it's back in To review.
+    Pushed,
     ChangesRequested,
     PipelineFailed,
     Ready,
@@ -42,14 +45,24 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] =
-        [Kind::ReviewAsked, Kind::AskedAgain, Kind::ChangesRequested, Kind::PipelineFailed, Kind::Ready, Kind::Approved, Kind::Threads, Kind::Closed];
+    pub const ALL: [Kind; 9] = [
+        Kind::ReviewAsked,
+        Kind::AskedAgain,
+        Kind::Pushed,
+        Kind::ChangesRequested,
+        Kind::PipelineFailed,
+        Kind::Ready,
+        Kind::Approved,
+        Kind::Threads,
+        Kind::Closed,
+    ];
 
     /// Its name in Settings.
     pub fn label(self) -> &'static str {
         match self {
             Kind::ReviewAsked => "Review asked",
             Kind::AskedAgain => "Asked again",
+            Kind::Pushed => "Changes came in",
             Kind::ChangesRequested => "Changes asked",
             Kind::PipelineFailed => "Pipeline failed",
             Kind::Ready => "Ready to merge",
@@ -62,7 +75,7 @@ impl Kind {
     /// The turn changing is worth a banner; the rest only goes in the inbox.
     pub fn default_level(self) -> Level {
         match self {
-            Kind::ReviewAsked | Kind::AskedAgain | Kind::ChangesRequested | Kind::PipelineFailed | Kind::Ready => Level::Notify,
+            Kind::ReviewAsked | Kind::AskedAgain | Kind::Pushed | Kind::ChangesRequested | Kind::PipelineFailed | Kind::Ready => Level::Notify,
             Kind::Approved | Kind::Threads | Kind::Closed => Level::Inbox,
         }
     }
@@ -75,15 +88,16 @@ impl Kind {
             Kind::Ready => 2,
             Kind::ReviewAsked => 3,
             Kind::AskedAgain => 4,
-            Kind::Approved => 5,
-            Kind::Threads => 6,
-            Kind::Closed => 7,
+            Kind::Pushed => 5,
+            Kind::Approved => 6,
+            Kind::Threads => 7,
+            Kind::Closed => 8,
         }
     }
 
     /// About a request I opened, rather than one I was asked to review.
     pub fn on_mine(self) -> bool {
-        !matches!(self, Kind::ReviewAsked | Kind::AskedAgain)
+        !matches!(self, Kind::ReviewAsked | Kind::AskedAgain | Kind::Pushed)
     }
 }
 
@@ -165,6 +179,16 @@ pub struct Snapshot {
     pub reviews: BTreeMap<String, Asked>,
     /// Each of my open requests, by ID.
     pub mine: BTreeMap<String, Own>,
+    /// Each review I asked changes on that the author has pushed to since, by ID: when they
+    /// last pushed, in seconds.
+    pub pushed: BTreeMap<String, Pushed>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pushed {
+    pub forge: Forge,
+    pub at: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -304,6 +328,20 @@ pub fn detect(prev: &Snapshot, looks: &[Look], merged_here: &HashSet<String>, no
             next.reviews.insert(m.id.clone(), Asked { forge, at });
         }
         next.review_forges.insert(forge);
+
+        // Reviews I asked changes on that the author pushed to since. Moving one back by hand
+        // is my own doing, so only the push counts.
+        let pushed: Vec<(&MergeRequest, Date)> =
+            look.open.iter().filter(|m| Turn::of(m, None) == Turn::CameBack).filter_map(|m| Some((m, m.pushed_since_review?))).collect();
+        for (m, at) in &pushed {
+            if first || prev.pushed.get(&m.id).is_some_and(|p| at.timestamp() <= p.at) {
+                continue;
+            }
+            let title = format!("{} pushed new commits", m.author.name);
+            events.push(Event::new(&Own::of(m, Standing::Waiting), &m.id, Kind::Pushed, title, *at));
+        }
+        next.pushed.retain(|_, p| p.forge != forge);
+        next.pushed.extend(pushed.iter().map(|(m, at)| (m.id.clone(), Pushed { forge, at: at.timestamp() })));
 
         // My own requests.
         let Some(mine) = look.mine else { continue };

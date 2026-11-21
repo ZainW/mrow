@@ -1827,8 +1827,8 @@ impl Store {
         let loud: Vec<Event> = found.iter().filter(|e| !e.done).cloned().collect();
         let notices = inbox::notices(&loud, &levels, banners);
         inbox::add(&mut self.inbox, found);
-        // A review request is dealt with once it no longer waits on me.
-        let waiting: HashSet<&str> = looks.iter().flat_map(|l| l.open.iter()).filter(|m| m.my_state.needs_review()).map(|m| m.id.as_str()).collect();
+        // A review request is dealt with once it's no longer in To review.
+        let waiting: HashSet<&str> = looks.iter().flat_map(|l| l.open.iter()).filter(|m| self.turn_of(m).to_review()).map(|m| m.id.as_str()).collect();
         for e in self.inbox.iter_mut().filter(|e| !e.kind.on_mine() && forges.contains(&e.forge)) {
             if !waiting.contains(e.request.as_str()) {
                 e.done = true;

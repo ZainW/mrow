@@ -805,6 +805,30 @@ mod inbox {
     }
 
     #[test]
+    fn a_push_after_my_changes_request_is_news_once() {
+        let none = HashSet::new();
+        let mut asked = request("1", "maya");
+        asked.my_state = ReviewState::RequestedChanges;
+        asked.my_review_at = Some(Utc::now() - Duration::hours(3));
+        let mut q = Queue::new(vec![asked], vec![]);
+        let (snapshot, _) = run(&Snapshot::default(), &q, &none);
+
+        // Nothing pushed yet: it waits on the author, quietly.
+        let (snapshot, events) = run(&snapshot, &q, &none);
+        assert!(events.is_empty(), "{events:?}");
+
+        let pushed = Utc::now() - Duration::hours(1);
+        q.open[0].pushed_since_review = Some(pushed);
+        let (snapshot, events) = run(&snapshot, &q, &none);
+        assert_eq!(kinds(&events), [("id-1".to_string(), Kind::Pushed, "maya pushed new commits".to_string())]);
+        assert!(run(&snapshot, &q, &none).1.is_empty());
+
+        // Another push is news again.
+        q.open[0].pushed_since_review = Some(pushed + Duration::minutes(30));
+        assert_eq!(run(&snapshot, &q, &none).1[0].kind, Kind::Pushed);
+    }
+
+    #[test]
     fn my_own_doing_is_no_news() {
         let mut q = Queue::new(vec![request("1", "maya")], vec![own("2"), own("3")]);
         q.mine[0].reviewers.push(Reviewer { person: Person::new("me", "Me"), state: ReviewState::Unreviewed, approved: false });

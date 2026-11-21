@@ -17,7 +17,7 @@ pub fn kind_color(p: &Pal, kind: Kind) -> rune::Color {
     match kind {
         Kind::Ready | Kind::Approved => p.green,
         Kind::ChangesRequested | Kind::PipelineFailed | Kind::Threads => p.red,
-        Kind::ReviewAsked | Kind::AskedAgain => p.accent,
+        Kind::ReviewAsked | Kind::AskedAgain | Kind::Pushed => p.accent,
         Kind::Closed => p.secondary,
     }
 }
