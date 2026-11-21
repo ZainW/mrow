@@ -8,9 +8,29 @@ import type { Account, Check, Comment, DiffFile, InboxEvent, ListId, Provider, R
 const GROUP_ORDER = ['Today', 'Yesterday', 'This week', 'Older'] as const
 const AGENTS = ['Cursor', 'Claude', 'opencode', 'pi'] as const
 
+type FoldId = 'waiting' | 'snoozed'
 type Filter = 'all' | 'ready' | 'needs' | 'waiting' | 'draft'
 type Confirm = { id: string; kind: 'merge' | 'stack' }
 type Line = { kind: 'row'; review: Review; inStack?: boolean } | { kind: 'stack'; name: string; parts: Review[] }
+
+/** Whether a request shows in its list: not held, and not waiting on its author. */
+function shown(r: Review) {
+  return !r.snooze && r.turn !== 'waiting'
+}
+
+/** Minutes in an age like "25m", "3h" or "1d", for ordering rows by recency. */
+function ageMinutes(age: string) {
+  const n = parseInt(age, 10)
+  if (Number.isNaN(n)) return 0
+  return age.endsWith('d') ? n * 1440 : age.endsWith('h') ? n * 60 : n
+}
+
+/** What a held row says: when it comes back, or that it was muted. */
+function holdLine(r: Review, noun: string) {
+  if (r.snooze === 'mute') return `Muted this ${noun}`
+  if (r.snooze === 'change') return 'Snoozed until it changes'
+  return `Snoozed until ${r.snooze?.until ?? ''}`
+}
 
 /** Which filter mark a standing falls under: quiet and held requests count as waiting. */
 function filterOf(s: Standing | undefined): Filter {
@@ -37,7 +57,7 @@ const word: Record<Standing, string> = {
  */
 export function AppMock({ provider, onProvider }: { provider: Provider; onProvider: (p: Provider) => void }) {
   const [list, setList] = useState<ListId>('review')
-  const [selectedId, setSelectedId] = useState(() => reviews[provider].find((r) => r.list === 'review')?.id ?? '')
+  const [selectedId, setSelectedId] = useState(() => reviews[provider].find((r) => r.list === 'review' && shown(r))?.id ?? '')
   const [tabs, setTabs] = useState<string[]>([])
   const [chatOpen, setChatOpen] = useState(false)
   const [inboxOpen, setInboxOpen] = useState(false)
@@ -49,13 +69,22 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
   const [changes, setChanges] = useState<Record<string, Partial<Review>>>({})
   const [confirm, setConfirm] = useState<Confirm>()
   const [walking, setWalking] = useState<Set<string>>(() => new Set())
+  const [folds, setFolds] = useState<Set<FoldId>>(() => new Set())
   const queueRef = useRef<HTMLDivElement>(null)
+  const refocus = useRef<string | undefined>(undefined)
   const bellRef = useRef<HTMLButtonElement>(null)
   const keyLabel = useKeyLabel()
 
   const all = useMemo(() => reviews[provider].map((r) => ({ ...r, ...changes[r.id] })), [provider, changes])
   const byId = (id: string) => all.find((r) => r.id === id)
   const inList = all.filter((r) => r.list === list)
+  const noun = accounts[provider].noun
+  const came = inList.filter((r) => r.turn === 'came' && !r.snooze).sort((a, b) => ageMinutes(a.age) - ageMinutes(b.age))
+  const waiting = inList.filter((r) => r.turn === 'waiting' && !r.snooze)
+  const held = inList.filter((r) => r.snooze)
+  const listed = inList.filter((r) => !r.turn && !r.snooze)
+  const mutedCount = held.filter((r) => r.snooze === 'mute').length
+  const heldLabel = mutedCount === 0 ? `${held.length} snoozed` : held.length === mutedCount ? `${mutedCount} muted` : `${held.length - mutedCount} snoozed, ${mutedCount} muted`
   const selected = byId(selectedId) ?? inList[0]
   const fresh = events[provider].filter((e) => e.fresh).length
 
@@ -77,18 +106,47 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
   function switchAccount(next: Provider) {
     onProvider(next)
     setInboxOpen(false)
-    const first = reviews[next].find((r) => r.list === list)
+    const first = reviews[next].find((r) => r.list === list && shown(r))
     if (first) select(first)
   }
   function switchList(next: ListId) {
     setList(next)
     setFilter('all')
-    const first = all.find((r) => r.list === next)
+    const first = all.find((r) => r.list === next && shown(r))
     if (first) select(first)
   }
   function change(id: string, patch: Partial<Review>) {
     setChanges((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
   }
+  function toggleFold(id: FoldId) {
+    const inFold = id === 'waiting' ? waiting : held
+    if (folds.has(id) && selected && inFold.some((r) => r.id === selected.id)) {
+      const first = came[0] ?? listed[0]
+      if (first) select(first)
+    }
+    setFolds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  function reviewAgain(r: Review) {
+    refocus.current = r.id
+    select(r)
+    change(r.id, { turn: 'came', movedBack: true, reason: 'You moved this back', age: 'now' })
+  }
+  function unsnooze(r: Review) {
+    refocus.current = r.id
+    select(r)
+    change(r.id, { snooze: undefined })
+  }
+
+  useEffect(() => {
+    if (!refocus.current) return
+    queueRef.current?.querySelector<HTMLButtonElement>(`[data-id="${refocus.current}"]`)?.focus()
+    refocus.current = undefined
+  })
 
   // The rows in the order they're drawn, for j and k.
   const lines = useMemo(() => {
@@ -118,7 +176,12 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
   const ordered: Review[] =
     list === 'mine'
       ? lines.flatMap((l) => (l.kind === 'row' ? [l.review] : visibleParts(l.name, l.parts)))
-      : GROUP_ORDER.flatMap((g) => inList.filter((r) => r.group === g))
+      : [
+          ...came,
+          ...GROUP_ORDER.flatMap((g) => listed.filter((r) => r.group === g)),
+          ...(folds.has('waiting') ? waiting : []),
+          ...(folds.has('snoozed') ? held : []),
+        ]
 
   function onQueueKey(e: KeyboardEvent<HTMLDivElement>) {
     if (e.metaKey || e.ctrlKey || e.altKey) return
@@ -147,7 +210,7 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
   })
 
   const counts: Record<ListId, number | undefined> = {
-    review: all.filter((r) => r.list === 'review').length,
+    review: all.filter((r) => r.list === 'review' && r.turn !== 'waiting' && !r.snooze).length,
     reviewed: all.filter((r) => r.list === 'reviewed').length,
     mine: all.filter((r) => r.list === 'mine' && onYou(r) && r.standing !== 'merged').length,
     done: undefined,
@@ -252,9 +315,17 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
           )}
 
           <div className="queue" ref={queueRef} onKeyDown={onQueueKey}>
+            {list !== 'mine' && came.length > 0 && (
+              <section className="queue-group">
+                <h4>Changes came in</h4>
+                {came.map((r) => (
+                  <QueueRow key={r.id} {...rowProps(r)} />
+                ))}
+              </section>
+            )}
             {list !== 'mine' &&
               GROUP_ORDER.map((g) => {
-                const rows = inList.filter((r) => r.group === g)
+                const rows = listed.filter((r) => r.group === g)
                 if (!rows.length) return null
                 return (
                   <section key={g} className="queue-group">
@@ -265,6 +336,34 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
                   </section>
                 )
               })}
+            {list !== 'mine' && waiting.length > 0 && (
+              <Fold id="waiting" label={`Waiting on authors ${waiting.length}`} open={folds.has('waiting')} onToggle={() => toggleFold('waiting')}>
+                {waiting.map((r) => (
+                  <HeldRow
+                    key={r.id}
+                    {...rowProps(r)}
+                    line="No new commits"
+                    verb="Review again"
+                    icon={<RefreshIcon />}
+                    onAct={() => reviewAgain(r)}
+                  />
+                ))}
+              </Fold>
+            )}
+            {list !== 'mine' && held.length > 0 && (
+              <Fold id="snoozed" label={heldLabel} open={folds.has('snoozed')} onToggle={() => toggleFold('snoozed')}>
+                {held.map((r) => (
+                  <HeldRow
+                    key={r.id}
+                    {...rowProps(r)}
+                    line={holdLine(r, noun)}
+                    verb={r.snooze === 'mute' ? 'Unmute' : 'Unsnooze'}
+                    icon={<UndoIcon />}
+                    onAct={() => unsnooze(r)}
+                  />
+                ))}
+              </Fold>
+            )}
             {list === 'mine' && filter !== 'all' && (
               <section className="queue-group">
                 {lines.map((l) => l.kind === 'row' && <QueueRow key={l.review.id} {...rowProps(l.review)} />)}
@@ -403,7 +502,7 @@ export function QueueRow({
 }) {
   const mine = review.list === 'mine'
   const line = mine ? review.step : review.reason
-  const tone = mine ? `step-${review.standing}` : review.again ? 'step-again' : ''
+  const tone = mine ? `step-${review.standing}` : review.again || review.turn === 'came' ? 'step-again' : ''
   return (
     <button
       className={`row${active ? ' active' : ''}${inStack ? ' in-stack' : ''}`}
@@ -428,6 +527,67 @@ export function QueueRow({
         </span>
       </span>
     </button>
+  )
+}
+
+/** A section set like the list's headings that opens on a press: the requests held back from To review. */
+function Fold({ id, label, open, onToggle, children }: { id: string; label: string; open: boolean; onToggle: () => void; children: ReactNode }) {
+  const panel = useId()
+  return (
+    <section className="queue-group fold" data-fold={id}>
+      <button className="fold-head" aria-expanded={open} aria-controls={panel} onClick={onToggle}>
+        <Chevron className={open ? 'chev open' : 'chev'} />
+        <span>{label}</span>
+      </button>
+      <div id={panel} hidden={!open}>
+        {children}
+      </div>
+    </section>
+  )
+}
+
+/** A request in an open fold: quieter than a list row, with what happened since and the button that moves it back. */
+function HeldRow({
+  review,
+  active,
+  line,
+  verb,
+  icon,
+  onSelect,
+  onKeep,
+  onAct,
+}: {
+  review: Review
+  active: boolean
+  line: string
+  verb: string
+  icon: ReactNode
+  onSelect: () => void
+  onKeep: () => void
+  onAct: () => void
+}) {
+  return (
+    <div className={active ? 'held on' : 'held'}>
+      <button
+        className={`row quiet-row${active ? ' active' : ''}`}
+        aria-current={active ? 'true' : undefined}
+        data-id={review.id}
+        onClick={onSelect}
+        onDoubleClick={onKeep}
+      >
+        <span className="dot" />
+        <span className="row-main">
+          <span className="row-title">{review.title}</span>
+          <span className="row-sub">
+            <span className="row-ref">{shortRef(review)}</span>
+            <span className="held-line">· {line}</span>
+          </span>
+        </span>
+      </button>
+      <button className="quiet-btn held-act" aria-label={`${verb}: ${review.title}`} title={verb} onClick={onAct}>
+        {icon}
+      </button>
+    </div>
   )
 }
 
@@ -789,7 +949,13 @@ function Detail({
                   ? `${review.outcome === 'Closed' ? 'closed' : 'merged'} ${review.age} ago`
                   : review.list === 'reviewed'
                     ? `opened this · ${lower(review.reason ?? '')}`
-                    : `${review.again ? 'asked again' : 'asked for your review'} ${review.age} ago`}
+                    : review.movedBack
+                      ? 'opened this · you moved it back just now'
+                      : review.turn === 'came'
+                        ? `pushed new commits ${review.age} ago`
+                        : review.turn === 'waiting'
+                          ? 'opened this · you asked for changes'
+                          : `${review.again ? 'asked again' : 'asked for your review'} ${review.age} ago`}
             </span>
           </p>
           <p className="chips">
@@ -1849,6 +2015,14 @@ function UndoIcon() {
   return (
     <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
       <path d="M5 3.5L2.5 6 5 8.5M3 6h6.5a3.5 3.5 0 0 1 0 7H6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function RefreshIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v2.5h-2.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }

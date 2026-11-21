@@ -62,11 +62,14 @@ export function QueueFigure() {
       <dl className="lists">
         <div>
           <dt>To review</dt>
-          <dd>Your turn: you haven’t reviewed it, or new commits reset your review.</dd>
+          <dd>
+            Your turn: you haven’t reviewed it, new commits reset your review, or its author pushed after you asked for
+            changes.
+          </dd>
         </div>
         <div>
           <dt>Reviewed</dt>
-          <dd>You approved, commented or asked for changes, and it’s still open.</dd>
+          <dd>You approved or commented, and it’s still open.</dd>
         </div>
         <div>
           <dt>Mine</dt>

@@ -1149,6 +1149,78 @@ main {
   cursor: pointer;
 }
 
+/* Folds at the end of To review: waiting on authors, snoozed */
+.fold-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 36px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  cursor: pointer;
+}
+.fold-head .chev {
+  transform: rotate(-90deg);
+}
+.fold-head .chev.open {
+  transform: none;
+}
+.held {
+  position: relative;
+}
+.held .row-title {
+  padding-right: 28px;
+  color: var(--text-2);
+  -webkit-line-clamp: 1;
+}
+.held.on .row-title {
+  color: var(--text);
+}
+.held .row-main {
+  grid-template-columns: minmax(0, 1fr);
+}
+.held .row-ref {
+  flex: none;
+}
+.held-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.held-act {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+}
+.held-act::before {
+  content: '';
+  position: absolute;
+  inset: -7px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .held-act {
+    opacity: 0;
+  }
+  .held:hover .held-act,
+  .held:focus-within .held-act,
+  .held.on .held-act {
+    opacity: 1;
+  }
+}
+
 /* The inbox behind the bell */
 .inbox-pop {
   position: absolute;
@@ -3108,8 +3180,10 @@ button.thread-where {
   .row:hover {
     background: var(--hover);
   }
-  .stack-head:hover {
+  .stack-head:hover,
+  .fold-head:hover {
     background: var(--hover);
+    color: var(--text-2);
   }
   .stack-more:hover {
     background: var(--hover);
@@ -3165,6 +3239,7 @@ button.thread-where {
   .quiet-btn,
   .stack-head,
   .stack-more,
+  .fold-head,
   .check-line,
   .stack-line,
   .review-tab,

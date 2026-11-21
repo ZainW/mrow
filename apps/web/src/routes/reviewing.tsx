@@ -10,7 +10,7 @@ export const Route = createFileRoute('/reviewing')({
       path: '/reviewing',
       title: 'Reviewing in Mrow',
       description:
-        'The reviews waiting on you, sorted by when you were asked. Each opens in three tabs, Overview, Changes and Conversation, and you finish it in the app: resolve threads, hold comments, then comment, request changes or approve.',
+        'The reviews waiting on you, sorted by when you were asked. Each opens in three tabs, Overview, Changes and Conversation, and you finish it in the app: resolve threads, hold comments, then comment, request changes or approve. Snooze what can wait.',
     }),
   component: Reviewing,
 })
@@ -32,7 +32,8 @@ function Reviewing() {
           <>
             <p>
               On macOS the Dock badge counts what’s waiting on you. A new review request, or one asked again, sends a
-              notification and lands in the <Link to="/mine" className="text-link inline">inbox</Link>.
+              notification and lands in the <Link to="/mine" hash="inbox" className="text-link inline">inbox</Link>, and so
+              does a push to one you asked changes on.
             </p>
             <p>Mrow refreshes every five minutes (you can change that) and whenever you come back to it.</p>
             <KeyList items={[[['⌘1', '⌘2', '⌘3', '⌘4'], 'To review, Reviewed, Mine, Done']]} />
@@ -49,6 +50,12 @@ function Reviewing() {
           The list falls into Today, Yesterday, This week, This month and Older. Anything that has waited on you for more
           than two days shows its age in clay, so the old ones don’t hide under the new.
         </p>
+        <p>
+          Ask for changes and the request gets out of your way. It waits in a folded <em>Waiting on authors</em> at the
+          end of To review, out of the count and the badge, until its author pushes. Then it rises to{' '}
+          <em>Changes came in</em> at the top, with who pushed and when. <strong>Review Again</strong> brings one back
+          without waiting.
+        </p>
       </Chapter>
 
       <Chapter
@@ -59,6 +66,9 @@ function Reviewing() {
             items={[
               [['⌥⌘1', '⌥⌘2', '⌥⌘3'], 'Overview, Changes, Conversation'],
               [['J', 'K'], 'Next or previous file, in Changes'],
+              [['N', 'P'], 'Next or previous open thread'],
+              [['V'], 'Mark the file viewed, go to the next'],
+              [['R', 'C'], 'Reply to the thread, write a comment'],
               [['⇧⌘A'], 'Approve'],
             ]}
           />
@@ -75,7 +85,14 @@ function Reviewing() {
         </p>
         <p>
           The bar holds “Open in GitHub” (or GitLab), Review and Approve on every tab, so a quick approval never takes a
-          scroll. Each tab keeps its place when you leave it. Tick files off as viewed while you go.
+          scroll. Each tab keeps its place when you leave it.
+        </p>
+        <p>
+          The keys walk you through it. <Keys keys={['N']} /> and <Keys keys={['P']} /> go from open thread to open
+          thread, <Keys keys={['R']} /> replies to the one you’re on, and <Keys keys={['C']} /> starts a comment.{' '}
+          <Keys keys={['V']} /> marks the file viewed and goes on to the next one you haven’t. Past eight files, the list
+          groups them by folder, each with how many you’ve viewed and how many lines it changes, folded so the first diff
+          still starts on the first screen.
         </p>
         <p>
           Reading text is set in Charis SIL, a serif made for long reading. The interface is Inter and the code is Geist
@@ -118,6 +135,27 @@ function Reviewing() {
           want one, then <strong>Comment</strong>, <strong>Request Changes</strong> or <strong>Approve</strong>, and
           everything posts together. Approve is still one press when nothing is held; with comments pending, it opens the
           panel so they don’t go out unseen.
+        </p>
+      </Chapter>
+
+      <Chapter
+        id="snooze"
+        title="Snooze what can wait"
+        aside={
+          <>
+            <p>Snoozes last across launches, and end when the request merges or closes.</p>
+            <KeyList items={[[['⇧⌘S'], 'Snooze until morning']]} />
+          </>
+        }
+      >
+        <p>
+          Snooze a request until morning, 9:00 on the next working day, so a Friday snooze comes back on Monday. Or snooze
+          it until something changes on it, or mute it until you unmute it. It leaves the list, the count and the badge,
+          and waits in a fold at the end of the list that says when each one comes back.
+        </p>
+        <p>
+          A snoozed request doesn’t notify you. The change that ends a snooze does, as any change would. It works the same
+          on your own requests in Mine.
         </p>
       </Chapter>
 
