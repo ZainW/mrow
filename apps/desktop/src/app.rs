@@ -434,8 +434,11 @@ impl App {
             None => return ProposalTarget::Waiting,
         };
         // Agents sometimes keep the diff's `a/` or `b/` in front of the path.
-        let exact = files.iter().any(|f| f.new_path == *path || f.old_path == *path);
-        let path = if exact { path } else { path.strip_prefix("b/").or_else(|| path.strip_prefix("a/")).unwrap_or(path) };
+        let exact = |p: &str| files.iter().any(|f| f.new_path == p || f.old_path == p);
+        let path = match path.strip_prefix("b/").or_else(|| path.strip_prefix("a/")) {
+            Some(stripped) if !exact(path) && exact(stripped) => stripped,
+            _ => path,
+        };
         let same = |p: &str| p == path || p.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{p}"));
         let Some(file) = files.iter().find(|f| same(&f.new_path)).or_else(|| files.iter().find(|f| same(&f.old_path))) else { return missed };
         let found = file
@@ -446,9 +449,10 @@ impl App {
         if let Some(index) = found {
             return ProposalTarget::Line(file.clone(), file.lines[index].clone());
         }
-        // An unchanged line between or around the hunks takes a comment too, as when the diff is
-        // expanded: agents with the clone read whole files, so they often pick one.
-        let unshown = self.store.item(id).and_then(|item| self.store.context_line(item, file, number));
+        // An unchanged line between or around the hunks takes a comment too, where the forge
+        // allows it, as when the diff is expanded: agents with the clone read whole files, so
+        // they often pick one.
+        let unshown = self.store.item(id).filter(|item| item.kind().comments_outside_diff()).and_then(|item| self.store.context_line(item, file, number));
         match unshown {
             Some(line) => ProposalTarget::Line(file.clone(), line),
             None => missed,
@@ -631,9 +635,21 @@ mod tests {
         assert_eq!(placed(&s, &id, "src/export/job.rs:15"), placed(&s, &id, "job.rs line 15"));
         // Between the hunks, which the diff doesn't show: an unchanged line, both sides numbered.
         assert_eq!(placed(&s, &id, "src/export/job.rs:40"), Some((LineKind::Context, Some(39), Some(40))));
-        // Below the last hunk, before the file's length is known.
-        assert_eq!(placed(&s, &id, "src/export/job.rs:200"), Some((LineKind::Context, Some(199), Some(200))));
+        // Below the last hunk only once the file's length is known, so a line past its end
+        // isn't posted at.
+        assert_eq!(placed(&s, &id, "src/export/job.rs:200"), None);
         assert_eq!(placed(&s, &id, "src/other.rs:15"), None, "a file the diff doesn't change posts on the request");
         assert_eq!(placed(&s, &id, "src/export/job.rs"), None);
+    }
+
+    #[test]
+    fn github_comments_stay_in_the_hunks() {
+        let (mut s, id) = app();
+        for account in s.store.accounts.values_mut() {
+            account.open.iter_mut().filter(|m| m.id == id).for_each(|m| m.forge = crate::data::forge::Forge::Github);
+        }
+        assert_eq!(s.store.item(&id).map(|m| m.kind()), Some(crate::data::forge::Forge::Github));
+        assert_eq!(placed(&s, &id, "src/export/job.rs:15"), Some((LineKind::Added, None, Some(15))));
+        assert_eq!(placed(&s, &id, "src/export/job.rs:40"), None, "GitHub refuses lines outside the hunks");
     }
 }

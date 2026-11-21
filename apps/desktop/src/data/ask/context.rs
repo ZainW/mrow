@@ -58,7 +58,7 @@ pub fn build(item: &MergeRequest, files: &[FileDiff], threads: &[Discussion], ch
     for (name, guide) in WRITING {
         text += &format!("<guide name=\"{name}\">\n{}\n</guide>\n\n", guide.trim());
     }
-    text += super::proposals::INSTRUCTIONS;
+    text += &super::proposals::instructions(kind.comments_outside_diff());
     text += &format!("\n## Description\n\n{description}\n");
 
     // The diff, smallest files first so one huge file doesn't crowd out the rest.
@@ -67,8 +67,8 @@ pub fn build(item: &MergeRequest, files: &[FileDiff], threads: &[Discussion], ch
     let mut diff = String::new();
     let mut left_out: Vec<&str> = Vec::new();
     for file in sorted {
-        let lines = numbered(file);
-        if file.diff.is_empty() || file.too_large || diff.len() + lines.len() > DIFF_BUDGET {
+        let lines = if file.diff.is_empty() || file.too_large { String::new() } else { numbered(file) };
+        if lines.is_empty() || diff.len() + lines.len() > DIFF_BUDGET {
             left_out.push(&file.new_path);
             continue;
         }
