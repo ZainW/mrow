@@ -13,6 +13,11 @@ type Filter = 'all' | 'ready' | 'needs' | 'waiting' | 'draft'
 type Confirm = { id: string; kind: 'merge' | 'stack' }
 type Line = { kind: 'row'; review: Review; inStack?: boolean } | { kind: 'stack'; name: string; parts: Review[] }
 
+/** Whether a request shows in its list: not held, and not waiting on its author. */
+function shown(r: Review) {
+  return !r.snooze && r.turn !== 'waiting'
+}
+
 /** Minutes in an age like "25m", "3h" or "1d", for ordering rows by recency. */
 function ageMinutes(age: string) {
   const n = parseInt(age, 10)
@@ -52,7 +57,7 @@ const word: Record<Standing, string> = {
  */
 export function AppMock({ provider, onProvider }: { provider: Provider; onProvider: (p: Provider) => void }) {
   const [list, setList] = useState<ListId>('review')
-  const [selectedId, setSelectedId] = useState(() => reviews[provider].find((r) => r.list === 'review')?.id ?? '')
+  const [selectedId, setSelectedId] = useState(() => reviews[provider].find((r) => r.list === 'review' && shown(r))?.id ?? '')
   const [tabs, setTabs] = useState<string[]>([])
   const [chatOpen, setChatOpen] = useState(false)
   const [inboxOpen, setInboxOpen] = useState(false)
@@ -101,19 +106,24 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
   function switchAccount(next: Provider) {
     onProvider(next)
     setInboxOpen(false)
-    const first = reviews[next].find((r) => r.list === list)
+    const first = reviews[next].find((r) => r.list === list && shown(r))
     if (first) select(first)
   }
   function switchList(next: ListId) {
     setList(next)
     setFilter('all')
-    const first = all.find((r) => r.list === next)
+    const first = all.find((r) => r.list === next && shown(r))
     if (first) select(first)
   }
   function change(id: string, patch: Partial<Review>) {
     setChanges((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
   }
   function toggleFold(id: FoldId) {
+    const inFold = id === 'waiting' ? waiting : held
+    if (folds.has(id) && selected && inFold.some((r) => r.id === selected.id)) {
+      const first = came[0] ?? listed[0]
+      if (first) select(first)
+    }
     setFolds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
@@ -123,10 +133,12 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
   }
   function reviewAgain(r: Review) {
     refocus.current = r.id
-    change(r.id, { turn: 'came', reason: 'You moved this back', age: 'now' })
+    select(r)
+    change(r.id, { turn: 'came', movedBack: true, reason: 'You moved this back', age: 'now' })
   }
   function unsnooze(r: Review) {
     refocus.current = r.id
+    select(r)
     change(r.id, { snooze: undefined })
   }
 
@@ -303,7 +315,7 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
           )}
 
           <div className="queue" ref={queueRef} onKeyDown={onQueueKey}>
-            {came.length > 0 && (
+            {list !== 'mine' && came.length > 0 && (
               <section className="queue-group">
                 <h4>Changes came in</h4>
                 {came.map((r) => (
@@ -324,7 +336,7 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
                   </section>
                 )
               })}
-            {waiting.length > 0 && (
+            {list !== 'mine' && waiting.length > 0 && (
               <Fold id="waiting" label={`Waiting on authors ${waiting.length}`} open={folds.has('waiting')} onToggle={() => toggleFold('waiting')}>
                 {waiting.map((r) => (
                   <HeldRow
@@ -338,7 +350,7 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
                 ))}
               </Fold>
             )}
-            {held.length > 0 && (
+            {list !== 'mine' && held.length > 0 && (
               <Fold id="snoozed" label={heldLabel} open={folds.has('snoozed')} onToggle={() => toggleFold('snoozed')}>
                 {held.map((r) => (
                   <HeldRow
@@ -937,11 +949,13 @@ function Detail({
                   ? `${review.outcome === 'Closed' ? 'closed' : 'merged'} ${review.age} ago`
                   : review.list === 'reviewed'
                     ? `opened this · ${lower(review.reason ?? '')}`
-                    : review.turn === 'came'
-                      ? `pushed new commits ${review.age === 'now' ? 'just now' : `${review.age} ago`}`
-                      : review.turn === 'waiting'
-                        ? 'opened this · you asked for changes'
-                        : `${review.again ? 'asked again' : 'asked for your review'} ${review.age} ago`}
+                    : review.movedBack
+                      ? 'opened this · you moved it back just now'
+                      : review.turn === 'came'
+                        ? `pushed new commits ${review.age} ago`
+                        : review.turn === 'waiting'
+                          ? 'opened this · you asked for changes'
+                          : `${review.again ? 'asked again' : 'asked for your review'} ${review.age} ago`}
             </span>
           </p>
           <p className="chips">

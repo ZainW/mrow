@@ -39,6 +39,8 @@ export type Review = {
   again?: boolean
   /** In To review, a request you asked changes on: `came` once its author pushed, `waiting` until then. */
   turn?: 'came' | 'waiting'
+  /** Moved back to To review by hand, not by a push. */
+  movedBack?: boolean
   /** Held out of the list: until a time, until the request changes, or muted. */
   snooze?: 'change' | 'mute' | { until: string }
   unread?: boolean
