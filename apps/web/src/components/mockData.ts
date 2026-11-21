@@ -37,6 +37,10 @@ export type Review = {
   /** The line under a review's title: who asked, or what you said. */
   reason?: string
   again?: boolean
+  /** In To review, a request you asked changes on: `came` once its author pushed, `waiting` until then. */
+  turn?: 'came' | 'waiting'
+  /** Held out of the list: until a time, until the request changes, or muted. */
+  snooze?: 'change' | 'mute' | { until: string }
   unread?: boolean
   draft?: boolean
   pipeline: 'passed' | 'failed' | 'running'
@@ -127,6 +131,37 @@ const EXPORTS_MD: DiffFile = {
 
 export const reviews: Record<Provider, Review[]> = {
   gitlab: [
+    {
+      id: 'gl-93',
+      project: 'fieldnotes/ledger',
+      number: '!219',
+      title: 'Round ledger totals half to even',
+      author: 'Tomás Varga',
+      list: 'review',
+      turn: 'came',
+      age: '35m',
+      reason: 'Tomás pushed new commits',
+      unread: true,
+      pipeline: 'running',
+      source: 'tomas/round-half-even',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'changes' }],
+      description: ['Totals rounded half up, so a ledger of many .5 amounts drifted upward. They round half to even now, as the bank statements do.'],
+      files: [
+        {
+          path: 'src/ledger/total.rs',
+          lines: [
+            { kind: 'ctx', old: 52, new: 52, code: 'pub fn total(entries: &[Entry]) -> Money {' },
+            { kind: 'del', old: 53, code: '    sum(entries).round()' },
+            { kind: 'add', new: 53, code: '    sum(entries).round_half_even()' },
+          ],
+        },
+      ],
+      conversation: [
+        { author: 'You', when: '2 days ago', body: 'Does this match how the CSV export rounds? The two should agree.' },
+        { author: 'Tomás Varga', when: '35 minutes ago', body: 'The export calls the same function now.', unseen: true },
+      ],
+    },
     {
       id: 'gl-214',
       project: 'fieldnotes/ledger',
@@ -268,6 +303,104 @@ export const reviews: Record<Provider, Review[]> = {
         },
       ],
       conversation: [{ author: 'You', when: '4 days ago', body: 'Can the old header stay behind a flag for a release?' }],
+    },
+    {
+      id: 'gl-205',
+      project: 'fieldnotes/hooks',
+      number: '!85',
+      title: 'Cap webhook payloads at 1 MB',
+      author: 'Devika Rao',
+      list: 'review',
+      turn: 'waiting',
+      age: '2d',
+      pipeline: 'passed',
+      source: 'devika/payload-cap',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'changes' }],
+      description: ['Deliveries larger than 1 MB are refused at the door with a 413 instead of tying up a worker.'],
+      files: [
+        {
+          path: 'src/receive.rs',
+          lines: [{ kind: 'add', new: 19, code: '    if body.len() > MAX_PAYLOAD { return Err(TooLarge) }' }],
+        },
+      ],
+      conversation: [{ author: 'You', when: '2 days ago', body: 'Check the Content-Length header first, so a big body is never read at all.' }],
+    },
+    {
+      id: 'gl-261',
+      project: 'fieldnotes/billing',
+      number: '!296',
+      title: 'Show the tax line before the total',
+      author: 'Samuel Achterberg',
+      list: 'review',
+      turn: 'waiting',
+      age: '3d',
+      pipeline: 'passed',
+      source: 'samuel/tax-before-total',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'changes' }],
+      description: ['Invoices list the tax line above the total, so the arithmetic reads top to bottom.'],
+      files: [
+        {
+          path: 'src/invoice/layout.rs',
+          lines: [
+            { kind: 'del', old: 40, code: '    rows.push(total_row(&invoice));' },
+            { kind: 'add', new: 40, code: '    rows.extend([tax_row(&invoice), total_row(&invoice)]);' },
+          ],
+        },
+      ],
+      conversation: [{ author: 'You', when: '3 days ago', body: 'Zero-tax invoices would show an empty tax line. Skip it then.' }],
+    },
+    {
+      id: 'gl-255',
+      project: 'fieldnotes/ledger',
+      number: '!222',
+      title: 'Add an index on ledger entry dates',
+      author: 'Maya Lindqvist',
+      list: 'review',
+      group: 'Yesterday',
+      age: '1d',
+      reason: 'Maya asked for your review',
+      snooze: 'change',
+      pipeline: 'passed',
+      source: 'maya/entry-date-index',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'pending' }],
+      description: ['Date-range reports scanned the whole entries table. An index on the date column turns them into a range read.'],
+      files: [
+        {
+          path: 'migrations/0112_entry_dates.sql',
+          lines: [{ kind: 'add', new: 1, code: 'CREATE INDEX entries_on_date ON entries (booked_on);' }],
+        },
+      ],
+      conversation: [],
+    },
+    {
+      id: 'gl-248',
+      project: 'fieldnotes/hooks',
+      number: '!80',
+      title: 'Rename the dead-letter list',
+      author: 'Devika Rao',
+      list: 'review',
+      group: 'This week',
+      age: '4d',
+      reason: 'Devika asked for your review',
+      snooze: 'mute',
+      pipeline: 'passed',
+      source: 'devika/rename-dead-letters',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'pending' }],
+      description: ['The dead-letter list is called “undelivered” in the dashboard and in the docs.'],
+      files: [
+        {
+          path: 'src/deliver.rs',
+          lines: [
+            { kind: 'del', old: 11, code: '    dead_letters.push(hook);' },
+            { kind: 'add', new: 11, code: '    undelivered.push(hook);' },
+          ],
+        },
+      ],
+      conversation: [],
     },
     // Mine
     {
@@ -581,6 +714,38 @@ export const reviews: Record<Provider, Review[]> = {
   ],
   github: [
     {
+      id: 'gh-1196',
+      project: 'plover/api',
+      number: '#1196',
+      title: 'Reject expired API tokens at the edge',
+      author: 'Priya Natarajan',
+      list: 'review',
+      turn: 'came',
+      age: '25m',
+      reason: 'Priya pushed new commits',
+      unread: true,
+      pipeline: 'running',
+      source: 'priya/expired-tokens',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'changes' }],
+      description: ['Tokens past their expiry used to reach the handlers, which each checked it a little differently. The edge now answers 401 before any of them run.'],
+      files: [
+        {
+          path: 'api/auth.py',
+          lines: [
+            { kind: 'ctx', old: 41, new: 41, code: 'def authenticate(request):' },
+            { kind: 'add', new: 42, code: '    if token.expires_at <= now():' },
+            { kind: 'add', new: 43, code: '        raise Unauthorized("token expired")' },
+            { kind: 'ctx', old: 42, new: 44, code: '    return token.account' },
+          ],
+        },
+      ],
+      conversation: [
+        { author: 'You', when: '3 days ago', body: 'The clock should come from one place, or the tests will drift.' },
+        { author: 'Priya Natarajan', when: '25 minutes ago', body: 'Pushed: now() is injected, and the test freezes it.', unseen: true },
+      ],
+    },
+    {
       id: 'gh-482',
       project: 'plover/web',
       number: '#482',
@@ -769,6 +934,131 @@ export const reviews: Record<Provider, Review[]> = {
         },
       ],
       conversation: [{ author: 'You', when: '4 days ago', body: 'Should “yesterday” say the time too?' }],
+    },
+    {
+      id: 'gh-1188',
+      project: 'plover/web',
+      number: '#471',
+      title: 'Debounce the issue search box',
+      author: 'Tobias Weil',
+      list: 'review',
+      turn: 'waiting',
+      age: '2d',
+      pipeline: 'passed',
+      source: 'tobias/debounce-search',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'changes' }],
+      description: ['Typing in the search box waited for a pause of 250 ms before it ran a query, instead of one per key.'],
+      files: [
+        {
+          path: 'src/issues/SearchBox.tsx',
+          lines: [
+            { kind: 'del', old: 12, code: '  onChange={(e) => run(e.target.value)}' },
+            { kind: 'add', new: 12, code: '  onChange={(e) => debounced(e.target.value)}' },
+          ],
+        },
+      ],
+      conversation: [{ author: 'You', when: '2 days ago', body: 'Cancel the pending call on unmount, or it fires into a page that has gone.' }],
+    },
+    {
+      id: 'gh-1181',
+      project: 'plover/docs',
+      number: '#55',
+      title: 'Document the export flags',
+      author: 'Ada Lin',
+      list: 'review',
+      turn: 'waiting',
+      age: '3d',
+      pipeline: 'passed',
+      source: 'ada/export-flags',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'changes' }],
+      description: ['Every flag of plover export, with an example each and the default it falls back to.'],
+      files: [
+        {
+          path: 'guide/export.md',
+          lines: [{ kind: 'add', new: 18, code: '`--since <date>` limits the export to rows changed after that day.' }],
+        },
+      ],
+      conversation: [{ author: 'You', when: '3 days ago', body: 'Which one wins when --since and --all are both given?' }],
+    },
+    {
+      id: 'gh-1192',
+      project: 'plover/api',
+      number: '#1192',
+      title: 'Add a rate limit to the export route',
+      author: 'Marcus Bell',
+      list: 'review',
+      group: 'Today',
+      age: '4h',
+      reason: 'Marcus asked for your review',
+      snooze: { until: 'tomorrow at 9:00' },
+      pipeline: 'passed',
+      source: 'marcus/export-limit',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'pending' }],
+      description: ['Exports are capped at ten a minute per account, with a Retry-After header on the answer that says no.'],
+      files: [
+        {
+          path: 'api/exports.py',
+          lines: [{ kind: 'add', new: 14, code: '@limit("10/minute", key=account_id)' }],
+        },
+      ],
+      conversation: [],
+    },
+    {
+      id: 'gh-1179',
+      project: 'plover/web',
+      number: '#468',
+      title: 'Move the avatar sizes into tokens',
+      author: 'Lena Fischer',
+      list: 'review',
+      group: 'Yesterday',
+      age: '1d',
+      reason: 'Lena asked for your review',
+      snooze: 'change',
+      pipeline: 'passed',
+      source: 'lena/avatar-tokens',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'pending' }],
+      description: ['The three avatar sizes were pixel values in four files. They are tokens now, so a resize is one edit.'],
+      files: [
+        {
+          path: 'src/ui/Avatar.tsx',
+          lines: [
+            { kind: 'del', old: 6, code: '  const px = small ? 20 : 28' },
+            { kind: 'add', new: 6, code: '  const px = small ? tokens.avatarSm : tokens.avatarMd' },
+          ],
+        },
+      ],
+      conversation: [],
+    },
+    {
+      id: 'gh-1170',
+      project: 'plover/docs',
+      number: '#52',
+      title: 'Fix the links in the changelog',
+      author: 'Ada Lin',
+      list: 'review',
+      group: 'This week',
+      age: '4d',
+      reason: 'Ada asked for your review',
+      snooze: 'mute',
+      pipeline: 'passed',
+      source: 'ada/changelog-links',
+      target: 'main',
+      reviewers: [{ name: 'You', state: 'pending' }],
+      description: ['Release links pointed at the tag page of the wrong repository. They point at this one now.'],
+      files: [
+        {
+          path: 'CHANGELOG.md',
+          lines: [
+            { kind: 'del', old: 3, code: '[0.9.1]: https://example.com/plover-old/releases/0.9.1' },
+            { kind: 'add', new: 3, code: '[0.9.1]: https://example.com/plover/releases/0.9.1' },
+          ],
+        },
+      ],
+      conversation: [],
     },
     // Mine
     {
@@ -1084,6 +1374,7 @@ export const reviews: Record<Provider, Review[]> = {
 
 export const inbox: Record<Provider, InboxEvent[]> = {
   github: [
+    { id: 'e13', review: 'gh-1196', what: 'Priya Natarajan pushed new commits', tone: 'ask', when: '25m', fresh: true },
     { id: 'e7', review: 'gh-500', what: 'Ready to merge', tone: 'ok', when: '30m', fresh: true },
     { id: 'e8', review: 'gh-1215', what: 'Pipeline failed · test (3.12)', tone: 'bad', when: '45m', fresh: true },
     { id: 'e9', review: 'gh-1210', what: 'Jonah Okafor asked for changes', tone: 'bad', when: '2h', fresh: true },
@@ -1093,6 +1384,7 @@ export const inbox: Record<Provider, InboxEvent[]> = {
   ],
   gitlab: [
     { id: 'e1', review: 'gl-231', what: 'Ready to merge', tone: 'ok', when: '12m', fresh: true },
+    { id: 'e14', review: 'gl-93', what: 'Tomás Varga pushed new commits', tone: 'ask', when: '35m', fresh: true },
     { id: 'e2', review: 'gl-92', what: 'Pipeline failed · test:integration', tone: 'bad', when: '40m', fresh: true },
     { id: 'e3', review: 'gl-90', what: 'Maya Lindqvist asked for changes', tone: 'bad', when: '2h', fresh: true },
     { id: 'e4', review: 'gl-214', what: 'Maya Lindqvist asked for your review', tone: 'ask', when: '3h', fresh: true },

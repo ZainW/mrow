@@ -1149,6 +1149,68 @@ main {
   cursor: pointer;
 }
 
+/* Folds at the end of To review: waiting on authors, snoozed */
+.fold-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 36px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  cursor: pointer;
+}
+.fold-head .chev {
+  transform: rotate(-90deg);
+}
+.fold-head .chev.open {
+  transform: none;
+}
+.held {
+  position: relative;
+}
+.held .row {
+  padding-bottom: 38px;
+}
+.held .row-title {
+  color: var(--text-2);
+  -webkit-line-clamp: 1;
+}
+.held.on .row-title {
+  color: var(--text);
+}
+.held-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.held-act {
+  position: absolute;
+  bottom: 6px;
+  left: 14px;
+}
+.held-act::before {
+  content: '';
+  position: absolute;
+  inset: -6px -2px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .held-act {
+    opacity: 0;
+  }
+  .held:hover .held-act,
+  .held:focus-within .held-act,
+  .held.on .held-act {
+    opacity: 1;
+  }
+}
+
 /* The inbox behind the bell */
 .inbox-pop {
   position: absolute;
@@ -3108,8 +3170,10 @@ button.thread-where {
   .row:hover {
     background: var(--hover);
   }
-  .stack-head:hover {
+  .stack-head:hover,
+  .fold-head:hover {
     background: var(--hover);
+    color: var(--text-2);
   }
   .stack-more:hover {
     background: var(--hover);
@@ -3165,6 +3229,7 @@ button.thread-where {
   .quiet-btn,
   .stack-head,
   .stack-more,
+  .fold-head,
   .check-line,
   .stack-line,
   .review-tab,
