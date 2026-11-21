@@ -24,7 +24,7 @@ const PAGES = [
   {
     to: '/reviewing',
     title: 'Reviewing',
-    text: 'Requests waiting on you, sorted by when you were asked. Each one opens in three tabs: overview, changes and conversation. Comment, resolve threads, approve or request changes without going to the browser.',
+    text: 'Requests waiting on you, sorted by when you were asked. Each one opens in three tabs: overview, changes and conversation. Comment, resolve threads, approve or request changes without going to the browser, and snooze what can wait.',
   },
   {
     to: '/mine',
@@ -106,11 +106,13 @@ function Home() {
           used 157 MB, before counting the browser around it.
         </p>
         <p>
-          Lists, reviews and tabs switch on the key press, with no page to load, and every action has{' '}
+          It opens with your lists and the requests you were last reading already drawn, and the refresh fills in what’s
+          new. Lists, reviews and tabs switch on the key press, with no page to load, and every action has{' '}
           <Link to="/keys" className="text-link inline">
             a key
           </Link>
-          . The macOS download is 12 MB.
+          . For the ones you don’t remember, <Keys keys={['⇧⌘P']} /> opens a palette: type part of a command to run it,
+          or part of a request’s title or number to go to it. The macOS download is 12 MB.
         </p>
       </Chapter>
 

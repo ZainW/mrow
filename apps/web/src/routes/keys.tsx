@@ -24,6 +24,7 @@ const GROUPS: { title: string; keys: [string[], string][] }[] = [
       [['↩'], 'Open the selected request in the browser'],
       [['→', '←'], 'In Mine: show every part of the stacks, fold them again'],
       [['⌘K', '⌘F'], 'Filter the list'],
+      [['⇧⌘S'], 'Snooze until morning'],
       [['⌘R'], 'Refresh'],
       [['⇧⌘I'], 'Inbox'],
       [['⌃⌘S'], 'Show or hide the sidebar'],
@@ -34,6 +35,11 @@ const GROUPS: { title: string; keys: [string[], string][] }[] = [
     keys: [
       [['⌥⌘1', '⌥⌘2', '⌥⌘3'], 'Overview, Changes, Conversation'],
       [['J', 'K'], 'Next or previous file, in Changes'],
+      [['N', 'P'], 'Next or previous open thread'],
+      [['⇧N', '⇧P'], 'Next or previous thread, resolved ones too'],
+      [['V'], 'Mark the file viewed and go to the next one not viewed'],
+      [['R'], 'Reply to the thread'],
+      [['C'], 'Write a comment'],
       [['⌥⌘]', '⌥⌘['], 'Next or previous review'],
       [['⇧⌘A'], 'Approve; with comments pending, finish the review'],
       [['⇧⌘R'], 'Finish the review: comment, request changes or approve'],
@@ -60,7 +66,13 @@ const GROUPS: { title: string; keys: [string[], string][] }[] = [
       [['esc'], 'Stop the answer'],
     ],
   },
-  { title: 'Mrow', keys: [[['⌘,'], 'Settings']] },
+  {
+    title: 'Mrow',
+    keys: [
+      [['⇧⌘P'], 'Command palette: run a command, or go to a request'],
+      [['⌘,'], 'Settings'],
+    ],
+  },
 ]
 
 function KeysPage() {
@@ -68,7 +80,8 @@ function KeysPage() {
     <Page>
       <PageHead title="Every action has a key">
         <p>
-          You can work through a morning’s reviews without touching the trackpad. On Linux, Ctrl stands in for ⌘ and Alt
+          You can work through a morning’s reviews without touching the trackpad, and <Keys keys={['⇧⌘P']} /> finds any
+          command whose key you’ve forgotten. On Linux, Ctrl stands in for ⌘ and Alt
           for ⌥, and switching accounts is Alt+1 and Alt+2. The keys below are written for the computer you’re reading
           this on.
         </p>

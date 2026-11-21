@@ -58,9 +58,13 @@ function Privacy() {
 
       <Chapter id="kept" title="What it keeps">
         <p>
-          Your settings, the inbox, and which chat goes with which request, in Mrow’s own folder on your computer
-          (<code>~/Library/Application Support/Mrow</code> on macOS, <code>~/.config/mrow</code> on Linux). GitLab uploads
-          it has shown and downloaded updates go in its cache folder. None of it is sent anywhere.
+          Your settings and snoozes, the inbox, and which chat goes with which request, in Mrow’s own folder on your
+          computer (<code>~/Library/Application Support/Mrow</code> on macOS, <code>~/.config/mrow</code> on Linux).
+        </p>
+        <p>
+          So it can open with something on screen, Mrow keeps each account’s lists and the changes and threads of the last
+          20 requests you opened, up to 64 MB, in its cache folder. GitLab uploads it has shown and downloaded updates go
+          there too. None of it is sent anywhere.
         </p>
       </Chapter>
     </Page>

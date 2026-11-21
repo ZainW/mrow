@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, Link } from '@tanstack/react-router'
 import { Chapter, KeyList, PageHead } from '../components/Chapter'
 import { InboxFigure, MergeFigure, MineFigure, StackFigure } from '../components/figures'
 import { Page } from '../components/Layout'
@@ -33,6 +33,13 @@ function Mine() {
             <p>
               The marks above the list filter it: ready to merge, needs you, waiting, draft. Each shows how many it
               holds.
+            </p>
+            <p>
+              Your own requests snooze and mute{' '}
+              <Link to="/reviewing" hash="snooze" className="text-link inline">
+                the way reviews do
+              </Link>
+              .
             </p>
             <KeyList items={[[['⌘3'], 'Mine']]} />
           </>
@@ -103,8 +110,9 @@ function Mine() {
         figure={<InboxFigure />}
       >
         <p>
-          The bell at the top of the sidebar counts what changed: a review asked of you or asked again, and on your own
-          requests an approval, changes asked for, failed CI, new threads, ready to merge, merged or closed. Click
+          The bell at the top of the sidebar counts what changed: a review asked of you or asked again, new commits on one
+          you asked changes on, and on your own requests an approval, changes asked for, failed CI, new threads, ready to
+          merge, merged or closed. Click
           a row to open its request, and mark one or all of them done.
         </p>
         <p>
@@ -113,8 +121,8 @@ function Mine() {
           for 14 days.
         </p>
         <p>
-          Notifications come from the same events, one per request. By default a review asked of you or asked again, changes
-          asked for, failed CI and ready to merge send one; approvals, new threads, and merged or closed only go in
+          Notifications come from the same events, one per request. By default a review asked of you or asked again, new
+          commits after you asked for changes, changes asked for, failed CI and ready to merge send one; approvals, new threads, and merged or closed only go in
           the inbox.
         </p>
       </Chapter>
