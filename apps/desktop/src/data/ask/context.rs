@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use crate::data::diff::LineKind;
 use crate::data::models::{Discussion, FileDiff, MergeRequest};
 
 pub struct Summary {
@@ -57,7 +58,7 @@ pub fn build(item: &MergeRequest, files: &[FileDiff], threads: &[Discussion], ch
     for (name, guide) in WRITING {
         text += &format!("<guide name=\"{name}\">\n{}\n</guide>\n\n", guide.trim());
     }
-    text += super::proposals::INSTRUCTIONS;
+    text += &super::proposals::instructions(kind.comments_outside_diff());
     text += &format!("\n## Description\n\n{description}\n");
 
     // The diff, smallest files first so one huge file doesn't crowd out the rest.
@@ -66,19 +67,20 @@ pub fn build(item: &MergeRequest, files: &[FileDiff], threads: &[Discussion], ch
     let mut diff = String::new();
     let mut left_out: Vec<&str> = Vec::new();
     for file in sorted {
-        if file.diff.is_empty() || file.too_large || diff.len() + file.diff.len() > DIFF_BUDGET {
+        let lines = if file.diff.is_empty() || file.too_large { String::new() } else { numbered(file) };
+        if lines.is_empty() || diff.len() + lines.len() > DIFF_BUDGET {
             left_out.push(&file.new_path);
             continue;
         }
         diff += &format!("diff --git a/{} b/{}\n", file.old_path, file.new_path);
-        diff += &file.diff;
-        if !file.diff.ends_with('\n') {
-            diff.push('\n');
-        }
+        diff += &lines;
     }
     let added: i64 = files.iter().map(|f| f.added as i64).sum();
     let removed: i64 = files.iter().map(|f| f.removed as i64).sum();
-    text += &format!("\n## Diff ({} files, +{added} −{removed})\n\n```diff\n{diff}```\n", files.len());
+    text += &format!(
+        "\n## Diff ({} files, +{added} −{removed})\n\nEach line starts with its number in the old file, then in the new one; an added line has no old number, a removed line no new one.\n\n```\n{diff}```\n",
+        files.len()
+    );
     if !left_out.is_empty() {
         let names: Vec<String> = left_out.iter().map(|p| format!("`{p}`")).collect();
         text += &format!("\nLeft out for size (read them from the repository if needed): {}\n", names.join(", "));
@@ -115,6 +117,27 @@ pub fn build(item: &MergeRequest, files: &[FileDiff], threads: &[Discussion], ch
     text += &format!("\n## Discussion ({} threads)\n\n{}", human.len(), if discussion.is_empty() { "(none)\n" } else { &discussion });
     text += &format!("\n{END}\n");
     Summary { text, files: files.len() - left_out.len(), files_left_out: left_out.len(), threads: human.len() }
+}
+
+/// A file's diff with each line's old and new numbers in front, so the agent reads a line's
+/// number instead of counting from the hunk header: a miscounted line lands its comment wrong.
+fn numbered(file: &FileDiff) -> String {
+    if file.lines.is_empty() {
+        return if file.diff.ends_with('\n') { file.diff.clone() } else { format!("{}\n", file.diff) };
+    }
+    let column = |n: Option<i64>| n.map(|n| format!("{n:>5}")).unwrap_or_else(|| " ".repeat(5));
+    let mut out = String::new();
+    for line in &file.lines {
+        let row = match line.kind {
+            LineKind::Hunk | LineKind::Note => line.text.clone(),
+            LineKind::Added => format!("{} {} +{}", column(None), column(line.new_number), line.text),
+            LineKind::Removed => format!("{} {} -{}", column(line.old_number), column(None), line.text),
+            LineKind::Context => format!("{} {}  {}", column(line.old_number), column(line.new_number), line.text),
+        };
+        out += &row;
+        out.push('\n');
+    }
+    out
 }
 
 fn strip_comments(text: &str) -> String {

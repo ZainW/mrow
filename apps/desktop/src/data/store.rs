@@ -2773,12 +2773,13 @@ impl Store {
     }
 
     /// Line `new` of a file's new side where its diff leaves it out, as a context line with
-    /// both its numbers: what a comment on it is placed by.
+    /// both its numbers: what a comment on it is placed by. The numbers come from the hunks
+    /// around it, so it needs no file text, except below the last hunk, where only the text
+    /// says where the file ends.
     pub fn context_line(&self, item: &MergeRequest, file: &FileDiff, new: i64) -> Option<DiffLine> {
-        let text = self.file_text(item, file)?.value()?;
         let gap = self.gaps(item, file).into_iter().find(|g| g.len.is_some_and(|n| (g.new_start..g.new_start + n).contains(&new)))?;
-        let line = text.get(usize::try_from(new - 1).ok()?)?;
-        Some(DiffLine { kind: diff::LineKind::Context, text: line.clone(), old_number: Some(gap.old_number(new)), new_number: Some(new) })
+        let text = self.file_text(item, file).and_then(Loadable::value).and_then(|t| t.get(usize::try_from(new - 1).ok()?).cloned());
+        Some(DiffLine { kind: diff::LineKind::Context, text: text.unwrap_or_default(), old_number: Some(gap.old_number(new)), new_number: Some(new) })
     }
 
     /// Puts a file's text in place, for scenes and tests, which never ask a forge.

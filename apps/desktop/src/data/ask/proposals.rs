@@ -13,11 +13,21 @@
 //!
 //! A comment holding a code block (a GitHub `suggestion`) uses a longer fence around it.
 
-/// The instructions that go with the first question.
-pub const INSTRUCTIONS: &str = "## Drafting review comments\n\n\
+/// The instructions that go with the first question; `outside` when the forge takes comments
+/// on lines the diff doesn't show.
+pub fn instructions(outside: bool) -> String {
+    let unshown = if outside {
+        "A line the diff doesn't show works too, in a file the diff changes, numbered as in the new version of the file."
+    } else {
+        "Pick a line the diff shows: a comment on any other line can't go on its line."
+    };
+    format!(
+        "## Drafting review comments\n\n\
 You can't post anything. When I ask you to draft review comments, or when one would help, write each comment in its own fenced block with the info string `comment`, and I'll decide whether to post it:\n\n\
 ````\n```comment\nA comment on the whole merge request.\n```\n\n```comment src/export/job.rs:42\nA comment on line 42 of the new version of src/export/job.rs.\n```\n````\n\n\
-Write the path from the repository root, as the diff names it. Use a line number from the new version of the file, or from the old version for a removed line, and pick a line that's in the diff. If a comment holds a code block, fence the comment with four backticks. Write the comment exactly as it should be posted, with nothing else in the block.\n";
+When a comment is about particular code, give its place after `comment` as `path:line`, so it posts on that line; leave the place out only for a comment on the whole change. Write the path from the repository root, as the diff names it. Take the line number from the diff, where each line shows its numbers: the new number, or the old one for a removed line. {unshown} If a comment holds a code block, fence the comment with four backticks. Write the comment exactly as it should be posted, with nothing else in the block.\n"
+    )
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proposal {
@@ -50,19 +60,48 @@ fn opening(line: &str) -> Option<(String, &str)> {
     Some((mark.to_string().repeat(count), rest.trim()))
 }
 
-/// "src/x.rs:42" → (path, line). A range ("src/x.rs:40-42") is its first line. A bare path,
-/// or one with a line that isn't a number, keeps its path, so the comment names its file.
+/// "src/x.rs:42" → (path, line). A range ("src/x.rs:40-42") is its first line. Agents also
+/// write "src/x.rs:L42", "src/x.rs#L42", "src/x.rs:42:7" and "src/x.rs line 42", so those read
+/// the same. A bare path, or one with a line that isn't a number, keeps its path, so the
+/// comment names its file.
 fn target(info: &str) -> (Option<String>, Option<i64>) {
-    let info = info.trim().trim_matches('`');
+    let info = info.trim().trim_matches('`').trim();
     if info.is_empty() {
         return (None, None);
     }
-    let Some((path, line)) = info.rsplit_once(':').filter(|(path, _)| !path.is_empty()) else { return (Some(info.to_string()), None) };
-    let first = line.split(['-', '–']).next().unwrap_or("").trim();
-    match first.parse::<i64>() {
-        Ok(n) if n > 0 => (Some(path.to_string()), Some(n)),
-        _ => (Some(path.to_string()), None),
+    // Split at the last mark, so a path holding a space, `:` or `#` keeps its line.
+    let colon = || {
+        let (rest, last) = info.rsplit_once(':')?;
+        let last = line_number(last)?;
+        // "x.rs:42:7": the last number is a column.
+        match rest.rsplit_once(':').and_then(|(path, line)| Some((path, line_number(line)?))) {
+            Some((path, line)) if !path.is_empty() => Some((path, line)),
+            _ => Some((rest, last)),
+        }
+    };
+    let hash = || info.rsplit_once('#').and_then(|(path, line)| Some((path, line_number(line)?)));
+    let spoken = || {
+        let (path, rest) = info.split_once(char::is_whitespace)?;
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix("lines").or_else(|| rest.strip_prefix("line"))?;
+        Some((path.trim_end_matches(':'), line_number(rest)?))
+    };
+    match colon().or_else(hash).or_else(spoken).filter(|(path, _)| !path.trim().is_empty()) {
+        Some((path, n)) => (Some(path.trim().to_string()), Some(n)),
+        None => (Some(info.rsplit_once(':').map_or(info, |(path, _)| path).trim().to_string()), None),
     }
+}
+
+/// "42", "L42", " line 42", "40-42", "L40-L42" → the first line, if that's what it is.
+fn line_number(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let text = text.strip_prefix("lines").or_else(|| text.strip_prefix("line")).unwrap_or(text).trim_start();
+    let first = text.split(['-', '–', ',']).next()?.trim();
+    let digits = first.strip_prefix(['L', 'l']).unwrap_or(first);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().filter(|n| *n > 0)
 }
 
 /// An answer split into its text and the comments drafted in it, in order.
@@ -154,6 +193,11 @@ mod tests {
         assert_eq!(target("x.rs:abc"), (Some("x.rs".into()), None));
         assert_eq!(target("src/x.rs:40-42"), (Some("src/x.rs".into()), Some(40)));
         assert_eq!(target("src/x.rs"), (Some("src/x.rs".into()), None));
+        assert_eq!(target("docs/Release Notes.md:12"), (Some("docs/Release Notes.md".into()), Some(12)));
+        assert_eq!(target("src/c#/Program.cs:10"), (Some("src/c#/Program.cs".into()), Some(10)));
+        for written in ["src/x.rs:L40", "src/x.rs#L40-L42", "src/x.rs:40:7", "src/x.rs line 40", "src/x.rs: line 40", "`src/x.rs:40`", "src/x.rs lines 40-42"] {
+            assert_eq!(target(written), (Some("src/x.rs".into()), Some(40)), "{written}");
+        }
         assert_eq!(target(""), (None, None));
     }
 }
