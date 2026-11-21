@@ -433,6 +433,9 @@ impl App {
             },
             None => return ProposalTarget::Waiting,
         };
+        // Agents sometimes keep the diff's `a/` or `b/` in front of the path.
+        let exact = files.iter().any(|f| f.new_path == *path || f.old_path == *path);
+        let path = if exact { path } else { path.strip_prefix("b/").or_else(|| path.strip_prefix("a/")).unwrap_or(path) };
         let same = |p: &str| p == path || p.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{p}"));
         let Some(file) = files.iter().find(|f| same(&f.new_path)).or_else(|| files.iter().find(|f| same(&f.old_path))) else { return missed };
         let found = file
@@ -440,8 +443,14 @@ impl App {
             .iter()
             .position(|l| l.new_number == Some(number))
             .or_else(|| file.lines.iter().position(|l| l.old_number == Some(number) && l.new_number.is_none()));
-        match found {
-            Some(index) => ProposalTarget::Line(file.clone(), file.lines[index].clone()),
+        if let Some(index) = found {
+            return ProposalTarget::Line(file.clone(), file.lines[index].clone());
+        }
+        // An unchanged line between or around the hunks takes a comment too, as when the diff is
+        // expanded: agents with the clone read whole files, so they often pick one.
+        let unshown = self.store.item(id).and_then(|item| self.store.context_line(item, file, number));
+        match unshown {
+            Some(line) => ProposalTarget::Line(file.clone(), line),
             None => missed,
         }
     }
@@ -581,5 +590,50 @@ impl App {
         self.people_pick = 0;
         self.reviewer_picker = Some(id.to_string());
         self.store.find_people(&item, "");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::ask::proposals;
+    use crate::data::diff::LineKind;
+    use crate::data::models::DiffRefs;
+    use crate::data::store::Loadable;
+
+    /// The fictional queue, its first request showing `job.rs` with a long gap between hunks.
+    fn app() -> (App, String) {
+        prefs::set_ephemeral(Some(prefs::Prefs::default()));
+        let mut s = App::default();
+        let (accounts, diffs, threads) = crate::fixtures::load();
+        s.store.load_fixture(accounts, diffs, threads);
+        s.store.forge = crate::data::forge::Forge::Gitlab;
+        let id = s.store.visible_items()[0].id.clone();
+        s.store.diffs.insert(id.clone(), Loadable::Loaded(std::rc::Rc::new(vec![crate::fixtures::job_rs_wide()])));
+        s.store.diff_refs.insert(id.clone(), DiffRefs { base_sha: "a".into(), start_sha: "a".into(), head_sha: crate::fixtures::HEAD.into() });
+        (s, id)
+    }
+
+    fn placed(s: &App, id: &str, info: &str) -> Option<(LineKind, Option<i64>, Option<i64>)> {
+        let text = format!("```comment {info}\nHm.\n```");
+        let Some(proposals::Segment::Comment(proposal)) = proposals::split(&text).into_iter().next() else { panic!("{text}") };
+        match s.proposal_target(id, &proposal) {
+            ProposalTarget::Line(_, line) => Some((line.kind, line.old_number, line.new_number)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn drafted_comments_land_on_their_lines() {
+        let (s, id) = app();
+        assert_eq!(placed(&s, &id, "src/export/job.rs:15"), Some((LineKind::Added, None, Some(15))));
+        assert_eq!(placed(&s, &id, "b/src/export/job.rs#L15"), Some((LineKind::Added, None, Some(15))), "the diff's b/ and a link's L");
+        assert_eq!(placed(&s, &id, "src/export/job.rs:15"), placed(&s, &id, "job.rs line 15"));
+        // Between the hunks, which the diff doesn't show: an unchanged line, both sides numbered.
+        assert_eq!(placed(&s, &id, "src/export/job.rs:40"), Some((LineKind::Context, Some(39), Some(40))));
+        // Below the last hunk, before the file's length is known.
+        assert_eq!(placed(&s, &id, "src/export/job.rs:200"), Some((LineKind::Context, Some(199), Some(200))));
+        assert_eq!(placed(&s, &id, "src/other.rs:15"), None, "a file the diff doesn't change posts on the request");
+        assert_eq!(placed(&s, &id, "src/export/job.rs"), None);
     }
 }

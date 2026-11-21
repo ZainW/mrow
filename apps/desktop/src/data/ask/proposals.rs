@@ -17,7 +17,7 @@
 pub const INSTRUCTIONS: &str = "## Drafting review comments\n\n\
 You can't post anything. When I ask you to draft review comments, or when one would help, write each comment in its own fenced block with the info string `comment`, and I'll decide whether to post it:\n\n\
 ````\n```comment\nA comment on the whole merge request.\n```\n\n```comment src/export/job.rs:42\nA comment on line 42 of the new version of src/export/job.rs.\n```\n````\n\n\
-Write the path from the repository root, as the diff names it. Use a line number from the new version of the file, or from the old version for a removed line, and pick a line that's in the diff. If a comment holds a code block, fence the comment with four backticks. Write the comment exactly as it should be posted, with nothing else in the block.\n";
+When a comment is about particular code, give its place after `comment` as `path:line`, so it posts on that line; leave the place out only for a comment on the whole change. Write the path from the repository root, as the diff names it. Take the line number from the diff, where each line shows its numbers: the new number, or the old one for a removed line. A line the diff doesn't show works too, in a file the diff changes, numbered as in the new version of the file. If a comment holds a code block, fence the comment with four backticks. Write the comment exactly as it should be posted, with nothing else in the block.\n";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proposal {
@@ -50,15 +50,28 @@ fn opening(line: &str) -> Option<(String, &str)> {
     Some((mark.to_string().repeat(count), rest.trim()))
 }
 
-/// "src/x.rs:42" → (path, line). A range ("src/x.rs:40-42") is its first line. A bare path,
-/// or one with a line that isn't a number, keeps its path, so the comment names its file.
+/// "src/x.rs:42" → (path, line). A range ("src/x.rs:40-42") is its first line. Agents also
+/// write "src/x.rs:L42", "src/x.rs#L42", "src/x.rs:42:7" and "src/x.rs line 42", so those read
+/// the same. A bare path, or one with a line that isn't a number, keeps its path, so the
+/// comment names its file.
 fn target(info: &str) -> (Option<String>, Option<i64>) {
-    let info = info.trim().trim_matches('`');
+    let info = info.trim().trim_matches('`').trim();
     if info.is_empty() {
         return (None, None);
     }
-    let Some((path, line)) = info.rsplit_once(':').filter(|(path, _)| !path.is_empty()) else { return (Some(info.to_string()), None) };
-    let first = line.split(['-', '–']).next().unwrap_or("").trim();
+    let (path, line) = match info.split_once(char::is_whitespace) {
+        Some((path, rest)) => {
+            let rest = rest.trim_start();
+            let rest = rest.strip_prefix("lines").or_else(|| rest.strip_prefix("line")).unwrap_or(rest);
+            (path.trim_end_matches(':'), Some(rest))
+        }
+        None => match info.find([':', '#']).filter(|at| *at > 0) {
+            Some(at) => (&info[..at], Some(&info[at + 1..])),
+            None => (info, None),
+        },
+    };
+    let first = line.unwrap_or("").trim().split(['-', '–', ':', ',']).next().unwrap_or("").trim();
+    let first = first.trim_start_matches(['L', 'l']);
     match first.parse::<i64>() {
         Ok(n) if n > 0 => (Some(path.to_string()), Some(n)),
         _ => (Some(path.to_string()), None),
@@ -154,6 +167,9 @@ mod tests {
         assert_eq!(target("x.rs:abc"), (Some("x.rs".into()), None));
         assert_eq!(target("src/x.rs:40-42"), (Some("src/x.rs".into()), Some(40)));
         assert_eq!(target("src/x.rs"), (Some("src/x.rs".into()), None));
+        for written in ["src/x.rs:L40", "src/x.rs#L40-L42", "src/x.rs:40:7", "src/x.rs line 40", "src/x.rs: line 40", "`src/x.rs:40`", "src/x.rs lines 40-42"] {
+            assert_eq!(target(written), (Some("src/x.rs".into()), Some(40)), "{written}");
+        }
         assert_eq!(target(""), (None, None));
     }
 }
