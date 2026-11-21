@@ -332,6 +332,7 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
                     {...rowProps(r)}
                     line="No new commits"
                     verb="Review again"
+                    icon={<RefreshIcon />}
                     onAct={() => reviewAgain(r)}
                   />
                 ))}
@@ -345,6 +346,7 @@ export function AppMock({ provider, onProvider }: { provider: Provider; onProvid
                     {...rowProps(r)}
                     line={holdLine(r, noun)}
                     verb={r.snooze === 'mute' ? 'Unmute' : 'Unsnooze'}
+                    icon={<UndoIcon />}
                     onAct={() => unsnooze(r)}
                   />
                 ))}
@@ -538,6 +540,7 @@ function HeldRow({
   active,
   line,
   verb,
+  icon,
   onSelect,
   onKeep,
   onAct,
@@ -546,6 +549,7 @@ function HeldRow({
   active: boolean
   line: string
   verb: string
+  icon: ReactNode
   onSelect: () => void
   onKeep: () => void
   onAct: () => void
@@ -568,8 +572,8 @@ function HeldRow({
           </span>
         </span>
       </button>
-      <button className="quiet-btn held-act" aria-label={`${verb}: ${review.title}`} onClick={onAct}>
-        {verb}
+      <button className="quiet-btn held-act" aria-label={`${verb}: ${review.title}`} title={verb} onClick={onAct}>
+        {icon}
       </button>
     </div>
   )
@@ -1997,6 +2001,14 @@ function UndoIcon() {
   return (
     <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
       <path d="M5 3.5L2.5 6 5 8.5M3 6h6.5a3.5 3.5 0 0 1 0 7H6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function RefreshIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v2.5h-2.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }
