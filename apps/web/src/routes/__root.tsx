@@ -30,11 +30,10 @@ export const Route = createRootRoute({
 })
 
 /**
- * The home page's intro plays once per session. This runs before the first paint: on a later
- * load it marks the page as seen, and on the first it marks it once the intro has finished, so
- * coming back to the home page within the session doesn't replay it.
+ * The home page's intro plays once per session. This runs before the first paint, so a load after
+ * the home page has played it starts with the intro off; the home page itself records that it played.
  */
-const INTRO = `try{var d=document.documentElement;if(sessionStorage.getItem('mrow-intro'))d.dataset.intro='seen';else{sessionStorage.setItem('mrow-intro','1');setTimeout(function(){d.dataset.intro='seen'},1500)}}catch(e){}`
+const INTRO = `try{if(sessionStorage.getItem('mrow-intro'))document.documentElement.dataset.intro='seen'}catch(e){}`
 
 function RootComponent() {
   return (

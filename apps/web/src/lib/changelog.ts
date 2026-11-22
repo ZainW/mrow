@@ -1,8 +1,9 @@
-export type ChangeItem = { text: string; pr?: number }
+export type ChangeItem = { text: string; pr?: number; breaking?: boolean }
 export type Release = { version: string; date: string; anchor: string; sections: { title: string; items: ChangeItem[] }[] }
 
 const HEADING = /^##\s+v?(\d+\.\d+\.\d+\S*)\s+\((\d{4}-\d{2}-\d{2})\)\s*$/
 const PR_SUFFIX = /\s*\(#(\d+)\)\s*$/
+const BREAKING = /\s*\(\*\*breaking\*\*\)\s*$/
 
 /** The repo's CHANGELOG.md (git-cliff output), newest release first. Pure, so vite.config.ts can use it too. */
 export function parseChangelog(md: string): Release[] {
@@ -20,12 +21,20 @@ export function parseChangelog(md: string): Release[] {
       section = { title: line.slice(4).trim(), items: [] }
       release.sections.push(section)
     } else if (section && line.startsWith('- ')) {
-      const body = line.slice(2).trim()
-      const pr = PR_SUFFIX.exec(body)
-      section.items.push(pr ? { text: body.slice(0, pr.index), pr: Number(pr[1]) } : { text: body })
+      section.items.push(changeItem(line.slice(2).trim()))
     }
   }
   return releases
+}
+
+/** One changelog line, as cliff.toml writes it: `Message (#12) (**breaking**)`, inline code in backticks. */
+function changeItem(line: string): ChangeItem {
+  const breaking = BREAKING.exec(line)
+  let text = breaking ? line.slice(0, breaking.index) : line
+  const pr = PR_SUFFIX.exec(text)
+  if (pr) text = text.slice(0, pr.index)
+  text = text.replace(/`([^`]+)`/g, '$1')
+  return { text, ...(pr && { pr: Number(pr[1]) }), ...(breaking && { breaking: true }) }
 }
 
 /** A release date as "November 16, 2026". */
@@ -42,7 +51,7 @@ export function changelogRss(releases: Release[], { site, repo }: { site: string
       .map(
         (s) =>
           `<h3>${xml(s.title)}</h3><ul>${s.items
-            .map((i) => `<li>${xml(i.text)}${i.pr ? ` (<a href="${repo}/pull/${i.pr}">#${i.pr}</a>)` : ''}</li>`)
+            .map((i) => `<li>${i.breaking ? '<strong>Breaking:</strong> ' : ''}${xml(i.text)}${i.pr ? ` (<a href="${repo}/pull/${i.pr}">#${i.pr}</a>)` : ''}</li>`)
             .join('')}</ul>`,
       )
       .join('')

@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { AppMock } from '../components/AppMock'
 import { accounts } from '../components/mockData'
@@ -23,6 +23,7 @@ export const Route = createFileRoute('/')({
 
 function Home() {
   const [provider, setProvider] = useState<Provider>('github')
+  useIntroPlayed()
   return (
     <Page>
       <section className="hero" aria-labelledby="hero-title">
@@ -63,6 +64,22 @@ function Home() {
       <ClosingCard />
     </Page>
   )
+}
+
+/**
+ * Once the hero's intro has run, it stays off for the rest of the session (see `INTRO` in __root).
+ * The timer isn't tied to the component: the router can mount the page twice on the way in.
+ */
+let introTimer: ReturnType<typeof setTimeout> | undefined
+function useIntroPlayed() {
+  useEffect(() => {
+    const root = document.documentElement
+    if (root.dataset.intro === 'seen' || introTimer) return
+    try {
+      sessionStorage.setItem('mrow-intro', '1')
+    } catch {}
+    introTimer = setTimeout(() => (root.dataset.intro = 'seen'), 1500)
+  }, [])
 }
 
 /**

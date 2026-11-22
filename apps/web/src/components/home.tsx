@@ -189,8 +189,8 @@ export function ChangelogTeaser() {
             <time dateTime={LATEST.date}>{formatDate(LATEST.date)}</time>
           </header>
           <ul>
-            {items.map((i) => (
-              <li key={i.text}>{i.text}</li>
+            {items.map((i, n) => (
+              <li key={n}>{i.text}</li>
             ))}
           </ul>
           <Link to="/changelog" className="log-more">

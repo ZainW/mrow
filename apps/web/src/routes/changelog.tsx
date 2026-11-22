@@ -43,8 +43,9 @@ function ChangelogPage() {
                 <div key={s.title}>
                   <h3>{s.title}</h3>
                   <ul>
-                    {s.items.map((i) => (
-                      <li key={i.text}>
+                    {s.items.map((i, n) => (
+                      <li key={n}>
+                        {i.breaking && <strong>Breaking: </strong>}
                         {i.text}
                         {i.pr && (
                           <>

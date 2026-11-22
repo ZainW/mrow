@@ -99,6 +99,8 @@
 }
 html {
   -webkit-text-size-adjust: 100%;
+  /* In-page links land below the sticky header. */
+  scroll-padding-top: 88px;
 }
 body {
   margin: 0;
@@ -3602,9 +3604,6 @@ button.thread-where {
   display: grid;
   gap: 56px;
 }
-.log-release {
-  scroll-margin-top: 88px;
-}
 .log-release header {
   display: flex;
   flex-wrap: wrap;
@@ -3764,6 +3763,14 @@ button.thread-where {
 .get.no-note {
   min-height: 0;
 }
+/* Stacked while Linux's install command and the second button can't share a row, so the row is the
+   same height before and after hydration swaps the command in. */
+@media (max-width: 780px) {
+  .get-main {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
 
 @media (max-width: 1060px) {
   .feat-grid {
@@ -3816,13 +3823,6 @@ button.thread-where {
   .log-card {
     padding: 22px 20px;
   }
-  .get-main {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .get-main .btn-big {
-    justify-self: center;
-  }
   .footer-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3830,6 +3830,9 @@ button.thread-where {
 
 /* Narrower screens */
 @media (max-width: 960px) {
+  html {
+    scroll-padding-top: 116px;
+  }
   .site-header {
     flex-wrap: wrap;
     gap: 0 12px;
@@ -3863,7 +3866,7 @@ button.thread-where {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
-/* All six pages fit on one row at phone width. */
+/* All six pages fit on one row from 390px; narrower, the row scrolls. */
 @media (max-width: 480px) {
   .site-header nav {
     gap: 0;
