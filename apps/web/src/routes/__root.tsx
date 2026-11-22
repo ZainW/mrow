@@ -21,12 +21,19 @@ export const Route = createRootRoute({
       { rel: 'preload', href: '/fonts/MrowReading-Bold.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
       { rel: 'preload', href: '/fonts/GeistMono-Variable.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
       { rel: 'stylesheet', href: appCss },
+      { rel: 'alternate', type: 'application/rss+xml', title: 'Mrow changelog', href: '/changelog/rss.xml' },
       { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
     ],
   }),
   component: RootComponent,
   notFoundComponent: NotFound,
 })
+
+/**
+ * The home page's intro plays once per session. This runs before the first paint, so a load after
+ * the home page has played it starts with the intro off; the home page itself records that it played.
+ */
+const INTRO = `try{if(sessionStorage.getItem('mrow-intro'))document.documentElement.dataset.intro='seen'}catch(e){}`
 
 function RootComponent() {
   return (
@@ -38,8 +45,10 @@ function RootComponent() {
 
 function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
+    // The intro script adds data-intro to <html> before React hydrates.
+    <html lang="en" suppressHydrationWarning>
       <head>
+        <script dangerouslySetInnerHTML={{ __html: INTRO }} />
         <HeadContent />
       </head>
       <body>

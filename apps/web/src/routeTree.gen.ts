@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AskRouteImport } from './routes/ask'
+import { Route as ChangelogRouteImport } from './routes/changelog'
 import { Route as DownloadRouteImport } from './routes/download'
 import { Route as KeysRouteImport } from './routes/keys'
 import { Route as MineRouteImport } from './routes/mine'
@@ -25,6 +26,11 @@ const IndexRoute = IndexRouteImport.update({
 const AskRoute = AskRouteImport.update({
   id: '/ask',
   path: '/ask',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ChangelogRoute = ChangelogRouteImport.update({
+  id: '/changelog',
+  path: '/changelog',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DownloadRoute = DownloadRouteImport.update({
@@ -56,6 +62,7 @@ const ReviewingRoute = ReviewingRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/ask': typeof AskRoute
+  '/changelog': typeof ChangelogRoute
   '/download': typeof DownloadRoute
   '/keys': typeof KeysRoute
   '/mine': typeof MineRoute
@@ -65,6 +72,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/ask': typeof AskRoute
+  '/changelog': typeof ChangelogRoute
   '/download': typeof DownloadRoute
   '/keys': typeof KeysRoute
   '/mine': typeof MineRoute
@@ -75,6 +83,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/ask': typeof AskRoute
+  '/changelog': typeof ChangelogRoute
   '/download': typeof DownloadRoute
   '/keys': typeof KeysRoute
   '/mine': typeof MineRoute
@@ -84,13 +93,29 @@ export interface FileRoutesById {
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/ask' | '/download' | '/keys' | '/mine' | '/privacy' | '/reviewing'
+    | '/'
+    | '/ask'
+    | '/changelog'
+    | '/download'
+    | '/keys'
+    | '/mine'
+    | '/privacy'
+    | '/reviewing'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/ask' | '/download' | '/keys' | '/mine' | '/privacy' | '/reviewing'
+  to:
+    | '/'
+    | '/ask'
+    | '/changelog'
+    | '/download'
+    | '/keys'
+    | '/mine'
+    | '/privacy'
+    | '/reviewing'
   id:
     | '__root__'
     | '/'
     | '/ask'
+    | '/changelog'
     | '/download'
     | '/keys'
     | '/mine'
@@ -101,6 +126,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AskRoute: typeof AskRoute
+  ChangelogRoute: typeof ChangelogRoute
   DownloadRoute: typeof DownloadRoute
   KeysRoute: typeof KeysRoute
   MineRoute: typeof MineRoute
@@ -122,6 +148,13 @@ declare module '@tanstack/react-router' {
       path: '/ask'
       fullPath: '/ask'
       preLoaderRoute: typeof AskRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/changelog': {
+      id: '/changelog'
+      path: '/changelog'
+      fullPath: '/changelog'
+      preLoaderRoute: typeof ChangelogRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/download': {
@@ -165,6 +198,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AskRoute: AskRoute,
+  ChangelogRoute: ChangelogRoute,
   DownloadRoute: DownloadRoute,
   KeysRoute: KeysRoute,
   MineRoute: MineRoute,

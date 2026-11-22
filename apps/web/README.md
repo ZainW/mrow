@@ -31,12 +31,13 @@ and shows it beside the downloads; nothing is fetched at run time.
 
 | Path | What |
 |---|---|
-| `/` | The pitch, the interactive window, why it (your own agent, memory beside a GitHub tab, tokens in gh, free), a comparison, a line on each page, the download |
+| `/` | The pitch with the latest release beside it, the interactive window, a grid of what it does (each card an illustration and a link to its page), a band on getting reviews out of a tab with the comparison, memory beside a GitHub tab, the latest changelog entry, the download |
 | `/reviewing` | The four lists, a review in three tabs, finishing a review (resolve, pending comments, verdicts), tabs, the two accounts |
 | `/mine` | Your own requests by whose move it is, what's left before a merge, stacks, the inbox and notifications |
 | `/ask` | The chat with Cursor, Claude, opencode or pi, drafted comments, how each agent is kept to reading |
 | `/privacy` | Everything Mrow connects to, and when |
 | `/keys` | Every shortcut, from the app's `COMMANDS` table |
+| `/changelog` | Every release, newest first, from the repo's `CHANGELOG.md`; `/changelog/rss.xml` is the same as a feed |
 | `/download` | The builds, the install command, requirements, updates, building from source |
 
 When the app changes, `apps/desktop/README.md` and the code are the source of truth; `ROADMAP.md`
@@ -47,7 +48,15 @@ lists what isn't built, which the site doesn't mention.
 - `src/routes/__root.tsx`: the document shell, fonts and stylesheet. Each route sets its own title,
   description and canonical address with `seo()` from `src/lib/site.ts`.
 - `src/routes/*.tsx`: one file per page.
-- `src/components/Layout.tsx`: the header, footer and skip link around every page.
+- `src/components/Layout.tsx`: the sticky header (a hairline appears once the page has scrolled), the
+  footer's link columns and the skip link around every page, and the cat mark.
+- `src/components/home.tsx`, `featureArt.tsx`: the home page's sections below the window (feature grid,
+  band, memory, changelog teaser, closing card) and the small HTML/CSS illustrations in the feature
+  cards. Their classes (`.feat-*`, `.art-*`, `.out-*`, `.log-*`, `.cta-*`) sit under `/* Home */` in
+  `styles.css`.
+- `src/lib/changelog.ts`: parses `CHANGELOG.md` (git-cliff output) into releases and builds the RSS
+  feed; pure, so `vite.config.ts` uses it too. `src/lib/releases.ts` imports the file with `?raw`.
+  `vite.config.ts` emits `changelog/rss.xml` into the client build (and serves it in dev).
 - `src/components/Chapter.tsx`: the page heading, the reading column with margin notes and
   figures, and the shortcut keys (drawn with Mac glyphs, relabelled for Linux visitors by
   `src/lib/keys.ts`, the way the app does it).
