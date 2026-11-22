@@ -433,14 +433,6 @@ export function MemoryFigure() {
   )
 }
 
-/** The agents Mrow can run, and whose account each one uses. */
-export const AGENT_ACCOUNTS: [string, string][] = [
-  ['Cursor', 'Your Cursor plan'],
-  ['Claude Code', 'Your Claude plan or API key'],
-  ['opencode', 'Any provider you’ve signed it in to'],
-  ['pi', 'Any provider you’ve signed it in to'],
-]
-
 const COMPARE: { row: string; mrow: string; github: string; hosted: string }[] = [
   { row: 'What it is', mrow: 'An app on your computer', github: 'A tab in your browser', hosted: 'A website in your browser' },
   { row: 'Memory', mrow: 'About 33 MB for everything', github: 'About 157 MB per pull request', hosted: 'A browser tab per review' },

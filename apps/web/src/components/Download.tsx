@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useLocalBuild } from '../lib/platform'
 import { BUILD_STEPS, DOWNLOADS, INSTALL, RELEASES, VERSION, downloadUrl } from '../lib/site'
@@ -9,12 +10,12 @@ import { CopyButton } from './CopyButton'
  * install command on Linux, and a link to every download otherwise. Each takes the same space, so
  * nothing moves when the server's neutral version is swapped after hydration.
  */
-export function GetMrow() {
+export function GetMrow({ secondary, note = true }: { secondary?: ReactNode; note?: boolean }) {
   const local = useLocalBuild()
   const archive = DOWNLOADS.find((d) => d.build === local)
   const mac = DOWNLOADS.find((d) => d.build === 'macos-aarch64')!
   return (
-    <div className="get">
+    <div className={note ? 'get' : 'get no-note'}>
       <div className="get-main">
         {local === 'macos-aarch64' ? (
           <a className="btn btn-big" href={downloadUrl(mac.file)}>
@@ -30,30 +31,33 @@ export function GetMrow() {
             <DownloadIcon /> Download
           </Link>
         )}
+        {secondary}
       </div>
-      <p className="get-note">
-        {local === 'macos-aarch64' ? (
-          <>
-            Version {VERSION}, for Apple silicon on macOS 15 or later.{' '}
-            <Link className="text-link inline" to="/download">
-              Other downloads
-            </Link>
-          </>
-        ) : local && archive ? (
-          <>
-            Paste it in a terminal to install version {VERSION} for Linux {archive.arch}, or get{' '}
-            <a className="text-link inline" href={downloadUrl(archive.file)}>
-              the archive
-            </a>
-            .{' '}
-            <Link className="text-link inline" to="/download">
-              All downloads
-            </Link>
-          </>
-        ) : (
-          <>Version {VERSION}, free, for macOS 15 or later on Apple silicon and for Linux on x86_64 or arm64.</>
-        )}
-      </p>
+      {note && (
+        <p className="get-note">
+          {local === 'macos-aarch64' ? (
+            <>
+              Version {VERSION}, for Apple silicon on macOS 15 or later.{' '}
+              <Link className="text-link inline" to="/download">
+                Other downloads
+              </Link>
+            </>
+          ) : local && archive ? (
+            <>
+              Paste it in a terminal to install version {VERSION} for Linux {archive.arch}, or get{' '}
+              <a className="text-link inline" href={downloadUrl(archive.file)}>
+                the archive
+              </a>
+              .{' '}
+              <Link className="text-link inline" to="/download">
+                All downloads
+              </Link>
+            </>
+          ) : (
+            <>Version {VERSION}, free, for macOS 15 or later on Apple silicon and for Linux on x86_64 or arm64.</>
+          )}
+        </p>
+      )}
     </div>
   )
 }

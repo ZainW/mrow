@@ -21,12 +21,20 @@ export const Route = createRootRoute({
       { rel: 'preload', href: '/fonts/MrowReading-Bold.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
       { rel: 'preload', href: '/fonts/GeistMono-Variable.woff2', as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
       { rel: 'stylesheet', href: appCss },
+      { rel: 'alternate', type: 'application/rss+xml', title: 'Mrow changelog', href: '/changelog/rss.xml' },
       { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
     ],
   }),
   component: RootComponent,
   notFoundComponent: NotFound,
 })
+
+/**
+ * The home page's intro plays once per session. This runs before the first paint: on a later
+ * load it marks the page as seen, and on the first it marks it once the intro has finished, so
+ * coming back to the home page within the session doesn't replay it.
+ */
+const INTRO = `try{var d=document.documentElement;if(sessionStorage.getItem('mrow-intro'))d.dataset.intro='seen';else{sessionStorage.setItem('mrow-intro','1');setTimeout(function(){d.dataset.intro='seen'},1500)}}catch(e){}`
 
 function RootComponent() {
   return (
@@ -38,8 +46,10 @@ function RootComponent() {
 
 function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
+    // The intro script adds data-intro to <html> before React hydrates.
+    <html lang="en" suppressHydrationWarning>
       <head>
+        <script dangerouslySetInnerHTML={{ __html: INTRO }} />
         <HeadContent />
       </head>
       <body>
