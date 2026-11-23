@@ -148,12 +148,14 @@ pub fn status(item: &MergeRequest, below: Option<&MergeRequest>) -> Status {
         }
         return is(Standing::NeedsYou, step);
     }
-    let mergeable = item.merge_status.as_deref() == Some("mergeable");
-    // Open threads are worth knowing about, but they only hold the merge when the forge says so.
-    if open_threads > 0 && !mergeable {
-        return is(Standing::NeedsYou, threads(open_threads));
-    }
     let approvals = item.approved_by.len();
+    // Open threads never hold the merge: reviews leave threads of thumbs-ups nobody resolves. An
+    // approval is enough while the forge is still working its status out, or only names threads.
+    let mergeable = match item.merge_status.as_deref() {
+        Some("mergeable") => true,
+        None | Some("discussions_not_resolved" | "checking" | "unchecked" | "approvals_syncing") => approvals > 0 && !running,
+        _ => false,
+    };
     if mergeable && pending.is_empty() {
         // With threads open they take the approval count's place, so the line still fits the list.
         let approved = match (open_threads, approvals) {
@@ -345,7 +347,7 @@ pub fn explain(item: &MergeRequest, status: &Status, below: Option<&MergeRequest
             _ if item.pipeline == Some(PipelineStatus::Failed) => "The pipeline failed on the latest push.".into(),
             _ => match item.reviewers.iter().find(|r| r.state == ReviewState::RequestedChanges) {
                 Some(asker) => format!("{} asked for changes. Push a fix or reply, then ask again.", asker.person.name),
-                None => format!("Reviewers left threads that are still open, and {} won't merge it until they're resolved.", item.kind().name()),
+                None => "Something on the request needs you before it can merge.".into(),
             },
         },
         Standing::Waiting | Standing::Quiet if item.auto_merge => format!("{} merges it by itself once everything passes.", item.kind().name()),
