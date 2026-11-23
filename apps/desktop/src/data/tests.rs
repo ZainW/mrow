@@ -348,8 +348,15 @@ mod mine {
         let st = status(&chatty, None);
         assert_eq!((st.standing, st.step.as_str()), (Standing::Ready, "1 thread open · ready to merge"));
         assert_eq!(crate::data::mine::walk_step(Some(&chatty), "main", &[&chatty]), crate::data::mine::WalkStep::Merge);
-        chatty.merge_status = Some("discussions_not_resolved".into());
-        assert_eq!((status(&chatty, None).standing, status(&chatty, None).step.as_str()), (Standing::NeedsYou, "1 thread open"));
+        // Not even when the forge names them, or hasn't worked its status out yet: an approval is enough.
+        for forge_says in [Some("discussions_not_resolved"), Some("checking"), None] {
+            chatty.merge_status = forge_says.map(String::from);
+            let st = status(&chatty, None);
+            assert_eq!((st.standing, st.step.as_str()), (Standing::Ready, "1 thread open · ready to merge"), "{forge_says:?}");
+        }
+        chatty.approved_by.clear();
+        chatty.reviewers.clear();
+        assert_eq!(status(&chatty, None).standing, Standing::Waiting, "without an approval it waits");
 
         let mut changes = asked.clone();
         changes.reviewers[1].state = ReviewState::RequestedChanges;

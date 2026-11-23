@@ -474,16 +474,6 @@ pub fn next_step(s: &App, p: &Pal, item: &MergeRequest) -> El {
                 actions.push(
                     action_button(p, "threads", Some(&I::BUBBLE_TEXT), "Go to the Threads", true, true).on_press_tx(crate::ui::detail::jump_to_open_thread),
                 );
-                // Its page is where someone allowed to can still push it through.
-                actions.push(
-                    action_button(p, "open-forge-merge", Some(&I::ARROW_UP_RIGHT), &format!("Open in {}", item.kind().name()), false, true)
-                        .on_press_tx(crate::ui::actions::open_in_browser),
-                );
-                // The forge holds the merge until they're resolved: Merge stays in sight, greyed, last.
-                actions.push(
-                    action_button(p, "merge-held", Some(&I::MERGE), "Merge", false, false)
-                        .help(format!("{} won't merge it until every thread is resolved", item.kind().name())),
-                );
             }
             Standing::Waiting | Standing::Quiet if item.auto_merge => {
                 actions.push(act(action_button(p, "auto-merge-off", None, "Turn Auto-Merge Off", false, idle), |s, item| s.store.set_auto_merge(item, false)));
@@ -601,15 +591,9 @@ pub fn checklist(s: &App, p: &Pal, item: &MergeRequest) -> El {
         lines.push((check, "Pipeline", detail, Some(Go::Pipeline(pipeline_url(item)))));
     }
     if let Some(open) = item.unresolved_threads {
-        // Open threads hold the merge only when the forge won't merge without them resolved.
-        let holds = item.merge_status.as_deref() != Some("mergeable");
+        // Open threads are worth a look, but they never hold the merge.
         lines.push(if open > 0 {
-            let detail = if item.merge_status.as_deref() == Some("discussions_not_resolved") {
-                format!("{open} open · must be resolved to merge")
-            } else {
-                format!("{open} open")
-            };
-            (if holds { Check::Bad } else { Check::Wait }, "Threads", detail, Some(Go::OpenThread))
+            (Check::Wait, "Threads", format!("{open} open"), Some(Go::OpenThread))
         } else {
             (Check::Ok, "Threads", "none open".into(), None)
         });
