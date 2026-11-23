@@ -1,6 +1,26 @@
 # Changelog
 
 What changed in each release of the Mrow app.
+## 0.3.0 (2026-11-23)
+
+### New
+
+- Open threads don't block merging, and actions show as done once the forge confirms them (#20)
+- Steer the Ask agent mid-answer (#21)
+- Command palette, review keys, file folders, snoozing, and opening filled from disk (#23)
+- Requests I asked changes on wait in a fold until the author pushes (#28)
+
+### Fixed
+
+- Rune update, and macOS no longer aborts on an accessibility query about itself (#19)
+- The inbox count sits beside the bell instead of over it (#24)
+- Claude runs on Claude Code itself, with its own model list (#25)
+- Comments drafted in Ask post on their lines instead of the whole request (#27)
+
+### Faster
+
+- Faster releases: notarize the macOS image once, and quicker Linux packages (#18)
+
 ## 0.2.0 (2026-11-16)
 
 ### New
