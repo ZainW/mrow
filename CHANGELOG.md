@@ -1,6 +1,12 @@
 # Changelog
 
 What changed in each release of the Mrow app.
+## 0.3.1 (2026-11-23)
+
+### Fixed
+
+- Open threads no longer hold the merge of an approved request (#31)
+
 ## 0.3.0 (2026-11-23)
 
 ### New
